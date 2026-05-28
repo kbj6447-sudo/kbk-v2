@@ -1,0 +1,12 @@
+{
+  "name": "kbk-v2",
+  "version": "2.0.0",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "private": true,
+  "type": "module"
+}
