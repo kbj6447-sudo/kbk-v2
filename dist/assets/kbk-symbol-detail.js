@@ -167,6 +167,110 @@ function localVwapHold(bars) {
   return { vwapHoldMinutes, vwapHoldScore: Math.round(Math.max(0, Math.min(100, vwapHoldScore))) };
 }
 
+function localCompressionScore(bars) {
+  const sample = bars.slice(-20)
+    .map((bar) => ({
+      high: positiveNum(bar.high ?? bar.h ?? bar.close),
+      low: positiveNum(bar.low ?? bar.l ?? bar.close),
+      close: positiveNum(bar.close ?? bar.c ?? bar.price),
+      volume: positiveNum(bar.volume ?? bar.v),
+    }))
+    .filter((bar) => bar.high !== null && bar.low !== null && bar.close !== null);
+  if (sample.length < 8) return 50;
+  const lastClose = sample.at(-1).close;
+  const rangePct = ((Math.max(...sample.map((bar) => bar.high)) - Math.min(...sample.map((bar) => bar.low))) / Math.max(lastClose, 0.0001)) * 100;
+  const recent = sample.slice(-8);
+  const prior = sample.slice(0, Math.max(sample.length - 8, 1));
+  const avgRange = (items) => {
+    const ranges = items.map((bar) => ((bar.high - bar.low) / Math.max(bar.close, 0.0001)) * 100).filter(Number.isFinite);
+    return ranges.length ? ranges.reduce((sum, value) => sum + value, 0) / ranges.length : null;
+  };
+  const recentRange = avgRange(recent);
+  const priorRange = avgRange(prior);
+  const rangeContracting = recentRange !== null && priorRange !== null && recentRange <= priorRange * 0.82;
+  const lowsDefended = Math.min(...recent.map((bar) => bar.low)) >= Math.min(...sample.slice(0, -4).map((bar) => bar.low)) * 0.995;
+  const volumeRebuilding = (() => {
+    const volumes = sample.map((bar) => bar.volume).filter((value) => value !== null);
+    const lastVol = volumes.slice(-3);
+    const midVol = volumes.slice(-12, -3);
+    const avg = (values) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+    const a = avg(lastVol);
+    const b = avg(midVol);
+    return a !== null && b !== null ? a >= b * 1.08 : false;
+  })();
+  const base = rangePct <= 3 ? 88 : rangePct <= 5 ? 78 : rangePct <= 8 ? 64 : rangePct <= 12 ? 52 : 38;
+  const score = base + (rangeContracting ? 12 : -4) + (lowsDefended ? 10 : -12) + (volumeRebuilding ? 7 : 0) + (localHigherLowScore(sample) - 50) * 0.10;
+  return Math.round(Math.max(0, Math.min(100, score)));
+}
+
+function localVwapReclaimScore(bars, vwapHoldMinutes = null) {
+  const sample = bars.slice(-30);
+  if (sample.length < 8) return 50;
+  let pv = 0;
+  let totalVolume = 0;
+  const evaluated = [];
+  for (const bar of bars) {
+    const high = positiveNum(bar.high ?? bar.h ?? bar.close);
+    const low = positiveNum(bar.low ?? bar.l ?? bar.close);
+    const close = positiveNum(bar.close ?? bar.c ?? bar.price);
+    const volume = positiveNum(bar.volume ?? bar.v);
+    if (high === null || low === null || close === null || volume === null) continue;
+    pv += ((high + low + close) / 3) * volume;
+    totalVolume += volume;
+    if (!sample.includes(bar) || totalVolume <= 0) continue;
+    const vwap = pv / totalVolume;
+    evaluated.push({ close, volume, vwap, above: close >= vwap });
+  }
+  if (evaluated.length < 8) return 50;
+  let reclaimIndex = -1;
+  for (let i = 1; i < evaluated.length; i += 1) {
+    if (!evaluated[i - 1].above && evaluated[i].above) reclaimIndex = i;
+  }
+  if (reclaimIndex < 0) return evaluated.at(-1)?.above ? 58 : 32;
+  const after = evaluated.slice(reclaimIndex);
+  const before = evaluated.slice(Math.max(0, reclaimIndex - 5), reclaimIndex);
+  const avg = (values) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+  const hold = num(vwapHoldMinutes) ?? after.filter((bar) => bar.above).length;
+  const reclaimVol = avg(after.slice(0, 3).map((bar) => bar.volume));
+  const priorVol = avg(before.map((bar) => bar.volume));
+  const volumeExpanded = reclaimVol !== null && priorVol !== null && reclaimVol >= priorVol * 1.15;
+  const last = evaluated.at(-1);
+  const score = 40 + Math.min(hold, 10) * 5 + (volumeExpanded ? 16 : 0) + (last?.close >= last?.vwap * 0.996 ? 12 : -14) + (last?.above ? 8 : 0);
+  return Math.round(Math.max(0, Math.min(100, score)));
+}
+
+function localReSurgeSetupScore(bars, higherLowScore, vwapHoldScore, vwapReclaimScore) {
+  const sample = bars.slice(-40)
+    .map((bar) => ({
+      high: positiveNum(bar.high ?? bar.h ?? bar.close),
+      low: positiveNum(bar.low ?? bar.l ?? bar.close),
+      close: positiveNum(bar.close ?? bar.c ?? bar.price),
+      volume: positiveNum(bar.volume ?? bar.v),
+    }))
+    .filter((bar) => bar.high !== null && bar.low !== null && bar.close !== null);
+  if (sample.length < 15) return 50;
+  const last = sample.at(-1);
+  const firstHalf = sample.slice(0, -10);
+  const recent = sample.slice(-14);
+  const priorLow = Math.min(...firstHalf.map((bar) => bar.low));
+  const impulseHigh = Math.max(...firstHalf.map((bar) => bar.high));
+  const impulseMovePct = priorLow > 0 ? ((impulseHigh - priorLow) / priorLow) * 100 : null;
+  const recentLow = Math.min(...recent.map((bar) => bar.low));
+  const recentHigh = Math.max(...recent.map((bar) => bar.high));
+  const pullbackPct = impulseHigh > 0 ? ((impulseHigh - recentLow) / impulseHigh) * 100 : null;
+  const sidewaysRangePct = ((recentHigh - recentLow) / Math.max(last.close, 0.0001)) * 100;
+  let score = 28;
+  if (impulseMovePct !== null && impulseMovePct >= 18) score += 18;
+  else if (impulseMovePct !== null && impulseMovePct >= 9) score += 10;
+  if (pullbackPct !== null && pullbackPct <= 18 && last.close >= impulseHigh * 0.72) score += 16;
+  if (sidewaysRangePct <= 8) score += 12;
+  else if (sidewaysRangePct <= 13) score += 6;
+  if ((num(higherLowScore) ?? 50) >= 50) score += 10;
+  if ((num(vwapHoldScore) ?? 50) >= 60 || (num(vwapReclaimScore) ?? 50) >= 65) score += 10;
+  if (recentHigh > 0 && last.close >= recentHigh * 0.985) score += 12;
+  return Math.round(Math.max(0, Math.min(100, score)));
+}
+
 function higherLowLabel(score) {
   const value = num(score);
   if (value === null) return "데이터 부족";
@@ -179,6 +283,15 @@ function higherLowLabel(score) {
 function vwapHoldText(minutes) {
   const value = num(minutes);
   return value === null ? "데이터 부족" : `${Math.round(value)}분`;
+}
+
+function strengthLabel(score) {
+  const value = num(score);
+  if (value === null) return "데이터 부족";
+  if (value >= 90) return "강함";
+  if (value >= 70) return "양호";
+  if (value >= 40) return "관찰";
+  return "약함";
 }
 
 function cardScore(card) {
@@ -202,6 +315,9 @@ function analyzeSignal(quote, bars) {
   const higherLowScore = num(quote?.higherLowScore) ?? localHigherLowScore(bars);
   const vwapHoldScore = num(quote?.vwapHoldScore) ?? localVwap.vwapHoldScore;
   const vwapHoldMinutes = num(quote?.vwapHoldMinutes) ?? localVwap.vwapHoldMinutes;
+  const compressionScore = num(quote?.compressionScore) ?? localCompressionScore(bars);
+  const vwapReclaimScore = num(quote?.vwapReclaimScore) ?? localVwapReclaimScore(bars, vwapHoldMinutes);
+  const reSurgeSetupScore = num(quote?.reSurgeSetupScore) ?? localReSurgeSetupScore(bars, higherLowScore, vwapHoldScore, vwapReclaimScore);
 
   let action = "관찰 후 눌림 대기";
   let tone = "neutral";
@@ -250,6 +366,9 @@ function analyzeSignal(quote, bars) {
     higherLowLabel: higherLowLabel(higherLowScore),
     vwapHoldScore,
     vwapHoldMinutes,
+    compressionScore,
+    vwapReclaimScore,
+    reSurgeSetupScore,
     support,
     resistance,
     stopLine,
@@ -345,6 +464,7 @@ function detailHtml(quote, bars, loading = false) {
       <span>${esc(signal.vwap)}</span>
       <span>Higher Lows: ${esc(signal.higherLowLabel)}</span>
       <span>VWAP 유지: ${esc(vwapHoldText(signal.vwapHoldMinutes))}</span>
+      <span>재상승 준비도: ${Math.round(signal.reSurgeSetupScore)}점</span>
       ${loading ? `<span class="kbk-live-chip">실시간 갱신 중</span>` : ""}
     </div>
 
@@ -357,6 +477,9 @@ function detailHtml(quote, bars, loading = false) {
         <div><span>현재 위치</span><strong>${esc(signal.position)}</strong><small>박스권 내 위치</small></div>
         <div><span>Higher Lows</span><strong>${esc(signal.higherLowLabel)}</strong><small>${Math.round(signal.higherLowScore)}점</small></div>
         <div><span>VWAP 유지</span><strong>${esc(vwapHoldText(signal.vwapHoldMinutes))}</strong><small>${Math.round(signal.vwapHoldScore)}점</small></div>
+        <div><span>재상승 준비도</span><strong>${Math.round(signal.reSurgeSetupScore)}점</strong><small>${esc(strengthLabel(signal.reSurgeSetupScore))}</small></div>
+        <div><span>박스 압축률</span><strong>${Math.round(signal.compressionScore)}점</strong><small>돌파 전 압축</small></div>
+        <div><span>VWAP 재탈환</span><strong>${esc(strengthLabel(signal.vwapReclaimScore))}</strong><small>${Math.round(signal.vwapReclaimScore)}점</small></div>
         <div><span>진입 확인선</span><strong>${levelText(signal.entryLine, "계산중")}</strong><small>돌파/재지지 확인</small></div>
         <div><span>손절 기준선</span><strong>${levelText(signal.stopLine, "데이터 부족")}</strong><small>지지 이탈 시 주의</small></div>
         <div><span>1차 익절 참고</span><strong>${levelText(signal.profitLine, "계산중")}</strong><small>단기 +3% 기준</small></div>

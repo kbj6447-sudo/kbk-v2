@@ -160,18 +160,131 @@ function calculateVwapHold(bars) {
 function calculateCompressionScore(bars) {
   const sample = bars.slice(-20);
   if (sample.length < 8) return 50;
-  const highs = sample.map((bar) => positive(bar.high)).filter((value) => value !== null);
-  const lows = sample.map((bar) => positive(bar.low)).filter((value) => value !== null);
-  const lastClose = positive(sample.at(-1)?.close);
+  const clean = sample.map((bar) => ({
+    high: positive(bar.high),
+    low: positive(bar.low),
+    close: positive(bar.close),
+    volume: positive(bar.volume),
+  })).filter((bar) => bar.high !== null && bar.low !== null && bar.close !== null);
+  const highs = clean.map((bar) => bar.high);
+  const lows = clean.map((bar) => bar.low);
+  const lastClose = positive(clean.at(-1)?.close);
   if (!highs.length || !lows.length || lastClose === null) return 50;
 
   const rangePct = ((Math.max(...highs) - Math.min(...lows)) / lastClose) * 100;
-  const base = rangePct <= 3 ? 90
+  const recent = clean.slice(-8);
+  const prior = clean.slice(0, Math.max(clean.length - 8, 1));
+  const avgRange = (items) => average(items.map((bar) => ((bar.high - bar.low) / Math.max(bar.close, 0.0001)) * 100)) ?? null;
+  const recentRange = avgRange(recent);
+  const priorRange = avgRange(prior);
+  const rangeContracting = recentRange !== null && priorRange !== null ? recentRange <= priorRange * 0.82 : false;
+  const recentHighRange = recent.length >= 4 ? ((Math.max(...recent.map((bar) => bar.high)) - Math.min(...recent.map((bar) => bar.high))) / lastClose) * 100 : null;
+  const lowsDefended = Math.min(...recent.map((bar) => bar.low)) >= Math.min(...clean.slice(0, -4).map((bar) => bar.low)) * 0.995;
+  const volumes = clean.map((bar) => bar.volume).filter((value) => value !== null);
+  const recentVol = average(volumes.slice(-3));
+  const middleVol = average(volumes.slice(-12, -3));
+  const volumeRebuilding = recentVol !== null && middleVol !== null ? recentVol >= middleVol * 1.08 : false;
+  const highTightnessBonus = recentHighRange !== null && recentHighRange <= 2.5 ? 10 : recentHighRange !== null && recentHighRange <= 4 ? 5 : 0;
+  const base = rangePct <= 3 ? 88
     : rangePct <= 5 ? 78
       : rangePct <= 8 ? 64
         : rangePct <= 12 ? 52
           : 38;
-  return Math.round(clamp(base + (calculateHigherLowScore(sample) - 50) * 0.12));
+  const score = base
+    + (rangeContracting ? 12 : -4)
+    + (lowsDefended ? 10 : -12)
+    + (volumeRebuilding ? 7 : 0)
+    + highTightnessBonus
+    + (calculateHigherLowScore(sample) - 50) * 0.10;
+  return Math.round(clamp(score));
+}
+
+function vwapEvaluations(bars, lookback = 30) {
+  const sample = bars.slice(-lookback);
+  let pv = 0;
+  let totalVolume = 0;
+  const evaluated = [];
+  for (const bar of bars) {
+    const high = positive(bar.high);
+    const low = positive(bar.low);
+    const close = positive(bar.close);
+    const volume = positive(bar.volume);
+    if (high === null || low === null || close === null || volume === null) continue;
+    pv += ((high + low + close) / 3) * volume;
+    totalVolume += volume;
+    if (!sample.includes(bar) || totalVolume <= 0) continue;
+    evaluated.push({ close, volume, vwap: pv / totalVolume, above: close >= pv / totalVolume });
+  }
+  return evaluated;
+}
+
+function calculateVwapReclaimScore(bars, vwapHoldMinutes = null) {
+  const evaluated = vwapEvaluations(bars, 30);
+  if (evaluated.length < 8) return 50;
+  let reclaimIndex = -1;
+  for (let index = 1; index < evaluated.length; index += 1) {
+    if (!evaluated[index - 1].above && evaluated[index].above) reclaimIndex = index;
+  }
+  if (reclaimIndex < 0) return evaluated.at(-1)?.above ? 58 : 32;
+
+  const after = evaluated.slice(reclaimIndex);
+  const before = evaluated.slice(Math.max(0, reclaimIndex - 5), reclaimIndex);
+  const holdMinutes = num(vwapHoldMinutes) ?? after.filter((bar) => bar.above).length;
+  const reclaimVolume = average(after.slice(0, 3).map((bar) => bar.volume));
+  const priorVolume = average(before.map((bar) => bar.volume));
+  const volumeExpanded = reclaimVolume !== null && priorVolume !== null ? reclaimVolume >= priorVolume * 1.15 : false;
+  const last = evaluated.at(-1);
+  const didNotLoseVwap = last && last.close >= last.vwap * 0.996;
+  const score = 40
+    + Math.min(holdMinutes, 10) * 5
+    + (volumeExpanded ? 16 : 0)
+    + (didNotLoseVwap ? 12 : -14)
+    + (last?.above ? 8 : 0);
+  return Math.round(clamp(score));
+}
+
+function calculateReSurgeSetupScore(bars, signals = {}) {
+  const sample = bars.slice(-40)
+    .map((bar) => ({
+      high: positive(bar.high),
+      low: positive(bar.low),
+      close: positive(bar.close),
+      volume: positive(bar.volume),
+    }))
+    .filter((bar) => bar.high !== null && bar.low !== null && bar.close !== null);
+  if (sample.length < 15) return 50;
+
+  const last = sample.at(-1);
+  const firstHalf = sample.slice(0, -10);
+  const recent = sample.slice(-14);
+  const priorLow = Math.min(...firstHalf.map((bar) => bar.low));
+  const impulseHigh = Math.max(...firstHalf.map((bar) => bar.high));
+  const impulseMovePct = priorLow > 0 ? ((impulseHigh - priorLow) / priorLow) * 100 : null;
+  const recentLow = Math.min(...recent.map((bar) => bar.low));
+  const recentHigh = Math.max(...recent.map((bar) => bar.high));
+  const pullbackPct = impulseHigh > 0 ? ((impulseHigh - recentLow) / impulseHigh) * 100 : null;
+  const closeNearBreakout = recentHigh > 0 ? last.close >= recentHigh * 0.985 : false;
+  const didNotCollapse = pullbackPct !== null && pullbackPct <= 18 && last.close >= impulseHigh * 0.72;
+  const sidewaysRangePct = ((recentHigh - recentLow) / Math.max(last.close, 0.0001)) * 100;
+  const notDeadVolume = (() => {
+    const recentVol = average(recent.slice(-5).map((bar) => bar.volume));
+    const priorVol = average(sample.slice(-25, -10).map((bar) => bar.volume));
+    return recentVol !== null && priorVol !== null ? recentVol >= priorVol * 0.35 : true;
+  })();
+  const higherLow = (num(signals.higherLowScore) ?? 50) >= 50;
+  const vwapHealthy = (num(signals.vwapHoldScore) ?? 50) >= 60 || (num(signals.vwapReclaimScore) ?? 50) >= 65;
+
+  let score = 28;
+  if (impulseMovePct !== null && impulseMovePct >= 18) score += 18;
+  else if (impulseMovePct !== null && impulseMovePct >= 9) score += 10;
+  if (didNotCollapse) score += 16;
+  if (sidewaysRangePct <= 8) score += 12;
+  else if (sidewaysRangePct <= 13) score += 6;
+  if (notDeadVolume) score += 10;
+  if (higherLow) score += 10;
+  if (vwapHealthy) score += 10;
+  if (closeNearBreakout) score += 12;
+  return Math.round(clamp(score));
 }
 
 function calculateCommonSignals(bars) {
@@ -184,27 +297,42 @@ function calculateCommonSignals(bars) {
       vwapHoldMinutes: null,
       vwapHoldScore: 50,
       compressionScore: 50,
+      vwapReclaimScore: 50,
+      reSurgeSetupScore: 50,
       commonSignalStatus: "데이터 부족",
     };
   }
 
   const volumeAcceleration = calculateVolumeAcceleration(bars);
+  const higherLowScore = calculateHigherLowScore(bars);
+  const vwapHold = calculateVwapHold(bars);
+  const compressionScore = calculateCompressionScore(bars);
+  const vwapReclaimScore = calculateVwapReclaimScore(bars, vwapHold.vwapHoldMinutes);
+  const reSurgeSetupScore = calculateReSurgeSetupScore(bars, {
+    higherLowScore,
+    vwapHoldScore: vwapHold.vwapHoldScore,
+    vwapReclaimScore,
+  });
   return {
     ...volumeAcceleration,
-    higherLowScore: calculateHigherLowScore(bars),
-    ...calculateVwapHold(bars),
-    compressionScore: calculateCompressionScore(bars),
+    higherLowScore,
+    ...vwapHold,
+    compressionScore,
+    vwapReclaimScore,
+    reSurgeSetupScore,
     commonSignalStatus: "ok",
   };
 }
 
 function commonSignalBoost(signals = {}) {
   const score =
-    (num(signals.volumeAccelerationScore) ?? 50) * 0.30
-    + (num(signals.higherLowScore) ?? 50) * 0.25
-    + (num(signals.vwapHoldScore) ?? 50) * 0.25
-    + (num(signals.compressionScore) ?? 50) * 0.20;
-  return Math.round(clamp(Math.max(0, (score - 50) * 0.16), 0, 8));
+    (num(signals.volumeAccelerationScore) ?? 50) * 0.18
+    + (num(signals.higherLowScore) ?? 50) * 0.14
+    + (num(signals.vwapHoldScore) ?? 50) * 0.14
+    + (num(signals.compressionScore) ?? 50) * 0.18
+    + (num(signals.reSurgeSetupScore) ?? 50) * 0.22
+    + (num(signals.vwapReclaimScore) ?? 50) * 0.14;
+  return Math.round(clamp(Math.max(0, (score - 50) * 0.20), 0, 10));
 }
 
 function pickDisplayPrice({ marketState, regularPrice, preMarketPrice, postMarketPrice, latestClose }) {
