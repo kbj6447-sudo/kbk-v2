@@ -17,6 +17,19 @@ function money(n) {
   return value >= 10 ? `$${value.toFixed(2)}` : `$${value.toFixed(4)}`;
 }
 
+function wonMoney(n, rate = currentUsdKrw()) {
+  const value = Number(n);
+  if (!Number.isFinite(value) || !Number.isFinite(rate) || rate <= 0) return "-";
+  return `${Math.round(value * rate).toLocaleString("ko-KR")}원`;
+}
+
+function pairedMoney(n, rate = currentUsdKrw()) {
+  const usd = money(n);
+  const krw = wonMoney(n, rate);
+  if (usd === "-" || krw === "-") return usd;
+  return `${krw} (${usd})`;
+}
+
 function pct(n) {
   const value = Number(n);
   if (!Number.isFinite(value)) return "-";
@@ -30,6 +43,14 @@ function compact(n) {
   if (Math.abs(value) >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (Math.abs(value) >= 1_000) return `${Math.round(value / 1_000)}K`;
   return String(Math.round(value));
+}
+
+function livePriceOf(item) {
+  return toNumber(item?.normalizedLivePriceUsd)
+    ?? toNumber(item?.price)
+    ?? toNumber(item?.preMarketPrice)
+    ?? toNumber(item?.postMarketPrice)
+    ?? toNumber(item?.regularMarketPrice);
 }
 
 function rvolValue(item) {
@@ -262,7 +283,7 @@ async function renderTopPicks() {
     const items = (payload?.data?.items || [])
       .filter((item) => item?.symbol && item.included !== false)
       .map((item) => {
-        const price = Number(item.price ?? item.preMarketPrice ?? 0);
+        const price = livePriceOf(item) ?? 0;
         const change = Number(item.changePercent ?? item.preMarketChangePercent ?? 0);
         const volume = Number(item.volume ?? item.preMarketVolume ?? 0);
         const surge = Math.round(Number(item.finalProbabilityScore ?? item.scannerScore ?? 0));
@@ -273,7 +294,7 @@ async function renderTopPicks() {
       })
       .filter((pick) => pick.finalScore >= 62)
       .sort((a, b) => b.finalScore - a.finalScore)
-      .slice(0, 10);
+      .slice(0, 20);
     panel.innerHTML = `
       <section class="accumulation-hero">
         <div>
@@ -293,7 +314,7 @@ async function renderTopPicks() {
             <div class="kbk-pro-top-score">${finalScore}</div>
           </div>
           <div class="price-row">
-            <strong>${money(price)}</strong>
+            <strong>${pairedMoney(price)}</strong>
             <span>${pct(change)}</span>
             <span>거래량 ${compact(volume)}</span>
           </div>
@@ -404,7 +425,7 @@ function selectedSymbolFromMonitor() {
 function currentUsdKrw() {
   const match = document.body.textContent.match(/USD\/KRW\s*([\d,]+)/);
   const parsed = match ? Number(match[1].replace(/,/g, "")) : null;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1500;
 }
 
 function krwMoneyFromUsd(usd) {
@@ -462,7 +483,7 @@ function pctFrom(a, b) {
 }
 
 function latestUsablePrice(quote, bars) {
-  const quotePrice = toNumber(quote?.price ?? quote?.preMarketPrice);
+  const quotePrice = livePriceOf(quote);
   const barPrice = bars.at(-1)?.close ?? null;
   if (barPrice !== null && quotePrice !== null) {
     const drift = Math.abs((barPrice - quotePrice) / quotePrice) * 100;
