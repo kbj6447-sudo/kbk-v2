@@ -37,6 +37,19 @@ function patchSurgeCopy() {
   }
 }
 
+function formatUsd(usd) {
+  const price = toNumber(usd);
+  if (price === null) return "-";
+  return `$${price.toFixed(price >= 10 ? 2 : 4)}`;
+}
+
+function formatPricePair(usd, usdKrw) {
+  const krw = formatKrw(usd, usdKrw);
+  const usdText = formatUsd(usd);
+  if (krw === "-" || usdText === "-") return "-";
+  return `${krw} (${usdText})`;
+}
+
 function formatKrw(usd, usdKrw) {
   const price = toNumber(usd);
   const rate = toNumber(usdKrw) || 1500;
@@ -106,7 +119,7 @@ function updateCard(card, quote, livePrice, rate) {
   const cells = Array.from(row.querySelectorAll("span"));
   const strong = row.querySelector("strong");
 
-  if (strong) strong.textContent = formatKrw(price, rate);
+  if (strong) strong.textContent = formatPricePair(price, rate);
   if (cells[0]) cells[0].textContent = pct(change);
   if (cells[1]) cells[1].textContent = rvol === null ? "상대거래량 산출중" : `상대거래량 ${rvol.toFixed(1)}배`;
   if (cells[2]) cells[2].textContent = `거래량 ${compact(volume)}`;

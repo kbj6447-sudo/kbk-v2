@@ -17,6 +17,19 @@ function money(n) {
   return value >= 10 ? `$${value.toFixed(2)}` : `$${value.toFixed(4)}`;
 }
 
+function wonMoney(n, rate = currentUsdKrw()) {
+  const value = Number(n);
+  if (!Number.isFinite(value) || !Number.isFinite(rate) || rate <= 0) return "-";
+  return `${Math.round(value * rate).toLocaleString("ko-KR")}원`;
+}
+
+function pairedMoney(n, rate = currentUsdKrw()) {
+  const usd = money(n);
+  const krw = wonMoney(n, rate);
+  if (usd === "-" || krw === "-") return usd;
+  return `${krw} (${usd})`;
+}
+
 function pct(n) {
   const value = Number(n);
   if (!Number.isFinite(value)) return "-";
@@ -301,7 +314,7 @@ async function renderTopPicks() {
             <div class="kbk-pro-top-score">${finalScore}</div>
           </div>
           <div class="price-row">
-            <strong>${money(price)}</strong>
+            <strong>${pairedMoney(price)}</strong>
             <span>${pct(change)}</span>
             <span>거래량 ${compact(volume)}</span>
           </div>
@@ -412,7 +425,7 @@ function selectedSymbolFromMonitor() {
 function currentUsdKrw() {
   const match = document.body.textContent.match(/USD\/KRW\s*([\d,]+)/);
   const parsed = match ? Number(match[1].replace(/,/g, "")) : null;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1500;
 }
 
 function krwMoneyFromUsd(usd) {

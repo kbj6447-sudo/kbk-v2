@@ -21,6 +21,12 @@
       ?? 0;
   }
 
+  function fmtUsd(usd) {
+    const price = num(usd);
+    if (price === null) return '-';
+    return `$${price.toFixed(price >= 10 ? 2 : 4)}`;
+  }
+
   // ---- 클로드픽 점수 계산 알고리즘 ----
   function calcClaudeScore(item) {
     const rvol = item.relativeVolume ?? item.volumeRatio ?? 0;
@@ -124,7 +130,9 @@
       const rvol = item.rvol;
       const changePct = item.changePct;
       const sig = getSignalLabel(item.claudeScore, rvol, Math.abs(changePct), item.stage);
-      const priceKrw = fmtKrw(pickLivePrice(item));
+      const livePrice = pickLivePrice(item);
+      const priceKrw = fmtKrw(livePrice);
+      const priceText = `${priceKrw}원 (${fmtUsd(livePrice)})`;
       const rvolDisplay = rvol >= 1 ? rvol.toFixed(1) + 'x' : '-';
       const changeColor = changePct >= 0 ? '#16a34a' : '#dc2626';
       const rankEmoji = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '';
@@ -169,7 +177,7 @@
             </div>
             <div style="background:#f8fafc; border-radius:8px; padding:8px; text-align:center">
               <div style="font-size:10px; color:#6b7280; margin-bottom:2px">현재가</div>
-              <div style="font-weight:700; font-size:13px">₩${priceKrw}</div>
+              <div style="font-weight:700; font-size:13px">${priceText}</div>
             </div>
             <div style="background:linear-gradient(135deg,#6366f1,#8b5cf6); border-radius:8px; padding:8px; text-align:center">
               <div style="font-size:10px; color:#c7d2fe; margin-bottom:2px">클로드점수</div>

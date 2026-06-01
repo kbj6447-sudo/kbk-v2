@@ -37,6 +37,24 @@ function compact(value) {
   return fmt.format(Math.round(n));
 }
 
+function usdText(value) {
+  const n = num(value);
+  if (n === null) return "-";
+  return `$${n.toFixed(n >= 10 ? 2 : 4)}`;
+}
+
+function krwText(value) {
+  const n = num(value);
+  if (n === null) return "-";
+  return `${fmt.format(Math.round(n * usdKrw))}원`;
+}
+
+function pricePairText(value) {
+  const n = num(value);
+  if (n === null) return "-";
+  return `${krwText(n)} (${usdText(n)})`;
+}
+
 function priceUsd(quote) {
   return num(quote?.price) ?? num(quote?.preMarketPrice) ?? num(quote?.regularMarketPrice);
 }
@@ -194,8 +212,8 @@ function chartSvg(bars, signal) {
 function detailHtml(quote, bars, loading = false) {
   const signal = analyzeSignal(quote, bars);
   const price = signal.price;
-  const krw = price === null ? "-" : `${fmt.format(Math.round(price * usdKrw))}원`;
-  const usd = price === null ? "-" : `$${price.toFixed(price >= 10 ? 2 : 4)}`;
+  const krw = pricePairText(price);
+  const usd = price === null ? "-" : `USD ${usdText(price)}`;
   const badge = signal.tone === "danger" ? "위험" : signal.tone === "strong" ? "관심" : signal.tone === "wait" ? "대기" : "감시";
 
   return `
@@ -640,7 +658,7 @@ function renderTopPicks(picks, updatedAt) {
             <div class="kbk-top-score">${pick.finalScore}<span>${index === 0 ? "1순위" : esc(pick.verdict)}</span></div>
           </div>
           <div class="kbk-top-row">
-            <strong>${priceUsdText(pick.price)}</strong>
+            <strong>${pricePairText(pick.price)}</strong>
             <span>${pct(pick.change)}</span>
             <span>거래량 ${compact(pick.volume)}</span>
             <span>RVOL ${pick.rvol ? pick.rvol.toFixed(1) : "-"}</span>
@@ -660,15 +678,17 @@ function renderTopPicks(picks, updatedAt) {
 }
 
 function priceUsdText(value) {
-  const n = num(value);
-  if (n === null) return "-";
-  return `$${n.toFixed(n >= 10 ? 2 : 4)}`;
+  return usdText(value);
 }
 
 async function loadTopPicks() {
   renderTopPickLoading();
   try {
-    const payload = await fetchJson("/api/scanner");
+    const [payload, exchangePayload] = await Promise.all([
+      fetchJson("/api/scanner"),
+      fetchJson("/api/exchange").catch(() => null),
+    ]);
+    usdKrw = num(exchangePayload?.rate) ?? num(exchangePayload?.usdKrw) ?? num(exchangePayload?.data?.rate) ?? usdKrw;
     const items = payload?.data?.items ?? payload?.items ?? [];
     const scored = items
       .filter((item) => item?.symbol && item.included !== false)
@@ -755,8 +775,7 @@ function visibleSurgeCards() {
 }
 
 function krwTextFromUsd(price) {
-  const n = num(price);
-  return n === null ? "-" : `${fmt.format(Math.round(n * usdKrw))}원`;
+  return pricePairText(price);
 }
 
 function updateSurgeCardQuote(card, quote, livePrice = null) {
