@@ -45,12 +45,16 @@ module.exports = async function handler(req, res) {
     var previousClose = orNum(q.regularMarketPreviousClose, orNum(q.previousClose, orNum(meta.previousClose, meta.chartPreviousClose)));
     var avgVolume = orNum(q.averageDailyVolume3Month, orNum(q.averageDailyVolume10Day, orNum(meta.averageDailyVolume3Month, meta.averageDailyVolume10Day)));
     var currentVolume = orNum(q.regularMarketVolume, meta.regularMarketVolume);
-    var displayPrice = regularPrice;
-    if (marketState === 'PRE' && preMarketPrice !== null) {
+    // 데이마켓/실시간 가격 우선순위:
+    // 1. 1분봉 최신 close (latestClose) - 가장 최신 실거래가
+    // 2. marketState 기반 extended hours 가격
+    // 3. regularPrice fallback
+    var displayPrice = latestClose !== null ? latestClose : regularPrice;
+    if (marketState === 'PRE' && preMarketPrice !== null && preMarketPrice !== regularPrice) {
       displayPrice = preMarketPrice;
     } else if ((marketState === 'POST' || marketState === 'POSTPOST') && postMarketPrice !== null) {
       displayPrice = postMarketPrice;
-    } else if (!marketState && latestClose !== null) {
+    } else if (latestClose !== null) {
       displayPrice = latestClose;
     }
     var displayChange = null;
