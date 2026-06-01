@@ -35,6 +35,136 @@ function average(values) {
   return clean.reduce((sum, value) => sum + value, 0) / clean.length;
 }
 
+function sum(values) {
+  return values.map(num).filter((value) => value !== null && value > 0).reduce((total, value) => total + value, 0);
+}
+
+function positive(value) {
+  const parsed = num(value);
+  return parsed !== null && parsed > 0 ? parsed : null;
+}
+
+function volumeAccelerationScoreFromRatio(ratio) {
+  const value = num(ratio);
+  if (value === null) return 50;
+  if (value >= 5) return 96;
+  if (value >= 3) return 84;
+  if (value >= 2) return 72;
+  if (value >= 1.3) return 60;
+  if (value >= 0.8) return 50;
+  return 38;
+}
+
+function calculateVolumeAcceleration(bars) {
+  const volumes = bars.map((bar) => positive(bar.volume));
+  const current1mVolume = volumes.at(-1) ?? null;
+  const previous5 = volumes.slice(-6, -1).filter((value) => value !== null);
+  const last5 = volumes.slice(-5).filter((value) => value !== null);
+  const previous30 = volumes.slice(-35, -5).filter((value) => value !== null);
+  const averageVolumeLast5m = previous5.length >= 5 ? average(previous5) : null;
+  const averageVolumeLast30m = previous30.length >= 20 ? sum(previous30) / 6 : null;
+  const volumeLast5m = last5.length >= 5 ? sum(last5) : null;
+  const volumeAcceleration1m = current1mVolume !== null && averageVolumeLast5m ? current1mVolume / averageVolumeLast5m : null;
+  const volumeAcceleration5m = volumeLast5m !== null && averageVolumeLast30m ? volumeLast5m / averageVolumeLast30m : null;
+  const availableScores = [volumeAcceleration1m, volumeAcceleration5m]
+    .filter((value) => num(value) !== null)
+    .map(volumeAccelerationScoreFromRatio);
+
+  return {
+    averageVolumeLast5m,
+    averageVolumeLast30m,
+    volumeAcceleration1m,
+    volumeAcceleration5m,
+    volumeAccelerationScore: availableScores.length ? Math.round(average(availableScores)) : 50,
+    volumeAccelerationStatus: availableScores.length ? "ok" : "데이터 부족",
+  };
+}
+
+function calculateHigherLowScore(bars) {
+  const lows = bars.slice(-8).map((bar) => positive(bar.low)).filter((value) => value !== null);
+  if (lows.length < 4) return 50;
+  let defended = 0;
+  for (let index = 1; index < lows.length; index += 1) {
+    if (lows[index] >= lows[index - 1] * 0.998) defended += 1;
+  }
+  return Math.round(clamp(35 + (defended / (lows.length - 1)) * 60));
+}
+
+function calculateVwapHoldScore(bars) {
+  const sample = bars.slice(-24);
+  if (sample.length < 8) return 50;
+
+  let pv = 0;
+  let totalVolume = 0;
+  let counted = 0;
+  let holdPoints = 0;
+  for (const bar of bars) {
+    const high = positive(bar.high);
+    const low = positive(bar.low);
+    const close = positive(bar.close);
+    const volume = positive(bar.volume);
+    if (high === null || low === null || close === null || volume === null) continue;
+    pv += ((high + low + close) / 3) * volume;
+    totalVolume += volume;
+    if (!sample.includes(bar) || totalVolume <= 0) continue;
+    const vwap = pv / totalVolume;
+    counted += 1;
+    if (close >= vwap) holdPoints += 1;
+    else if (close >= vwap * 0.996) holdPoints += 0.55;
+  }
+
+  return counted >= 6 ? Math.round(clamp((holdPoints / counted) * 100)) : 50;
+}
+
+function calculateCompressionScore(bars) {
+  const sample = bars.slice(-20);
+  if (sample.length < 8) return 50;
+  const highs = sample.map((bar) => positive(bar.high)).filter((value) => value !== null);
+  const lows = sample.map((bar) => positive(bar.low)).filter((value) => value !== null);
+  const lastClose = positive(sample.at(-1)?.close);
+  if (!highs.length || !lows.length || lastClose === null) return 50;
+
+  const rangePct = ((Math.max(...highs) - Math.min(...lows)) / lastClose) * 100;
+  const base = rangePct <= 3 ? 90
+    : rangePct <= 5 ? 78
+      : rangePct <= 8 ? 64
+        : rangePct <= 12 ? 52
+          : 38;
+  return Math.round(clamp(base + (calculateHigherLowScore(sample) - 50) * 0.12));
+}
+
+function calculateCommonSignals(bars) {
+  if (!Array.isArray(bars) || bars.length < 3) {
+    return {
+      volumeAcceleration1m: null,
+      volumeAcceleration5m: null,
+      volumeAccelerationScore: 50,
+      higherLowScore: 50,
+      vwapHoldScore: 50,
+      compressionScore: 50,
+      commonSignalStatus: "데이터 부족",
+    };
+  }
+
+  const volumeAcceleration = calculateVolumeAcceleration(bars);
+  return {
+    ...volumeAcceleration,
+    higherLowScore: calculateHigherLowScore(bars),
+    vwapHoldScore: calculateVwapHoldScore(bars),
+    compressionScore: calculateCompressionScore(bars),
+    commonSignalStatus: "ok",
+  };
+}
+
+function commonSignalBoost(signals = {}) {
+  const score =
+    (num(signals.volumeAccelerationScore) ?? 50) * 0.30
+    + (num(signals.higherLowScore) ?? 50) * 0.25
+    + (num(signals.vwapHoldScore) ?? 50) * 0.25
+    + (num(signals.compressionScore) ?? 50) * 0.20;
+  return Math.round(clamp(Math.max(0, (score - 50) * 0.16), 0, 8));
+}
+
 function pickDisplayPrice({ marketState, regularPrice, preMarketPrice, postMarketPrice, latestClose }) {
   const normalizedState = String(marketState || "").toUpperCase();
   if (normalizedState === "PRE" && preMarketPrice !== null) return preMarketPrice;
@@ -142,7 +272,19 @@ async function fetchChartSnapshot(symbol) {
     const meta = result?.meta || {};
     const quote = result?.indicators?.quote?.[0] || {};
     const closes = Array.isArray(quote.close) ? quote.close.map(num) : [];
+    const opens = Array.isArray(quote.open) ? quote.open.map(num) : [];
+    const highs = Array.isArray(quote.high) ? quote.high.map(num) : [];
+    const lows = Array.isArray(quote.low) ? quote.low.map(num) : [];
+    const rawVolumes = Array.isArray(quote.volume) ? quote.volume.map(num) : [];
     const timestamps = Array.isArray(result?.timestamp) ? result.timestamp : [];
+    const bars = timestamps.map((timestamp, index) => ({
+      time: timestamp ? new Date(timestamp * 1000).toISOString() : null,
+      open: positive(opens[index]) ?? positive(closes[index]),
+      high: positive(highs[index]) ?? positive(closes[index]),
+      low: positive(lows[index]) ?? positive(closes[index]),
+      close: positive(closes[index]),
+      volume: positive(rawVolumes[index]),
+    })).filter((bar) => bar.close !== null).slice(-90);
 
     let latestClose = null;
     let latestTimestamp = null;
@@ -154,7 +296,7 @@ async function fetchChartSnapshot(symbol) {
       }
     }
 
-    const volumes = Array.isArray(quote.volume) ? quote.volume.map(num).filter((value) => value !== null && value > 0) : [];
+    const volumes = rawVolumes.filter((value) => value !== null && value > 0);
     const latestBarAge = latestTimestamp ? Math.max(0, Math.round((Date.now() - latestTimestamp * 1000) / 60000)) : null;
     return {
       latestClose,
@@ -166,6 +308,7 @@ async function fetchChartSnapshot(symbol) {
       chartPreviousClose: num(meta.chartPreviousClose),
       regularMarketVolume: num(meta.regularMarketVolume),
       volume: volumes.reduce((sum, value) => sum + value, 0) || null,
+      commonSignals: calculateCommonSignals(bars),
     };
   } catch {
     return {};
@@ -291,20 +434,36 @@ module.exports = async function handler(req, res) {
       payload.data.items = (await mapWithLimit(payload.data.items, 2, async (item) => {
         const normalizedItem = await normalizeItem(item, enrichSymbols.has(item.symbol));
         const symbolKey = String(item?.symbol || "").toUpperCase();
+        const chartSnapshot = chartMap.get(symbolKey) || {};
         const liveQuote = normalizeLiveQuote(
           normalizedItem,
           batchQuoteMap.get(symbolKey),
-          chartMap.get(symbolKey),
+          chartSnapshot,
         );
+        const commonSignals = chartSnapshot.commonSignals || calculateCommonSignals([]);
+        const rankAuxiliaryScore = commonSignalBoost(commonSignals);
+        const baseScannerScore = num(normalizedItem.scannerScore) ?? 0;
+        const baseFinalScore = num(normalizedItem.finalProbabilityScore) ?? 0;
+        const boostedScannerScore = Math.round(clamp(baseScannerScore + rankAuxiliaryScore));
+        const boostedFinalScore = Math.round(clamp(baseFinalScore + rankAuxiliaryScore));
 
         return {
           ...normalizedItem,
           ...Object.fromEntries(Object.entries(liveQuote).filter(([, value]) => value !== null && value !== undefined)),
+          ...commonSignals,
+          rankAuxiliaryScore,
+          scannerScore: Math.max(baseScannerScore, boostedScannerScore),
+          finalProbabilityScore: Math.max(baseFinalScore, boostedFinalScore),
           sourceTags: [...new Set([
             ...(Array.isArray(normalizedItem.sourceTags) ? normalizedItem.sourceTags : []),
             batchQuoteMap.has(symbolKey) ? "yahoo-v7-batch" : null,
             chartMap.has(symbolKey) ? "yahoo-1m-live" : null,
+            rankAuxiliaryScore > 0 ? "common-signal-rank-boost" : null,
           ].filter(Boolean))],
+          selectionReasons: [
+            ...(Array.isArray(normalizedItem.selectionReasons) ? normalizedItem.selectionReasons : []),
+            rankAuxiliaryScore > 0 ? `Common signal boost +${rankAuxiliaryScore}` : null,
+          ].filter(Boolean),
         };
       }))
         .sort((a, b) => (num(b.finalProbabilityScore) ?? 0) - (num(a.finalProbabilityScore) ?? 0));
