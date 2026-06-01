@@ -7,6 +7,7 @@ let lastBars = [];
 let usdKrw = 1365;
 let selectedDetailCalculating = false;
 let selectedDetailRefreshQueued = false;
+let selectedFallbackScore = null;
 
 const fmt = new Intl.NumberFormat("ko-KR");
 
@@ -102,6 +103,12 @@ function supportResistance(quote, bars) {
   const support = lows.length ? Math.min(...lows) : positiveNum(quote?.dayLow);
   const resistance = highs.length ? Math.max(...highs) : positiveNum(quote?.dayHigh);
   return { support, resistance };
+}
+
+function cardScore(card) {
+  const scoreNode = card?.querySelector?.(".score-number,.kbk-top-score");
+  const raw = scoreNode?.childNodes?.[0]?.textContent ?? scoreNode?.textContent ?? "";
+  return num(String(raw).match(/\d+(?:\.\d+)?/)?.[0]);
 }
 
 function analyzeSignal(quote, bars) {
@@ -365,7 +372,10 @@ async function refreshDetail(symbol, loading = false) {
       fetchJson(`/api/exchange`).catch(() => null),
     ]);
     if (selectedSymbol !== requestedSymbol) return;
-    lastQuote = quotePayload.data ?? quotePayload;
+    lastQuote = { ...(quotePayload.data ?? quotePayload) };
+    if (num(lastQuote.finalProbabilityScore) === null && num(lastQuote.scannerScore) === null && selectedFallbackScore !== null) {
+      lastQuote.scannerScore = selectedFallbackScore;
+    }
     lastBars = historyPayload ? normalizeBars(historyPayload) : fallbackBars(lastQuote);
     usdKrw = num(exchangePayload?.rate) ?? num(exchangePayload?.usdKrw) ?? num(exchangePayload?.data?.rate) ?? usdKrw;
     shell.innerHTML = detailHtml(lastQuote, lastBars, false);
@@ -398,6 +408,7 @@ function selectSymbol(symbol, card) {
   selectedSymbol = symbol.toUpperCase();
   lastQuote = null;
   lastBars = [];
+  selectedFallbackScore = cardScore(card);
   selectedDetailCalculating = false;
   selectedDetailRefreshQueued = false;
   document.querySelectorAll(".stock-card.kbk-selected-card,.setup-card.kbk-selected-card").forEach((el) => el.classList.remove("kbk-selected-card"));
@@ -412,6 +423,7 @@ function closeDetail() {
   pollTimer = null;
   selectedDetailCalculating = false;
   selectedDetailRefreshQueued = false;
+  selectedFallbackScore = null;
   document.querySelectorAll(".stock-card.kbk-selected-card,.setup-card.kbk-selected-card").forEach((el) => el.classList.remove("kbk-selected-card"));
   const shell = ensureShell();
   shell.hidden = true;
