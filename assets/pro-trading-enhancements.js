@@ -32,6 +32,14 @@ function compact(n) {
   return String(Math.round(value));
 }
 
+function livePriceOf(item) {
+  return toNumber(item?.normalizedLivePriceUsd)
+    ?? toNumber(item?.price)
+    ?? toNumber(item?.preMarketPrice)
+    ?? toNumber(item?.postMarketPrice)
+    ?? toNumber(item?.regularMarketPrice);
+}
+
 function rvolValue(item) {
   return toNumber(item?.volumeRatio ?? item?.relativeVolume);
 }
@@ -262,7 +270,7 @@ async function renderTopPicks() {
     const items = (payload?.data?.items || [])
       .filter((item) => item?.symbol && item.included !== false)
       .map((item) => {
-        const price = Number(item.price ?? item.preMarketPrice ?? 0);
+        const price = livePriceOf(item) ?? 0;
         const change = Number(item.changePercent ?? item.preMarketChangePercent ?? 0);
         const volume = Number(item.volume ?? item.preMarketVolume ?? 0);
         const surge = Math.round(Number(item.finalProbabilityScore ?? item.scannerScore ?? 0));
@@ -462,7 +470,7 @@ function pctFrom(a, b) {
 }
 
 function latestUsablePrice(quote, bars) {
-  const quotePrice = toNumber(quote?.price ?? quote?.preMarketPrice);
+  const quotePrice = livePriceOf(quote);
   const barPrice = bars.at(-1)?.close ?? null;
   if (barPrice !== null && quotePrice !== null) {
     const drift = Math.abs((barPrice - quotePrice) / quotePrice) * 100;

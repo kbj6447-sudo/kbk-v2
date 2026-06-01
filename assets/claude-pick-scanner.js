@@ -7,6 +7,20 @@
 (function() {
   'use strict';
 
+  function num(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function pickLivePrice(item) {
+    return num(item.normalizedLivePriceUsd)
+      ?? num(item.price)
+      ?? num(item.preMarketPrice)
+      ?? num(item.postMarketPrice)
+      ?? num(item.regularMarketPrice)
+      ?? 0;
+  }
+
   // ---- 클로드픽 점수 계산 알고리즘 ----
   function calcClaudeScore(item) {
     const rvol = item.relativeVolume ?? item.volumeRatio ?? 0;
@@ -110,7 +124,7 @@
       const rvol = item.rvol;
       const changePct = item.changePct;
       const sig = getSignalLabel(item.claudeScore, rvol, Math.abs(changePct), item.stage);
-      const priceKrw = fmtKrw(item.price ?? 0);
+      const priceKrw = fmtKrw(pickLivePrice(item));
       const rvolDisplay = rvol >= 1 ? rvol.toFixed(1) + 'x' : '-';
       const changeColor = changePct >= 0 ? '#16a34a' : '#dc2626';
       const rankEmoji = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '';

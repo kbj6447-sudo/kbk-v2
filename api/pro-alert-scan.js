@@ -20,6 +20,14 @@ function compact(value) {
   return String(Math.round(parsed));
 }
 
+function livePriceOf(item) {
+  return num(item.normalizedLivePriceUsd)
+    ?? num(item.price)
+    ?? num(item.preMarketPrice)
+    ?? num(item.postMarketPrice)
+    ?? num(item.regularMarketPrice);
+}
+
 function shouldSend(item, minScore) {
   const score = num(item.finalProbabilityScore) ?? num(item.scannerScore) ?? 0;
   const change = num(item.preMarketChangePercent) ?? num(item.changePercent) ?? 0;
@@ -34,7 +42,7 @@ function formatMessage(items) {
     "",
     ...items.map((item, index) => {
       const score = Math.round(num(item.finalProbabilityScore) ?? num(item.scannerScore) ?? 0);
-      const price = num(item.price) ?? num(item.preMarketPrice);
+      const price = livePriceOf(item);
       const change = num(item.preMarketChangePercent) ?? num(item.changePercent);
       const volume = Math.max(num(item.preMarketVolume) ?? 0, num(item.volume) ?? 0);
       return `${index + 1}. ${item.symbol} score ${score} / ${price ? `$${price.toFixed(price >= 10 ? 2 : 4)}` : "-"} / ${pct(change)} / volume ${compact(volume)}`;
