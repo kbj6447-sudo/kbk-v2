@@ -1,4 +1,4 @@
-const UPSTREAM = "https://kbk-theta.vercel.app/api/scanner";
+const UPSTREAM = "https://kbk-theta-accumulation-pro.vercel.app/api/scanner";
 
 function num(value) {
   if (value === null || value === undefined || value === "") return null;
