@@ -1,0 +1,1 @@
+$html = Get-Content ".\dist\index.html" -Raw; $html = $html.Replace("</body>", "  <script src=""/assets/claude-pick-scanner.js""></script>`n  </body>"); Set-Content ".\dist\index.html" $html -Encoding UTF8; Write-Host "완료!"

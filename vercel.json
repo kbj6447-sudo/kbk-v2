@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "api/**/*.js", "use": "@vercel/node" },
+    { "src": "legacy/**", "use": "@vercel/static" },
+    { "src": "assets/**", "use": "@vercel/static" },
+    { "src": "dist/**", "use": "@vercel/static" }
+  ],
+  "routes": [
+    { "src": "/api/live-quote", "dest": "/api/quote.js" },
+    { "src": "/api/quote", "dest": "/api/quote.js" },
+    { "src": "/api/scanner", "dest": "/api/scanner.js" },
+    { "src": "/legacy/(.*)", "dest": "/legacy/$1" },
+    { "src": "/assets/(.*)", "dest": "/assets/$1" },
+    { "src": "/dist/(.*)", "dest": "/dist/$1" },
+    { "src": "/api/(.*)", "dest": "/api/$1.js" },
+    { "src": "/(.*)", "dest": "/dist/index.html" }
+  ]
+}

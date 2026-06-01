@@ -1,0 +1,7 @@
+{
+  "name": "kbk-theta-accumulation",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs"
+  }
+}
