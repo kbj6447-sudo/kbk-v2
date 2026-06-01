@@ -5,6 +5,8 @@ let pollTimer = null;
 let lastQuote = null;
 let lastBars = [];
 let usdKrw = 1365;
+let selectedDetailCalculating = false;
+let selectedDetailRefreshQueued = false;
 
 const fmt = new Intl.NumberFormat("ko-KR");
 
@@ -341,31 +343,54 @@ async function fetchJson(url) {
 }
 
 async function refreshDetail(symbol, loading = false) {
+  const requestedSymbol = symbol?.toUpperCase?.() ?? symbol;
+  if (!requestedSymbol) return;
+  if (selectedDetailCalculating) {
+    selectedDetailRefreshQueued = true;
+    return;
+  }
+
+  selectedDetailCalculating = true;
   const shell = ensureShell();
   shell.hidden = false;
   if (loading && !lastQuote) {
-    shell.innerHTML = `<div class="kbk-detail-head"><div><p class="kbk-kicker">선택 종목 상세 감시</p><h3>${esc(symbol)}</h3><p>실시간 시세와 분봉 차트를 불러오는 중입니다.</p></div><button type="button" class="kbk-detail-close" aria-label="상세 닫기">×</button></div>`;
+    shell.innerHTML = `<div class="kbk-detail-head"><div><p class="kbk-kicker">선택 종목 상세 감시</p><h3>${esc(requestedSymbol)}</h3><p>실시간 시세와 분봉 차트를 불러오는 중입니다.</p></div><button type="button" class="kbk-detail-close" aria-label="상세 닫기">×</button></div>`;
   }
 
   try {
     const from = encodeURIComponent(new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString());
     const [quotePayload, historyPayload, exchangePayload] = await Promise.all([
-      fetchJson(`/api/quote?symbol=${encodeURIComponent(symbol)}`),
-      fetchJson(`/api/history?symbol=${encodeURIComponent(symbol)}&from=${from}`).catch(() => null),
+      fetchJson(`/api/quote?symbol=${encodeURIComponent(requestedSymbol)}`),
+      fetchJson(`/api/history?symbol=${encodeURIComponent(requestedSymbol)}&from=${from}`).catch(() => null),
       fetchJson(`/api/exchange`).catch(() => null),
     ]);
+    if (selectedSymbol !== requestedSymbol) return;
     lastQuote = quotePayload.data ?? quotePayload;
     lastBars = historyPayload ? normalizeBars(historyPayload) : fallbackBars(lastQuote);
     usdKrw = num(exchangePayload?.rate) ?? num(exchangePayload?.usdKrw) ?? num(exchangePayload?.data?.rate) ?? usdKrw;
-    shell.innerHTML = detailHtml(lastQuote, lastBars, loading);
+    shell.innerHTML = detailHtml(lastQuote, lastBars, false);
   } catch (error) {
+    if (selectedSymbol !== requestedSymbol) return;
     shell.innerHTML = `
       <div class="kbk-detail-head">
-        <div><p class="kbk-kicker">선택 종목 상세 감시</p><h3>${esc(symbol)}</h3><p>${esc(error.message || "상세 데이터를 불러오지 못했습니다.")}</p></div>
+        <div><p class="kbk-kicker">선택 종목 상세 감시</p><h3>${esc(requestedSymbol)}</h3><p>${esc(error.message || "상세 데이터를 불러오지 못했습니다.")}</p></div>
         <button type="button" class="kbk-detail-close" aria-label="상세 닫기">×</button>
       </div>
     `;
+  } finally {
+    selectedDetailCalculating = false;
+    if (selectedDetailRefreshQueued && selectedSymbol === requestedSymbol) {
+      selectedDetailRefreshQueued = false;
+      window.setTimeout(() => refreshDetail(requestedSymbol, false), 0);
+    }
   }
+}
+
+function startSelectedSymbolMonitor() {
+  window.clearInterval(pollTimer);
+  pollTimer = window.setInterval(() => {
+    if (selectedSymbol) refreshDetail(selectedSymbol, false);
+  }, POLL_MS);
 }
 
 function selectSymbol(symbol, card) {
@@ -373,17 +398,20 @@ function selectSymbol(symbol, card) {
   selectedSymbol = symbol.toUpperCase();
   lastQuote = null;
   lastBars = [];
+  selectedDetailCalculating = false;
+  selectedDetailRefreshQueued = false;
   document.querySelectorAll(".stock-card.kbk-selected-card,.setup-card.kbk-selected-card").forEach((el) => el.classList.remove("kbk-selected-card"));
   card?.classList.add("kbk-selected-card");
   refreshDetail(selectedSymbol, true);
-  window.clearInterval(pollTimer);
-  pollTimer = null;
+  startSelectedSymbolMonitor();
 }
 
 function closeDetail() {
   selectedSymbol = null;
   window.clearInterval(pollTimer);
   pollTimer = null;
+  selectedDetailCalculating = false;
+  selectedDetailRefreshQueued = false;
   document.querySelectorAll(".stock-card.kbk-selected-card,.setup-card.kbk-selected-card").forEach((el) => el.classList.remove("kbk-selected-card"));
   const shell = ensureShell();
   shell.hidden = true;
@@ -844,6 +872,7 @@ async function refreshSurgeLiveQuotes() {
       const data = quoteMap.get(symbol);
       if (data?.quote) updateSurgeCardQuote(card, data.quote, data.livePrice);
     }
+    if (selectedSymbol && quoteMap.has(selectedSymbol)) refreshDetail(selectedSymbol, false);
   } finally {
     surgeLiveQuoteBusy = false;
   }
