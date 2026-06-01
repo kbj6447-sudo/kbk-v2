@@ -23,6 +23,11 @@ function num(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function positiveNum(value) {
+  const n = num(value);
+  return n !== null && n > 0 ? n : null;
+}
+
 function pct(value) {
   const n = num(value);
   return n === null ? "-" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
@@ -43,6 +48,11 @@ function usdText(value) {
   return `$${n.toFixed(n >= 10 ? 2 : 4)}`;
 }
 
+function levelText(value, fallback = "데이터 부족") {
+  const n = positiveNum(value);
+  return n === null ? fallback : usdText(n);
+}
+
 function krwText(value) {
   const n = num(value);
   if (n === null) return "-";
@@ -56,7 +66,7 @@ function pricePairText(value) {
 }
 
 function priceUsd(quote) {
-  return num(quote?.price) ?? num(quote?.preMarketPrice) ?? num(quote?.regularMarketPrice);
+  return positiveNum(quote?.price) ?? positiveNum(quote?.preMarketPrice) ?? positiveNum(quote?.regularMarketPrice);
 }
 
 function changePct(quote) {
@@ -64,7 +74,7 @@ function changePct(quote) {
 }
 
 function vwapValue(quote) {
-  return num(quote?.technical?.vwap) ?? num(quote?.vwap);
+  return positiveNum(quote?.technical?.vwap) ?? positiveNum(quote?.vwap);
 }
 
 function vwapState(quote) {
@@ -85,10 +95,10 @@ function trendLabel(quote) {
 }
 
 function supportResistance(quote, bars) {
-  const lows = bars.map((bar) => num(bar.low ?? bar.l)).filter((v) => v !== null);
-  const highs = bars.map((bar) => num(bar.high ?? bar.h)).filter((v) => v !== null);
-  const support = lows.length ? Math.min(...lows) : num(quote?.dayLow);
-  const resistance = highs.length ? Math.max(...highs) : num(quote?.dayHigh);
+  const lows = bars.map((bar) => positiveNum(bar.low ?? bar.l)).filter((v) => v !== null);
+  const highs = bars.map((bar) => positiveNum(bar.high ?? bar.h)).filter((v) => v !== null);
+  const support = lows.length ? Math.min(...lows) : positiveNum(quote?.dayLow);
+  const resistance = highs.length ? Math.max(...highs) : positiveNum(quote?.dayHigh);
   return { support, resistance };
 }
 
@@ -96,7 +106,7 @@ function analyzeSignal(quote, bars) {
   const price = priceUsd(quote);
   const change = changePct(quote);
   const risk = num(quote?.riskScore) ?? 50;
-  const probability = num(quote?.finalProbabilityScore) ?? num(quote?.scannerScore) ?? 0;
+  const probability = num(quote?.finalProbabilityScore) ?? num(quote?.scannerScore);
   const pattern = num(quote?.patternSimilarityScore) ?? 0;
   const vwap = vwapState(quote);
   const trend = trendLabel(quote);
@@ -127,9 +137,12 @@ function analyzeSignal(quote, bars) {
   }
 
   const position = closePosition === null ? "위치 확인 중" : closePosition >= 75 ? "상단권" : closePosition >= 45 ? "박스권 중앙" : "하단권";
-  const stopLine = support !== null ? support * 0.985 : price !== null ? price * 0.97 : null;
-  const entryLine = resistance !== null ? resistance * 1.002 : price;
-  const profitLine = price !== null ? price * 1.03 : null;
+  const stopLine = support !== null ? support * 0.985 : null;
+  const entryBase = resistance ?? price;
+  const entryLine = entryBase !== null ? entryBase * (resistance !== null ? 1.002 : 1) : null;
+  const profitLine = entryLine !== null
+    ? Math.max(price !== null ? price * 1.03 : 0, entryLine * 1.015)
+    : null;
 
   return {
     action,
@@ -156,9 +169,9 @@ function normalizeBars(payload) {
   const bars = payload?.data?.bars ?? payload?.bars ?? payload?.candles ?? [];
   return bars.map((bar) => ({
     time: bar.time ?? bar.date ?? bar.timestamp,
-    close: num(bar.close ?? bar.c ?? bar.price),
-    high: num(bar.high ?? bar.h ?? bar.close ?? bar.c ?? bar.price),
-    low: num(bar.low ?? bar.l ?? bar.close ?? bar.c ?? bar.price),
+    close: positiveNum(bar.close ?? bar.c ?? bar.price),
+    high: positiveNum(bar.high ?? bar.h ?? bar.close ?? bar.c ?? bar.price),
+    low: positiveNum(bar.low ?? bar.l ?? bar.close ?? bar.c ?? bar.price),
     volume: num(bar.volume ?? bar.v),
   })).filter((bar) => bar.close !== null).slice(-60);
 }
@@ -166,8 +179,8 @@ function normalizeBars(payload) {
 function fallbackBars(quote) {
   const price = priceUsd(quote);
   if (price === null) return [];
-  const low = num(quote?.dayLow) ?? price * 0.97;
-  const high = num(quote?.dayHigh) ?? price * 1.03;
+  const low = positiveNum(quote?.dayLow) ?? price * 0.97;
+  const high = positiveNum(quote?.dayHigh) ?? price * 1.03;
   return Array.from({ length: 16 }, (_, i) => {
     const t = i / 15;
     const wave = Math.sin(t * Math.PI * 2) * (high - low) * 0.08;
@@ -182,7 +195,7 @@ function chartSvg(bars, signal) {
   const width = 760;
   const height = 260;
   const pad = 28;
-  const values = usable.flatMap((bar) => [bar.close, bar.high, bar.low]).filter((v) => v !== null);
+  const values = usable.flatMap((bar) => [bar.close, bar.high, bar.low]).filter((v) => positiveNum(v) !== null);
   if (signal.support !== null) values.push(signal.support);
   if (signal.resistance !== null) values.push(signal.resistance);
   const min = Math.min(...values);
@@ -193,7 +206,7 @@ function chartSvg(bars, signal) {
   const path = usable.map((bar, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(bar.close).toFixed(1)}`).join(" ");
   const area = `${path} L${width - pad} ${height - pad} L${pad} ${height - pad} Z`;
 
-  const level = (value, cls, label) => value === null ? "" : `
+  const level = (value, cls, label) => positiveNum(value) === null ? "" : `
     <line class="${cls}" x1="${pad}" y1="${y(value).toFixed(1)}" x2="${width - pad}" y2="${y(value).toFixed(1)}"></line>
     <text class="kbk-chart-label" x="${width - pad - 6}" y="${(y(value) - 6).toFixed(1)}">${label} $${value.toFixed(4)}</text>
   `;
@@ -214,6 +227,7 @@ function detailHtml(quote, bars, loading = false) {
   const price = signal.price;
   const krw = pricePairText(price);
   const usd = price === null ? "-" : `USD ${usdText(price)}`;
+  const scoreText = signal.probability === null ? "계산중" : Math.round(signal.probability);
   const badge = signal.tone === "danger" ? "위험" : signal.tone === "strong" ? "관심" : signal.tone === "wait" ? "대기" : "감시";
 
   return `
@@ -224,7 +238,7 @@ function detailHtml(quote, bars, loading = false) {
         <p>${esc(signal.reason)}</p>
       </div>
       <div class="kbk-detail-score">
-        <strong>${Math.round(signal.probability)}</strong>
+        <strong>${scoreText}</strong>
         <span>${badge}</span>
       </div>
       <button type="button" class="kbk-detail-close" aria-label="상세 닫기">×</button>
@@ -246,9 +260,9 @@ function detailHtml(quote, bars, loading = false) {
       </div>
       <div class="kbk-signal-grid">
         <div><span>현재 위치</span><strong>${esc(signal.position)}</strong><small>박스권 내 위치</small></div>
-        <div><span>진입 확인선</span><strong>${signal.entryLine === null ? "-" : `$${signal.entryLine.toFixed(4)}`}</strong><small>돌파/재지지 확인</small></div>
-        <div><span>손절 기준선</span><strong>${signal.stopLine === null ? "-" : `$${signal.stopLine.toFixed(4)}`}</strong><small>지지 이탈 시 주의</small></div>
-        <div><span>1차 익절 참고</span><strong>${signal.profitLine === null ? "-" : `$${signal.profitLine.toFixed(4)}`}</strong><small>단기 +3% 기준</small></div>
+        <div><span>진입 확인선</span><strong>${levelText(signal.entryLine, "계산중")}</strong><small>돌파/재지지 확인</small></div>
+        <div><span>손절 기준선</span><strong>${levelText(signal.stopLine, "데이터 부족")}</strong><small>지지 이탈 시 주의</small></div>
+        <div><span>1차 익절 참고</span><strong>${levelText(signal.profitLine, "계산중")}</strong><small>단기 +3% 기준</small></div>
       </div>
       ${chartSvg(bars, signal)}
     </section>
@@ -277,7 +291,7 @@ function ensureShell() {
     .kbk-detail-head h3 span{font-size:1rem;color:#64748b;font-weight:700}
     .kbk-detail-head p{margin:8px 0 0;color:#475569;line-height:1.55}
     .kbk-detail-score{text-align:center;background:#eff6ff;border-radius:18px;padding:14px}
-    .kbk-detail-score strong{display:block;font-size:2.5rem;line-height:1}
+    .kbk-detail-score strong{display:block;font-size:clamp(1rem,4vw,2.5rem);line-height:1;overflow-wrap:anywhere}
     .kbk-detail-score span{display:inline-flex;margin-top:8px;padding:6px 10px;border-radius:999px;color:#fff;background:#2563eb;font-weight:800;font-size:.78rem}
     .kbk-detail-close{width:34px;height:34px;border:0;border-radius:999px;background:#e2e8f0;color:#0f172a;font-size:24px;line-height:1;cursor:pointer}
     .kbk-detail-price{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin:18px 0;color:#334155}
