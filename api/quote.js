@@ -1,4 +1,4 @@
-// api/quote.js - Yahoo Finance 직접 호출 (데이마켓/프리마켓/정규장 실시간 반영)
+병합데이마켓프리마켓정규장실시간반영가격포함분봉계산용파싱차트파싱분봉에서보완최신분봉로보완실제표시가격결정세션에따라없을때최신분봉우선병합—데이마켓프리마켓정규장정확실시간반영// api/quote.js - Yahoo Finance 직접 호출 (데이마켓/프리마켓/정규장 실시간 반영)
 
 function num(v) {
       if (v === null || v === undefined || v === '') return null;
