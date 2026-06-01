@@ -187,6 +187,7 @@ module.exports = async function handler(req, res) {
         dayLow: orNum(q.regularMarketDayLow, meta.regularMarketDayLow),
         volume: currentVolume,
         averageVolume: avgVolume,
+        relativeVolume: volumeRatio,
         volumeRatio: volumeRatio,
         vwap: vwap,
         aboveVwap: aboveVwap,
