@@ -105,6 +105,82 @@ function supportResistance(quote, bars) {
   return { support, resistance };
 }
 
+function localHigherLowScore(bars) {
+  const sample = bars.slice(-10)
+    .map((bar) => ({
+      low: positiveNum(bar.low ?? bar.l),
+      close: positiveNum(bar.close ?? bar.c ?? bar.price),
+    }))
+    .filter((bar) => bar.low !== null && bar.close !== null);
+  if (sample.length < 5) return 50;
+  let defendedPairs = 0;
+  for (let i = 1; i < sample.length; i += 1) {
+    if (sample[i].low >= sample[i - 1].low * 0.998) defendedPairs += 1;
+  }
+  let consecutiveHigherLows = 0;
+  for (let i = sample.length - 1; i > 0; i -= 1) {
+    if (sample[i].low >= sample[i - 1].low * 1.001) consecutiveHigherLows += 1;
+    else break;
+  }
+  const recent = sample.slice(-4);
+  const recentFloor = Math.min(...recent.slice(0, -1).map((bar) => bar.low));
+  const last = sample.at(-1);
+  const closeMaintains = last.close >= last.low * 1.002 && last.close >= recentFloor * 0.998;
+  const damaged = last.low < recentFloor * 0.992 || last.close < recentFloor * 0.995;
+  let score = 35 + (defendedPairs / (sample.length - 1)) * 38 + Math.min(consecutiveHigherLows, 4) * 7;
+  if (consecutiveHigherLows >= 3 && closeMaintains && !damaged) score = Math.max(score, 90);
+  else if (consecutiveHigherLows >= 2 && closeMaintains && !damaged) score = Math.max(score, 74);
+  else if (damaged) score = Math.min(score - 22, 38);
+  if (closeMaintains) score += 6;
+  return Math.round(Math.max(0, Math.min(100, score)));
+}
+
+function localVwapHold(bars) {
+  const sample = bars.slice(-24);
+  if (sample.length < 3) return { vwapHoldMinutes: null, vwapHoldScore: 50 };
+  let pv = 0;
+  let totalVolume = 0;
+  const evaluated = [];
+  for (const bar of bars) {
+    const high = positiveNum(bar.high ?? bar.h ?? bar.close);
+    const low = positiveNum(bar.low ?? bar.l ?? bar.close);
+    const close = positiveNum(bar.close ?? bar.c ?? bar.price);
+    const volume = positiveNum(bar.volume ?? bar.v);
+    if (high === null || low === null || close === null || volume === null) continue;
+    pv += ((high + low + close) / 3) * volume;
+    totalVolume += volume;
+    if (!sample.includes(bar) || totalVolume <= 0) continue;
+    evaluated.push({ close, vwap: pv / totalVolume });
+  }
+  if (evaluated.length < 3) return { vwapHoldMinutes: null, vwapHoldScore: 50 };
+  let vwapHoldMinutes = 0;
+  for (let i = evaluated.length - 1; i >= 0; i -= 1) {
+    if (evaluated[i].close >= evaluated[i].vwap) vwapHoldMinutes += 1;
+    else break;
+  }
+  const holdRatio = evaluated.filter((bar) => bar.close >= bar.vwap).length / evaluated.length;
+  const vwapHoldScore = vwapHoldMinutes >= 10 ? 96
+    : vwapHoldMinutes >= 5 ? 82
+      : vwapHoldMinutes >= 3 ? 66
+        : vwapHoldMinutes >= 1 ? 44
+          : Math.max(22, holdRatio * 48);
+  return { vwapHoldMinutes, vwapHoldScore: Math.round(Math.max(0, Math.min(100, vwapHoldScore))) };
+}
+
+function higherLowLabel(score) {
+  const value = num(score);
+  if (value === null) return "데이터 부족";
+  if (value >= 90) return "강함";
+  if (value >= 70) return "보통";
+  if (value >= 40) return "중립";
+  return "없음";
+}
+
+function vwapHoldText(minutes) {
+  const value = num(minutes);
+  return value === null ? "데이터 부족" : `${Math.round(value)}분`;
+}
+
 function cardScore(card) {
   const scoreNode = card?.querySelector?.(".score-number,.kbk-top-score");
   const raw = scoreNode?.childNodes?.[0]?.textContent ?? scoreNode?.textContent ?? "";
@@ -122,6 +198,10 @@ function analyzeSignal(quote, bars) {
   const { support, resistance } = supportResistance(quote, bars);
   const closePosition = num(quote?.technical?.closePosition);
   const volume = num(quote?.volume) ?? num(quote?.preMarketVolume);
+  const localVwap = localVwapHold(bars);
+  const higherLowScore = num(quote?.higherLowScore) ?? localHigherLowScore(bars);
+  const vwapHoldScore = num(quote?.vwapHoldScore) ?? localVwap.vwapHoldScore;
+  const vwapHoldMinutes = num(quote?.vwapHoldMinutes) ?? localVwap.vwapHoldMinutes;
 
   let action = "관찰 후 눌림 대기";
   let tone = "neutral";
@@ -166,6 +246,10 @@ function analyzeSignal(quote, bars) {
     trend,
     position,
     volume,
+    higherLowScore,
+    higherLowLabel: higherLowLabel(higherLowScore),
+    vwapHoldScore,
+    vwapHoldMinutes,
     support,
     resistance,
     stopLine,
@@ -259,6 +343,8 @@ function detailHtml(quote, bars, loading = false) {
       <span>${pct(signal.change)}</span>
       <span>거래량 ${compact(signal.volume)}</span>
       <span>${esc(signal.vwap)}</span>
+      <span>Higher Lows: ${esc(signal.higherLowLabel)}</span>
+      <span>VWAP 유지: ${esc(vwapHoldText(signal.vwapHoldMinutes))}</span>
       ${loading ? `<span class="kbk-live-chip">실시간 갱신 중</span>` : ""}
     </div>
 
@@ -269,6 +355,8 @@ function detailHtml(quote, bars, loading = false) {
       </div>
       <div class="kbk-signal-grid">
         <div><span>현재 위치</span><strong>${esc(signal.position)}</strong><small>박스권 내 위치</small></div>
+        <div><span>Higher Lows</span><strong>${esc(signal.higherLowLabel)}</strong><small>${Math.round(signal.higherLowScore)}점</small></div>
+        <div><span>VWAP 유지</span><strong>${esc(vwapHoldText(signal.vwapHoldMinutes))}</strong><small>${Math.round(signal.vwapHoldScore)}점</small></div>
         <div><span>진입 확인선</span><strong>${levelText(signal.entryLine, "계산중")}</strong><small>돌파/재지지 확인</small></div>
         <div><span>손절 기준선</span><strong>${levelText(signal.stopLine, "데이터 부족")}</strong><small>지지 이탈 시 주의</small></div>
         <div><span>1차 익절 참고</span><strong>${levelText(signal.profitLine, "계산중")}</strong><small>단기 +3% 기준</small></div>
@@ -279,7 +367,7 @@ function detailHtml(quote, bars, loading = false) {
     <section class="kbk-explain-grid">
       <div><span>개별 설명</span><p>${esc(quote.symbol ?? selectedSymbol)}는 현재 ${esc(signal.trend)} 흐름, ${esc(signal.vwap)} 상태입니다. 점수만 보지 말고 거래량 유지, 고점 돌파 실패 여부, 눌림 후 재상승을 같이 보셔야 합니다.</p></div>
       <div><span>리스크 설명</span><p>추격 위험 ${Math.round(signal.risk)}점, 유사 패턴 ${Math.round(signal.pattern)}점입니다. 상승률이 큰 종목은 신호가 좋아도 신규 진입 리스크가 빠르게 커집니다.</p></div>
-      <div><span>확인 순서</span><p>1. VWAP 회복/유지 2. 직전 고점 돌파 3. 눌림 시 거래량 감소 4. 재상승 거래량 증가 순서로 확인하세요.</p></div>
+      <div><span>확인 순서</span><p>1. VWAP 회복/유지 2. Higher Lows 유지 3. 직전 고점 돌파 4. 눌림 시 거래량 감소 5. 재상승 거래량 증가 순서로 확인하세요.</p></div>
     </section>
   `;
 }

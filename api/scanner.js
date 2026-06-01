@@ -81,23 +81,48 @@ function calculateVolumeAcceleration(bars) {
 }
 
 function calculateHigherLowScore(bars) {
-  const lows = bars.slice(-8).map((bar) => positive(bar.low)).filter((value) => value !== null);
-  if (lows.length < 4) return 50;
-  let defended = 0;
-  for (let index = 1; index < lows.length; index += 1) {
-    if (lows[index] >= lows[index - 1] * 0.998) defended += 1;
+  const sample = bars.slice(-10)
+    .map((bar) => ({
+      low: positive(bar.low),
+      close: positive(bar.close),
+    }))
+    .filter((bar) => bar.low !== null && bar.close !== null);
+  if (sample.length < 5) return 50;
+
+  let defendedPairs = 0;
+  for (let index = 1; index < sample.length; index += 1) {
+    if (sample[index].low >= sample[index - 1].low * 0.998) defendedPairs += 1;
   }
-  return Math.round(clamp(35 + (defended / (lows.length - 1)) * 60));
+
+  let consecutiveHigherLows = 0;
+  for (let index = sample.length - 1; index > 0; index -= 1) {
+    if (sample[index].low >= sample[index - 1].low * 1.001) consecutiveHigherLows += 1;
+    else break;
+  }
+
+  const recent = sample.slice(-4);
+  const recentFloor = Math.min(...recent.slice(0, -1).map((bar) => bar.low));
+  const last = sample.at(-1);
+  const closeMaintainsStructure = last.close >= last.low * 1.002 && last.close >= recentFloor * 0.998;
+  const trendDamaged = last.low < recentFloor * 0.992 || last.close < recentFloor * 0.995;
+  const defendedRatio = defendedPairs / (sample.length - 1);
+
+  let score = 35 + defendedRatio * 38 + Math.min(consecutiveHigherLows, 4) * 7;
+  if (consecutiveHigherLows >= 3 && closeMaintainsStructure && !trendDamaged) score = Math.max(score, 90);
+  else if (consecutiveHigherLows >= 2 && closeMaintainsStructure && !trendDamaged) score = Math.max(score, 74);
+  else if (trendDamaged) score = Math.min(score - 22, 38);
+  if (closeMaintainsStructure) score += 6;
+
+  return Math.round(clamp(score));
 }
 
-function calculateVwapHoldScore(bars) {
+function calculateVwapHold(bars) {
   const sample = bars.slice(-24);
-  if (sample.length < 8) return 50;
+  if (sample.length < 3) return { vwapHoldMinutes: null, vwapHoldScore: 50 };
 
   let pv = 0;
   let totalVolume = 0;
-  let counted = 0;
-  let holdPoints = 0;
+  const evaluated = [];
   for (const bar of bars) {
     const high = positive(bar.high);
     const low = positive(bar.low);
@@ -108,12 +133,28 @@ function calculateVwapHoldScore(bars) {
     totalVolume += volume;
     if (!sample.includes(bar) || totalVolume <= 0) continue;
     const vwap = pv / totalVolume;
-    counted += 1;
-    if (close >= vwap) holdPoints += 1;
-    else if (close >= vwap * 0.996) holdPoints += 0.55;
+    evaluated.push({ close, vwap });
   }
 
-  return counted >= 6 ? Math.round(clamp((holdPoints / counted) * 100)) : 50;
+  if (evaluated.length < 3) return { vwapHoldMinutes: null, vwapHoldScore: 50 };
+
+  let vwapHoldMinutes = 0;
+  for (let index = evaluated.length - 1; index >= 0; index -= 1) {
+    if (evaluated[index].close >= evaluated[index].vwap) vwapHoldMinutes += 1;
+    else break;
+  }
+
+  const holdRatio = evaluated.filter((bar) => bar.close >= bar.vwap).length / evaluated.length;
+  const score = vwapHoldMinutes >= 10 ? 96
+    : vwapHoldMinutes >= 5 ? 82
+      : vwapHoldMinutes >= 3 ? 66
+        : vwapHoldMinutes >= 1 ? 44
+          : Math.max(22, holdRatio * 48);
+
+  return {
+    vwapHoldMinutes,
+    vwapHoldScore: Math.round(clamp(score)),
+  };
 }
 
 function calculateCompressionScore(bars) {
@@ -140,6 +181,7 @@ function calculateCommonSignals(bars) {
       volumeAcceleration5m: null,
       volumeAccelerationScore: 50,
       higherLowScore: 50,
+      vwapHoldMinutes: null,
       vwapHoldScore: 50,
       compressionScore: 50,
       commonSignalStatus: "데이터 부족",
@@ -150,7 +192,7 @@ function calculateCommonSignals(bars) {
   return {
     ...volumeAcceleration,
     higherLowScore: calculateHigherLowScore(bars),
-    vwapHoldScore: calculateVwapHoldScore(bars),
+    ...calculateVwapHold(bars),
     compressionScore: calculateCompressionScore(bars),
     commonSignalStatus: "ok",
   };
