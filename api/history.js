@@ -255,6 +255,16 @@ function normalizeKisBars(rawSeries, fromSec) {
     .sort((a, b) => a.timestamp - b.timestamp);
 }
 
+function dedupeBarsByTimestamp(bars) {
+  const byTimestamp = new Map();
+  for (const bar of bars) {
+    if (bar && bar.timestamp !== null && bar.timestamp !== undefined) {
+      byTimestamp.set(bar.timestamp, bar);
+    }
+  }
+  return [...byTimestamp.values()].sort((a, b) => a.timestamp - b.timestamp);
+}
+
 function buildNextKey(rawSeries, intervalMinutes) {
   if (!Array.isArray(rawSeries) || !rawSeries.length) return "";
   const dated = rawSeries
@@ -428,7 +438,7 @@ async function fetchKisHistory(symbol, exchangeName, sessionType, intervalInfo, 
       if (pageSeries.length < 120) break;
     }
 
-    const bars = normalizeKisBars(allRawBars, fromSec);
+    const bars = dedupeBarsByTimestamp(normalizeKisBars(allRawBars, fromSec));
     if (bars.length) {
       return {
         ok: true,
