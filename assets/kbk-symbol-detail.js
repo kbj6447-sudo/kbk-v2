@@ -824,7 +824,76 @@ function scoreTopPick(item) {
   };
 }
 
+function enrichTopPickDecision(pick) {
+  const item = pick?.item ?? {};
+  const preMarketChange = num(item?.preMarketChangePercent) ?? pick?.change ?? 0;
+  const vwap = String(pick?.vwap ?? "");
+  const vwapBelow = vwap.includes("??") || vwap.toLowerCase().includes("below");
+  const negativeSession = preMarketChange < 0 || (pick?.change ?? 0) < 0;
+  const severeDrop = preMarketChange <= -8 || (pick?.change ?? 0) <= -8;
+  const riskScore = num(item?.riskScore) ?? pick?.chaseRisk ?? 50;
+  const accumulationScore = num(item?.scannerScore) ?? num(item?.finalProbabilityScore) ?? 50;
+  const patternScore = num(item?.patternSimilarityScore) ?? 50;
+  const elevatedRisk = riskScore >= 72 || (pick?.chaseRisk ?? 0) >= 72;
+  const overheated = (pick?.change ?? 0) >= 45;
+  const veryOverheated = (pick?.change ?? 0) >= 70;
+  const volumeGood = (pick?.volume ?? 0) >= 1000000 || (pick?.rvol ?? 0) >= 1.5;
+  const priceWeak = (pick?.change ?? 0) < 0 || pick?.trend !== "??";
+  const volumeButWeak = volumeGood && priceWeak;
+
+  let finalScore = num(pick?.finalScore) ?? 0;
+  if (negativeSession && vwapBelow) finalScore -= severeDrop ? 22 : 14;
+  if (elevatedRisk && (pick?.change ?? 0) >= 12) finalScore -= 10;
+  if (volumeButWeak) finalScore -= 8;
+  if (overheated) finalScore -= veryOverheated ? 12 : 6;
+  finalScore = Math.round(clampScore(finalScore));
+
+  let verdict = "??";
+  if (finalScore >= 78 && !negativeSession && !vwapBelow && !elevatedRisk && (pick?.chaseRisk ?? 0) < 62) verdict = "?? ??";
+  if (severeDrop && vwapBelow) verdict = "?? ??";
+  else if ((negativeSession && vwapBelow) || elevatedRisk || volumeButWeak || veryOverheated) verdict = "??";
+  else if (finalScore <= 44 || ((pick?.chaseRisk ?? 0) >= 82 && vwapBelow)) verdict = "?? ??";
+
+  const reasons = Array.isArray(pick?.reasons) ? [...pick.reasons] : [];
+  const detailReasons = [];
+  const cautions = [];
+
+  if (volumeGood) {
+    if (!reasons.includes("??? ??")) reasons.unshift("??? ??");
+    detailReasons.push("??? ??: ?? ??? " + compact(pick?.volume ?? 0) + " / RVOL " + ((pick?.rvol ?? 0) ? pick.rvol.toFixed(1) : "-"));
+  }
+  if ((pick?.rvol ?? 0) >= 1.5) detailReasons.push("????? RVOL: " + pick.rvol.toFixed(1));
+  detailReasons.push("?? ?? ??: " + Math.round(num(pick?.surgeScore) ?? 0) + "?");
+  detailReasons.push("?? ??: " + Math.round(accumulationScore) + "?");
+  detailReasons.push("?? ??: " + Math.round(patternScore) + "?");
+  detailReasons.push("VWAP ??: " + (vwap || "-"));
+  detailReasons.push("???/???: " + pct(pick?.change ?? 0) + " / " + compact(pick?.volume ?? 0));
+
+  if (preMarketChange < 0) cautions.push("???? ??: " + pct(preMarketChange));
+  if (vwapBelow) cautions.push("VWAP ??");
+  if (elevatedRisk) cautions.push("?? ?? ??: " + Math.round(Math.max(riskScore, pick?.chaseRisk ?? 0)) + "?");
+  if (overheated) cautions.push("?? ???: " + pct(pick?.change ?? 0));
+  if (volumeButWeak) cautions.push("???? ??? ?? ??");
+  if ((pick?.chaseRisk ?? 0) >= 80 || riskScore >= 80) cautions.push("??? ??");
+  if (overheated) cautions.push("???? ??");
+
+  return {
+    ...pick,
+    preMarketChange,
+    finalScore,
+    verdict,
+    reasons: reasons.length ? reasons : ["??/??? ?? ??"],
+    detailReasons: detailReasons.length ? detailReasons : ["?? ??? ?? ?? ????."],
+    cautions: cautions.length ? cautions : ["??? ?? ??? ?? ?? ????."],
+    accumulationScore: Math.round(accumulationScore),
+    patternScore: Math.round(patternScore),
+    riskScore: Math.round(riskScore),
+    baseFinalScore: num(pick?.finalScore) ?? 0,
+  };
+}
+
 function ensureTopPickStyles() {
+
   if (document.getElementById("kbk-top-picks-style")) return;
   const style = document.createElement("style");
   style.id = "kbk-top-picks-style";
@@ -849,9 +918,20 @@ function ensureTopPickStyles() {
     .kbk-top-metrics b{display:block;color:#0f172a;margin-top:5px}
     .kbk-top-reasons{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
     .kbk-top-reasons span{background:#cffafe;color:#155e75;border-radius:999px;padding:7px 10px;font-size:.78rem;font-weight:700}
+    .kbk-top-card.is-open{border-color:rgba(37,99,235,.38);box-shadow:0 22px 48px rgba(37,99,235,.16)}
+    .kbk-top-toggle{margin-top:14px;color:#2563eb;font-size:.85rem;font-weight:700}
+    .kbk-top-detail{margin-top:18px;padding-top:18px;border-top:1px solid rgba(15,23,42,.1)}
+    .kbk-top-detail-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+    .kbk-top-detail-section{background:#f8fafc;border-radius:16px;padding:14px 16px}
+    .kbk-top-detail-section h4{margin:0 0 10px;color:#0f172a;font-size:.96rem}
+    .kbk-top-detail-section ul{margin:0;padding-left:18px;color:#334155;line-height:1.55}
+    .kbk-top-judgement{display:inline-flex;align-items:center;border-radius:999px;padding:8px 12px;font-weight:800}
+    .kbk-top-judgement.buy{background:#dcfce7;color:#166534}
+    .kbk-top-judgement.watch{background:#fef3c7;color:#92400e}
+    .kbk-top-judgement.block{background:#fee2e2;color:#991b1b}
     .kbk-top-note{background:#fff7ed;border:1px solid rgba(249,115,22,.22);border-radius:20px;color:#7c2d12;padding:16px 18px;line-height:1.65}
     .kbk-top-loading,.kbk-top-empty{background:#fff;border:1px solid rgba(15,23,42,.12);border-radius:20px;padding:22px;color:#334155}
-    @media (max-width:1100px){.kbk-top-grid{grid-template-columns:1fr}.kbk-top-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media (max-width:1100px){.kbk-top-grid{grid-template-columns:1fr}.kbk-top-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.kbk-top-detail-grid{grid-template-columns:1fr}}
     @media (max-width:700px){.kbk-top-head{display:grid}.kbk-top-score{text-align:left}.kbk-top-metrics{grid-template-columns:1fr}}
   `;
   document.head.appendChild(style);
@@ -900,50 +980,99 @@ function renderTopPickLoading() {
 function renderTopPicks(picks, updatedAt) {
   const panel = topPickPanel();
   if (!panel) return;
-  const top = picks[0];
+  const enrichedPicks = picks.map(enrichTopPickDecision);
+  const top = enrichedPicks[0];
   panel.dataset.loaded = "true";
-  panel.innerHTML = `
-    <section class="kbk-top-hero">
-      <p>Integrated Top Picks</p>
-      <h2>통합 최종 후보</h2>
-      <p>실시간 단타 시그널은 지금 진입 조건, 폭등 감시는 강한 움직임, 매집 스캐너는 신규 진입 리스크를 봅니다. 이 메뉴는 세 기준을 합쳐 최종 점수가 높은 종목만 보여줍니다.</p>
-      <button type="button" class="kbk-page-refresh kbk-top-refresh" data-kbk-page-refresh>새로고침</button>
-    </section>
-    <section class="kbk-top-note">
-      ${top ? `현재 1순위는 ${esc(top.symbol)}입니다. 단, 통합 점수도 매수 확정이 아니라 눌림, VWAP, 체결 강도 재확인을 위한 우선순위입니다.` : "현재 세 조건을 동시에 만족하는 강한 후보가 없습니다."}
-      <br>마지막 계산: ${updatedAt ? new Date(updatedAt).toLocaleTimeString("ko-KR") : new Date().toLocaleTimeString("ko-KR")}
-    </section>
-    ${picks.length ? `<section class="kbk-top-grid">
-      ${picks.map((pick, index) => `
-        <article class="kbk-top-card">
-          <div class="kbk-top-head">
-            <div>
-              <h3>${esc(pick.symbol)}</h3>
-              <p>${esc(pick.name)}</p>
-            </div>
-            <div class="kbk-top-score">${pick.finalScore}<span>${index === 0 ? "1순위" : esc(pick.verdict)}</span></div>
-          </div>
-          <div class="kbk-top-row">
-            <strong>${pricePairText(pick.price)}</strong>
-            <span>${pct(pick.change)}</span>
-            <span>거래량 ${compact(pick.volume)}</span>
-            <span>RVOL ${pick.rvol ? pick.rvol.toFixed(1) : "-"}</span>
-            <span>${esc(pick.vwap)}</span>
-          </div>
-          <div class="kbk-top-metrics">
-            <div><span>단타 적합</span><b>${pick.scalpScore}점</b></div>
-            <div><span>폭등 감시</span><b>${pick.surgeScore}점</b></div>
-            <div><span>진입 구조</span><b>${pick.setupScore}점</b></div>
-            <div><span>추격 위험</span><b>${pick.chaseRisk}점</b></div>
-          </div>
-          <div class="kbk-top-reasons">${pick.reasons.map((reason) => `<span>${esc(reason)}</span>`).join("")}</div>
-        </article>
-      `).join("")}
-    </section>` : `<section class="kbk-top-empty">현재 통합 조건을 통과한 종목이 없습니다. 자동 갱신 중입니다.</section>`}
-  `;
+  panel.innerHTML =
+    '<section class="kbk-top-hero">'
+    + '<p>Integrated Top Picks</p>'
+    + '<h2>?? ?? ??</h2>'
+    + '<p>??? ?? ??, ?? ??, ?? ??? ? ?? ?? ?? ??? ???? ??? ? ????? ?????.</p>'
+    + '<button type="button" class="kbk-page-refresh kbk-top-refresh" data-kbk-page-refresh>????</button>'
+    + '</section>'
+    + '<section class="kbk-top-note">'
+    + (top ? ('?? 1??? ' + esc(top.symbol) + ' ???. ?? ?? ??? ?? ????? ???, ?? ??? ?? ??, ?? ??? ?? ???? ???.') : '?? ?? ??? ??? ???? ?? ??? ????.')
+    + '<br>??? ??: ' + (updatedAt ? new Date(updatedAt).toLocaleTimeString('ko-KR') : new Date().toLocaleTimeString('ko-KR'))
+    + '</section>'
+    + (enrichedPicks.length ? ('<section class="kbk-top-grid">' + enrichedPicks.map((pick, index) => {
+      const verdictTone = pick.verdict === '?? ??' ? 'buy' : pick.verdict === '??' ? 'watch' : 'block';
+      return ''
+        + '<article class="kbk-top-card" data-top-pick-card="' + esc(pick.symbol) + '" tabindex="0" role="button" aria-expanded="false">'
+        +   '<div class="kbk-top-head">'
+        +     '<div>'
+        +       '<h3>' + esc(pick.symbol) + '</h3>'
+        +       '<p>' + esc(pick.name) + '</p>'
+        +     '</div>'
+        +     '<div class="kbk-top-score">' + pick.finalScore + '<span>' + (index === 0 ? '1?' : esc(pick.verdict)) + '</span></div>'
+        +   '</div>'
+        +   '<div class="kbk-top-row">'
+        +     '<strong>' + pricePairText(pick.price) + '</strong>'
+        +     '<span>' + pct(pick.change) + '</span>'
+        +     '<span>??? ' + compact(pick.volume) + '</span>'
+        +     '<span>RVOL ' + (pick.rvol ? pick.rvol.toFixed(1) : '-') + '</span>'
+        +     '<span>' + esc(pick.vwap) + '</span>'
+        +   '</div>'
+        +   '<div class="kbk-top-metrics">'
+        +     '<div><span>?? ??</span><b>' + pick.scalpScore + '?</b></div>'
+        +     '<div><span>?? ??</span><b>' + pick.surgeScore + '?</b></div>'
+        +     '<div><span>?? ??</span><b>' + pick.setupScore + '?</b></div>'
+        +     '<div><span>?? ??</span><b>' + pick.chaseRisk + '?</b></div>'
+        +   '</div>'
+        +   '<div class="kbk-top-reasons">' + pick.reasons.map((reason) => '<span>' + esc(reason) + '</span>').join('') + '</div>'
+        +   '<div class="kbk-top-toggle">??? ???? ?? ??? ?? ??, ?? ??? ? ? ????.</div>'
+        +   '<div class="kbk-top-detail" hidden>'
+        +     '<div class="kbk-top-detail-grid">'
+        +       '<section class="kbk-top-detail-section">'
+        +         '<h4>?? ??</h4>'
+        +         '<ul>' + pick.detailReasons.map((reason) => '<li>' + esc(reason) + '</li>').join('') + '</ul>'
+        +       '</section>'
+        +       '<section class="kbk-top-detail-section">'
+        +         '<h4>?? ??</h4>'
+        +         '<ul>' + pick.cautions.map((reason) => '<li>' + esc(reason) + '</li>').join('') + '</ul>'
+        +       '</section>'
+        +       '<section class="kbk-top-detail-section">'
+        +         '<h4>?? ??</h4>'
+        +         '<div class="kbk-top-judgement ' + verdictTone + '">' + esc(pick.verdict) + '</div>'
+        +         '<ul>'
+        +           + '<li>?? ??: ' + pick.finalScore + '?</li>'
+        +           + '<li>?? ? ??: ' + pick.baseFinalScore + '?</li>'
+        +           + '<li>?? ??: ' + pick.chaseRisk + '?</li>'
+        +         + '</ul>'
+        +       '</section>'
+        +     '</div>'
+        +   '</div>'
+        + '</article>';
+    }).join('') + '</section>') : '<section class="kbk-top-empty">?? ?? ??? ??? ??? ????. ?? ?? ????.</section>');
+  bindTopPickCardDetails(panel);
+}
+
+function bindTopPickCardDetails(panel) {
+  panel.querySelectorAll('[data-top-pick-card]').forEach((card) => {
+    const toggle = () => {
+      const detail = card.querySelector('.kbk-top-detail');
+      if (!detail) return;
+      const nextOpen = detail.hidden;
+      panel.querySelectorAll('[data-top-pick-card]').forEach((other) => {
+        other.classList.remove('is-open');
+        other.setAttribute('aria-expanded', 'false');
+        const otherDetail = other.querySelector('.kbk-top-detail');
+        if (otherDetail) otherDetail.hidden = true;
+      });
+      detail.hidden = !nextOpen;
+      card.classList.toggle('is-open', nextOpen);
+      card.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+    };
+    card.addEventListener('click', toggle);
+    card.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      toggle();
+    });
+  });
 }
 
 function priceUsdText(value) {
+
   return usdText(value);
 }
 
