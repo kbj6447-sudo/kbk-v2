@@ -903,35 +903,53 @@ module.exports = async function handler(req, res) {
       const enrichSymbols = new Set(rankedForVolume.map((item) => item.symbol));
       const symbols = payload.data.items.map((item) => String(item?.symbol || "").toUpperCase()).filter(Boolean);
       const sessionType = getSessionType(new Date());
-      const batchQuoteStartedAt = Date.now();
-      const batchQuoteMap = await fetchBatchQuoteMap(symbols);
-      logScannerStep("batch quote fetch", batchQuoteStartedAt, {
-        symbols: symbols.length,
-        quotes: batchQuoteMap.size,
-      });
       const chartSymbols = symbols.filter((symbol) => enrichSymbols.has(symbol));
-      const chartStartedAt = Date.now();
-      const chartSnapshots = await mapWithLimit(chartSymbols, 4, async (symbol) => [symbol, await fetchChartSnapshot(symbol)]);
-      logScannerStep("chart enrich", chartStartedAt, {
-        symbols: chartSymbols.length,
-      });
+      const batchQuotePromise = (async () => {
+        const batchQuoteStartedAt = Date.now();
+        const map = await fetchBatchQuoteMap(symbols);
+        logScannerStep("batch quote fetch", batchQuoteStartedAt, {
+          symbols: symbols.length,
+          quotes: map.size,
+        });
+        return map;
+      })();
+      const chartSnapshotsPromise = (async () => {
+        const chartStartedAt = Date.now();
+        const snapshots = await mapWithLimit(chartSymbols, 4, async (symbol) => [symbol, await fetchChartSnapshot(symbol)]);
+        logScannerStep("chart enrich", chartStartedAt, {
+          symbols: chartSymbols.length,
+        });
+        return snapshots;
+      })();
+      const localQuoteSnapshotsPromise = (async () => {
+        const quoteStartedAt = Date.now();
+        const snapshots = sessionType === "DAY"
+          ? await mapWithLimit(chartSymbols, 2, async (symbol) => [symbol, await fetchLocalQuoteSnapshot(symbol)])
+          : [];
+        logScannerStep("quote enrich", quoteStartedAt, {
+          symbols: chartSymbols.length,
+          enabled: sessionType === "DAY",
+        });
+        return snapshots;
+      })();
+      const localHistorySnapshotsPromise = (async () => {
+        const historyStartedAt = Date.now();
+        const snapshots = sessionType === "DAY"
+          ? await mapWithLimit(chartSymbols, 2, async (symbol) => [symbol, await fetchLocalHistorySnapshot(symbol, "1m")])
+          : [];
+        logScannerStep("history enrich", historyStartedAt, {
+          symbols: chartSymbols.length,
+          enabled: sessionType === "DAY",
+        });
+        return snapshots;
+      })();
+      const [batchQuoteMap, chartSnapshots, localQuoteSnapshots, localHistorySnapshots] = await Promise.all([
+        batchQuotePromise,
+        chartSnapshotsPromise,
+        localQuoteSnapshotsPromise,
+        localHistorySnapshotsPromise,
+      ]);
       const chartMap = new Map(chartSnapshots);
-      const quoteStartedAt = Date.now();
-      const localQuoteSnapshots = sessionType === "DAY"
-        ? await mapWithLimit(chartSymbols, 2, async (symbol) => [symbol, await fetchLocalQuoteSnapshot(symbol)])
-        : [];
-      logScannerStep("quote enrich", quoteStartedAt, {
-        symbols: chartSymbols.length,
-        enabled: sessionType === "DAY",
-      });
-      const historyStartedAt = Date.now();
-      const localHistorySnapshots = sessionType === "DAY"
-        ? await mapWithLimit(chartSymbols, 2, async (symbol) => [symbol, await fetchLocalHistorySnapshot(symbol, "1m")])
-        : [];
-      logScannerStep("history enrich", historyStartedAt, {
-        symbols: chartSymbols.length,
-        enabled: sessionType === "DAY",
-      });
       const localQuoteMap = new Map(localQuoteSnapshots);
       const localHistoryMap = new Map(localHistorySnapshots);
       const normalizeStartedAt = Date.now();
