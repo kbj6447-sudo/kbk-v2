@@ -6,15 +6,42 @@
   window.__kbkScannerCacheInstalled = true;
 
   var SCANNER_CACHE_TTL_MS = 45 * 1000;
-  var SCANNER_STALE_MS = 5 * 60 * 1000;
+  var SCANNER_STALE_MS = 30 * 60 * 1000;
   var FORCE_REFRESH_WINDOW_MS = 2500;
+  var SCANNER_CACHE_KEY = "kbk:scanner:lastResponse";
+  var SCANNER_CACHE_UPDATED_AT_KEY = "kbk:scanner:lastUpdatedAt";
+  var SCANNER_FORCE_UNTIL_KEY = "kbk:scanner:forceUntil";
+  var FORCE_REFRESH_LABELS = ["새로고침", "전체 분석", "감시 갱신", "Refresh"];
   var originalFetch = window.fetch.bind(window);
   var cachedEntry = null;
   var inFlightEntryPromise = null;
-  var forceRefreshUntil = 0;
+  var forceRefreshUntil = readPersistedForceUntil();
+  var servedCachedBody = "";
+  var usedCachedResponse = false;
+  var refreshScheduled = false;
 
   function now() {
     return Date.now();
+  }
+
+  function readPersistedForceUntil() {
+    try {
+      var stored = Number(sessionStorage.getItem(SCANNER_FORCE_UNTIL_KEY) || 0);
+      return Number.isFinite(stored) ? stored : 0;
+    } catch (_error) {
+      return 0;
+    }
+  }
+
+  function persistForceUntil(until) {
+    forceRefreshUntil = until;
+    try {
+      if (until > now()) {
+        sessionStorage.setItem(SCANNER_FORCE_UNTIL_KEY, String(until));
+      } else {
+        sessionStorage.removeItem(SCANNER_FORCE_UNTIL_KEY);
+      }
+    } catch (_error) {}
   }
 
   function scannerUrl(input) {
@@ -34,12 +61,73 @@
     return method === "GET";
   }
 
+  function isCacheAgeValid(cachedAt) {
+    return Number.isFinite(cachedAt) && cachedAt > 0 && (now() - cachedAt) <= SCANNER_STALE_MS;
+  }
+
+  function clearPersistedCache() {
+    try {
+      localStorage.removeItem(SCANNER_CACHE_KEY);
+      localStorage.removeItem(SCANNER_CACHE_UPDATED_AT_KEY);
+    } catch (_error) {}
+  }
+
+  function buildHeaders(headers) {
+    if (headers && typeof headers === "object") return headers;
+    return {
+      "content-type": "application/json; charset=utf-8",
+      "x-kbk-scanner-cache": "localStorage",
+    };
+  }
+
+  function createEntry(body, status, statusText, headers, cachedAt) {
+    return {
+      body: body,
+      status: status || 200,
+      statusText: statusText || "OK",
+      headers: buildHeaders(headers),
+      cachedAt: cachedAt || now(),
+    };
+  }
+
+  function setCachedEntry(entry) {
+    cachedEntry = entry;
+    try {
+      localStorage.setItem(SCANNER_CACHE_KEY, entry.body);
+      localStorage.setItem(SCANNER_CACHE_UPDATED_AT_KEY, String(entry.cachedAt));
+    } catch (_error) {}
+  }
+
+  function readPersistedCache() {
+    try {
+      var body = localStorage.getItem(SCANNER_CACHE_KEY) || "";
+      var cachedAt = Number(localStorage.getItem(SCANNER_CACHE_UPDATED_AT_KEY) || 0);
+      if (!body || !isCacheAgeValid(cachedAt)) {
+        clearPersistedCache();
+        return null;
+      }
+      cachedEntry = createEntry(body, 200, "OK", null, cachedAt);
+      return cachedEntry;
+    } catch (_error) {
+      return null;
+    }
+  }
+
   function responseFromEntry(entry) {
     return new Response(entry.body, {
       status: entry.status,
       statusText: entry.statusText,
       headers: entry.headers,
     });
+  }
+
+  function maybeScheduleRefresh(nextBody) {
+    if (!usedCachedResponse || !servedCachedBody) return;
+    if (refreshScheduled || !nextBody || nextBody === servedCachedBody) return;
+    refreshScheduled = true;
+    window.setTimeout(function reloadAfterRefresh() {
+      window.location.reload();
+    }, 60);
   }
 
   async function fetchAndCache(input, init) {
@@ -51,23 +139,13 @@
       headers[key] = value;
     });
 
-    if (response.ok) {
-      cachedEntry = {
-        body: body,
-        status: response.status,
-        statusText: response.statusText,
-        headers: headers,
-        cachedAt: now(),
-      };
+    var entry = createEntry(body, response.status, response.statusText, headers, now());
+    if (response.ok && body) {
+      setCachedEntry(entry);
+      maybeScheduleRefresh(body);
     }
 
-    return {
-      body: body,
-      status: response.status,
-      statusText: response.statusText,
-      headers: headers,
-      cachedAt: now(),
-    };
+    return entry;
   }
 
   function refreshInBackground(input, init) {
@@ -87,7 +165,14 @@
   }
 
   function markForceRefresh() {
-    forceRefreshUntil = now() + FORCE_REFRESH_WINDOW_MS;
+    persistForceUntil(now() + FORCE_REFRESH_WINDOW_MS);
+  }
+
+  function isForceRefreshLabel(text) {
+    var normalized = String(text || "");
+    return FORCE_REFRESH_LABELS.some(function includesLabel(label) {
+      return normalized.indexOf(label) >= 0;
+    });
   }
 
   window.__kbkRefreshScannerCache = function refreshScannerCache() {
@@ -97,6 +182,10 @@
   window.__kbkClearScannerCache = function clearScannerCache() {
     cachedEntry = null;
     inFlightEntryPromise = null;
+    servedCachedBody = "";
+    usedCachedResponse = false;
+    refreshScheduled = false;
+    clearPersistedCache();
     markForceRefresh();
   };
 
@@ -105,14 +194,23 @@
       return originalFetch(input, init);
     }
 
-    var age = cachedEntry ? now() - cachedEntry.cachedAt : Infinity;
     var force = shouldForceRefresh();
+    if (!cachedEntry || !isCacheAgeValid(cachedEntry.cachedAt)) {
+      cachedEntry = readPersistedCache();
+    }
+
+    var age = cachedEntry ? now() - cachedEntry.cachedAt : Infinity;
 
     if (!force && cachedEntry && age <= SCANNER_CACHE_TTL_MS) {
+      usedCachedResponse = true;
+      servedCachedBody = cachedEntry.body;
+      refreshInBackground(input, init);
       return Promise.resolve(responseFromEntry(cachedEntry));
     }
 
     if (!force && cachedEntry && age <= SCANNER_STALE_MS) {
+      usedCachedResponse = true;
+      servedCachedBody = cachedEntry.body;
       refreshInBackground(input, init);
       return Promise.resolve(responseFromEntry(cachedEntry));
     }
@@ -121,7 +219,7 @@
       inFlightEntryPromise = fetchAndCache(input, init)
         .finally(function clearInFlight() {
           inFlightEntryPromise = null;
-          forceRefreshUntil = 0;
+          persistForceUntil(0);
         });
     }
 
@@ -139,7 +237,7 @@
     if (
       button.id === "refresh-btn" ||
       button.dataset.kbkPageRefresh ||
-      /새로고침|전체 분석|감시 갱신|Refresh/i.test(text)
+      isForceRefreshLabel(text)
     ) {
       markForceRefresh();
     }
