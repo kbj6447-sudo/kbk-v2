@@ -1,6 +1,23 @@
 const UPSTREAM = "https://kbk-theta-accumulation-pro.vercel.app/api/scanner";
 const quoteHandler = require("./quote");
 const historyHandler = require("./history");
+const ENRICH_SYMBOL_LIMIT = 30;
+
+function formatScannerDetails(details = {}) {
+  return Object.entries(details)
+    .filter(([, value]) => value !== undefined && value !== null)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(" ");
+}
+
+function logScannerElapsed(step, elapsedMs, details = {}) {
+  const detailText = formatScannerDetails(details);
+  console.log(`[SCANNER] ${step} ${elapsedMs}ms${detailText ? ` ${detailText}` : ""}`);
+}
+
+function logScannerStep(step, startedAt, details = {}) {
+  logScannerElapsed(step, Date.now() - startedAt, details);
+}
 
 function num(value) {
   if (value === null || value === undefined || value === "") return null;
@@ -821,12 +838,20 @@ function boostedScore(item) {
   return Math.round(clamp(score));
 }
 
-async function normalizeItem(item, enrichVolume = true) {
+async function normalizeItem(item, enrichVolume = true, metrics = null) {
   if (!item || typeof item !== "object") return item;
 
   const rawVolume = Math.max(num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0);
   const needsVolumeProfile = enrichVolume && ((num(item.relativeVolume) ?? num(item.volumeRatio)) === null || num(item.averageVolume) === null);
-  const volumeProfile = needsVolumeProfile ? await fetchVolumeProfile(item.symbol, rawVolume, item.volumeSource) : {};
+  let volumeProfile = {};
+  if (needsVolumeProfile) {
+    const volumeStartedAt = Date.now();
+    volumeProfile = await fetchVolumeProfile(item.symbol, rawVolume, item.volumeSource);
+    if (metrics) {
+      metrics.volumeProfileCount += 1;
+      metrics.volumeProfileMs += Date.now() - volumeStartedAt;
+    }
+  }
   const merged = { ...item, ...compactObject(volumeProfile) };
   const boosted = boostedScore(merged);
   const correctedVolumeScore = volumeStrength(merged);
@@ -848,15 +873,22 @@ async function normalizeItem(item, enrichVolume = true) {
 }
 
 module.exports = async function handler(req, res) {
+  const requestStartedAt = Date.now();
   try {
     const upstreamUrl = new URL(UPSTREAM);
     const requestUrl = new URL(req.url, "https://kbk-theta-accumulation.vercel.app");
     upstreamUrl.search = requestUrl.search;
 
+    const upstreamStartedAt = Date.now();
     const response = await fetch(upstreamUrl, {
       headers: { accept: "application/json" },
     });
     const payload = await response.json();
+    const upstreamItems = Array.isArray(payload?.data?.items) ? payload.data.items.length : 0;
+    logScannerStep("upstream fetch", upstreamStartedAt, {
+      status: response.status,
+      items: upstreamItems,
+    });
 
     if (payload?.data?.items && Array.isArray(payload.data.items)) {
       const rankedForVolume = [...payload.data.items]
@@ -867,22 +899,46 @@ module.exports = async function handler(req, res) {
           const bScore = num(b.finalProbabilityScore) ?? num(b.scannerScore) ?? 0;
           return bVolume - aVolume || bScore - aScore;
         })
-        .slice(0, 120);
+        .slice(0, ENRICH_SYMBOL_LIMIT);
       const enrichSymbols = new Set(rankedForVolume.map((item) => item.symbol));
       const symbols = payload.data.items.map((item) => String(item?.symbol || "").toUpperCase()).filter(Boolean);
       const sessionType = getSessionType(new Date());
+      const batchQuoteStartedAt = Date.now();
       const batchQuoteMap = await fetchBatchQuoteMap(symbols);
+      logScannerStep("batch quote fetch", batchQuoteStartedAt, {
+        symbols: symbols.length,
+        quotes: batchQuoteMap.size,
+      });
       const chartSymbols = symbols.filter((symbol) => enrichSymbols.has(symbol));
+      const chartStartedAt = Date.now();
       const chartSnapshots = await mapWithLimit(chartSymbols, 4, async (symbol) => [symbol, await fetchChartSnapshot(symbol)]);
+      logScannerStep("chart enrich", chartStartedAt, {
+        symbols: chartSymbols.length,
+      });
       const chartMap = new Map(chartSnapshots);
+      const quoteStartedAt = Date.now();
       const localQuoteSnapshots = sessionType === "DAY"
         ? await mapWithLimit(chartSymbols, 2, async (symbol) => [symbol, await fetchLocalQuoteSnapshot(symbol)])
         : [];
+      logScannerStep("quote enrich", quoteStartedAt, {
+        symbols: chartSymbols.length,
+        enabled: sessionType === "DAY",
+      });
+      const historyStartedAt = Date.now();
       const localHistorySnapshots = sessionType === "DAY"
         ? await mapWithLimit(chartSymbols, 2, async (symbol) => [symbol, await fetchLocalHistorySnapshot(symbol, "1m")])
         : [];
+      logScannerStep("history enrich", historyStartedAt, {
+        symbols: chartSymbols.length,
+        enabled: sessionType === "DAY",
+      });
       const localQuoteMap = new Map(localQuoteSnapshots);
       const localHistoryMap = new Map(localHistorySnapshots);
+      const normalizeStartedAt = Date.now();
+      const metrics = {
+        volumeProfileCount: 0,
+        volumeProfileMs: 0,
+      };
 
       payload.data.items = (await mapWithLimit(payload.data.items, 2, async (item) => {
         const symbolKey = String(item?.symbol || "").toUpperCase();
@@ -897,6 +953,7 @@ module.exports = async function handler(req, res) {
         const normalizedItem = await normalizeItem(
           { ...item, ...compactObject(preNormalizedLiveQuote) },
           enrichSymbols.has(item.symbol),
+          metrics,
         );
         const liveQuote = normalizeLiveQuote(
           normalizedItem,
@@ -945,11 +1002,24 @@ module.exports = async function handler(req, res) {
         };
       }))
         .sort((a, b) => (num(b.finalProbabilityScore) ?? 0) - (num(a.finalProbabilityScore) ?? 0));
+      logScannerElapsed("volume profile", metrics.volumeProfileMs, {
+        calls: metrics.volumeProfileCount,
+      });
+      logScannerStep("normalize items", normalizeStartedAt, {
+        items: payload.data.items.length,
+      });
     }
 
     res.setHeader("cache-control", "no-store");
+    logScannerStep("completed", requestStartedAt, {
+      status: response.status,
+      enrichLimit: ENRICH_SYMBOL_LIMIT,
+    });
     res.status(response.status).json(payload);
   } catch (error) {
+    logScannerStep("completed", requestStartedAt, {
+      status: 502,
+    });
     res.status(502).json({
       ok: false,
       message: error instanceof Error ? error.message : "scanner proxy failed",
