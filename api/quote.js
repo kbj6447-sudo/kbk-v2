@@ -12,6 +12,154 @@ function orNum(a, b) {
   var va = num(a);
   return va !== null ? va : num(b);
 }
+var KIS_BASE_URL = 'https://openapi.koreainvestment.com:9443';
+var KIS_TOKEN_CACHE = {
+  accessToken: '',
+  expiresAt: 0
+};
+
+function getKstParts(date) {
+  var shifted = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+  return {
+    hour: shifted.getUTCHours(),
+    minute: shifted.getUTCMinutes()
+  };
+}
+
+function getSessionType(date) {
+  var parts = getKstParts(date);
+  var totalMinutes = parts.hour * 60 + parts.minute;
+  if (totalMinutes >= 9 * 60 && totalMinutes < 17 * 60) return 'DAY';
+  if (totalMinutes >= 17 * 60 && totalMinutes < 22 * 60 + 30) return 'PRE';
+  if (totalMinutes >= 22 * 60 + 30 || totalMinutes < 5 * 60) return 'REGULAR';
+  return 'AFTER';
+}
+
+function getPreferredKisMarketCodes(exchangeName) {
+  var normalized = String(exchangeName || '').toUpperCase();
+  if (normalized.indexOf('NYSE') >= 0 || normalized.indexOf('NYQ') >= 0) {
+    return ['BAY', 'BAQ', 'BAA'];
+  }
+  if (normalized.indexOf('AMEX') >= 0 || normalized.indexOf('ASE') >= 0) {
+    return ['BAA', 'BAQ', 'BAY'];
+  }
+  return ['BAQ', 'BAY', 'BAA'];
+}
+
+async function fetchJson(url, options) {
+  var response = await fetch(url, options);
+  var payload = await response.json().catch(function() { return null; });
+  return { response: response, payload: payload };
+}
+
+async function getKisAccessToken() {
+  var now = Date.now();
+  if (KIS_TOKEN_CACHE.accessToken && KIS_TOKEN_CACHE.expiresAt > now + 60 * 1000) {
+    return KIS_TOKEN_CACHE.accessToken;
+  }
+
+  if (process.env.KIS_ACCESS_TOKEN) {
+    KIS_TOKEN_CACHE.accessToken = process.env.KIS_ACCESS_TOKEN;
+    KIS_TOKEN_CACHE.expiresAt = now + 6 * 60 * 60 * 1000;
+    return KIS_TOKEN_CACHE.accessToken;
+  }
+
+  var appKey = process.env.KIS_APP_KEY;
+  var appSecret = process.env.KIS_APP_SECRET;
+  if (!appKey || !appSecret) return null;
+
+  var tokenResult = await fetchJson(KIS_BASE_URL + '/oauth2/tokenP', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'accept': 'application/json'
+    },
+    body: JSON.stringify({
+      grant_type: 'client_credentials',
+      appkey: appKey,
+      appsecret: appSecret
+    })
+  });
+
+  var accessToken = tokenResult && tokenResult.payload ? tokenResult.payload.access_token : null;
+  if (!tokenResult.response.ok || !accessToken) return null;
+
+  var expiresIn = num(tokenResult.payload.expires_in) || 24 * 60 * 60;
+  KIS_TOKEN_CACHE.accessToken = accessToken;
+  KIS_TOKEN_CACHE.expiresAt = now + expiresIn * 1000;
+  return accessToken;
+}
+
+async function fetchKisQuoteForCode(symbol, marketCode, token) {
+  var appKey = process.env.KIS_APP_KEY;
+  var appSecret = process.env.KIS_APP_SECRET;
+  if (!token || !appKey || !appSecret) return null;
+
+  var result = await fetchJson(
+    KIS_BASE_URL + '/uapi/overseas-price/v1/quotations/price?AUTH=&EXCD=' + encodeURIComponent(marketCode) + '&SYMB=' + encodeURIComponent(symbol),
+    {
+      headers: {
+        'content-type': 'application/json',
+        'accept': 'application/json',
+        'authorization': 'Bearer ' + token,
+        'appkey': appKey,
+        'appsecret': appSecret,
+        'tr_id': 'HHDFS00000300',
+        'custtype': 'P'
+      }
+    }
+  );
+
+  if (!result.response.ok || !result.payload || result.payload.rt_cd !== '0') return null;
+  return result.payload.output || null;
+}
+
+async function fetchKisQuote(symbol, exchangeName, sessionType) {
+  if (sessionType !== 'DAY') {
+    return {
+      ok: false,
+      sessionType: sessionType,
+      reason: 'non-day-session'
+    };
+  }
+
+  var token = await getKisAccessToken();
+  if (!token) {
+    return {
+      ok: false,
+      sessionType: sessionType,
+      reason: 'missing-token'
+    };
+  }
+
+  var marketCodes = getPreferredKisMarketCodes(exchangeName);
+  for (var i = 0; i < marketCodes.length; i++) {
+    var marketCode = marketCodes[i];
+    var output = await fetchKisQuoteForCode(symbol, marketCode, token);
+    var last = output ? num(output.last) : null;
+    var tvol = output ? num(output.tvol) : null;
+    if (output && (last !== null || tvol !== null)) {
+      return {
+        ok: true,
+        sessionType: sessionType,
+        marketCode: marketCode,
+        price: last,
+        previousClose: num(output.base),
+        diff: num(output.diff),
+        rate: num(output.rate),
+        volume: tvol,
+        amount: num(output.tamt),
+        raw: output
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    sessionType: sessionType,
+    reason: 'no-usable-market-code'
+  };
+}
 module.exports = async function handler(req, res) {
   res.setHeader('cache-control', 'no-store');
   try {
@@ -88,6 +236,7 @@ module.exports = async function handler(req, res) {
     var vR = (qi.volume || []);
 
     var marketState = String(q.marketState || meta.marketState || '').toUpperCase();
+    var sessionType = getSessionType(new Date());
     var regularPrice = orNum(q.regularMarketPrice, meta.regularMarketPrice);
     var latestClose = bestChart.lastClose;
     if (regularPrice === null) regularPrice = latestClose;
@@ -98,6 +247,8 @@ module.exports = async function handler(req, res) {
     var previousClose = orNum(q.regularMarketPreviousClose, orNum(q.previousClose, orNum(meta.previousClose, meta.chartPreviousClose)));
     var avgVolume = orNum(q.averageDailyVolume3Month, orNum(q.averageDailyVolume10Day, orNum(meta.averageDailyVolume3Month, meta.averageDailyVolume10Day)));
     var currentVolume = orNum(q.regularMarketVolume, meta.regularMarketVolume);
+    var exchangeName = q.exchangeName || meta.exchangeName || meta.fullExchangeName || '';
+    var kisQuote = await fetchKisQuote(symbol, exchangeName, sessionType);
 
     // 실시간 가격 우선순위:
     // latestClose (가장 최신 1분/2분봉 실거래가) 를 최우선으로 사용
@@ -120,9 +271,26 @@ module.exports = async function handler(req, res) {
       displayPrice = regularPrice;
     }
 
+    var priceSource = 'yahoo';
+    var volumeSource = currentVolume !== null ? 'yahoo-regularMarketVolume' : 'yahoo-chart-volume';
+    if (kisQuote.ok && kisQuote.price !== null) {
+      displayPrice = kisQuote.price;
+      priceSource = sessionType === 'DAY' ? 'kis-daymarket' : 'kis';
+    }
+    if (kisQuote.ok && kisQuote.volume !== null) {
+      currentVolume = kisQuote.volume;
+      volumeSource = 'kis-tvol';
+    }
+    if (kisQuote.ok && kisQuote.previousClose !== null) {
+      previousClose = kisQuote.previousClose;
+    }
+
     var displayChange = null;
     var displayChangePct = null;
-    if (displayPrice !== null && previousClose !== null && previousClose !== 0) {
+    if (kisQuote.ok && kisQuote.diff !== null && kisQuote.rate !== null) {
+      displayChange = kisQuote.diff;
+      displayChangePct = kisQuote.rate;
+    } else if (displayPrice !== null && previousClose !== null && previousClose !== 0) {
       displayChange = displayPrice - previousClose;
       displayChangePct = (displayChange / previousClose) * 100;
     }
@@ -165,6 +333,7 @@ module.exports = async function handler(req, res) {
     if (currentVolume === null && vR.length > 0) {
       var vs = vR.map(num).filter(function(v) { return v !== null && v > 0; });
       currentVolume = vs.reduce(function(s, v) { return s + v; }, 0) || null;
+      if (!kisQuote.ok) volumeSource = currentVolume !== null ? 'yahoo-chart-volume' : volumeSource;
     }
     var volumeRatio = (avgVolume && currentVolume) ? currentVolume / avgVolume : null;
     var isExtended = marketState === 'PRE' || marketState === 'POST' || marketState === 'POSTPOST';
@@ -200,7 +369,15 @@ module.exports = async function handler(req, res) {
         exchange: q.exchangeName || meta.exchangeName || meta.fullExchangeName || null,
         currency: q.currency || meta.currency || 'USD',
         latestBarAge: bestChart.lastTs ? Math.round((Date.now()/1000) - bestChart.lastTs) : null,
-        sourceTags: ['yahoo-v7-v8-direct', age8a <= 600 ? '1m-fresh' : '2m-5d']
+        sourceTags: ['yahoo-v7-v8-direct', age8a <= 600 ? '1m-fresh' : '2m-5d'].concat(kisQuote.ok ? ['kis-overseas-price'] : []),
+        sessionType: sessionType,
+        priceSource: priceSource,
+        volumeSource: volumeSource,
+        kisMarketCode: kisQuote.marketCode || null,
+        kisPrice: kisQuote.price || null,
+        kisVolume: kisQuote.volume || null,
+        kisRate: kisQuote.rate || null,
+        kisDiff: kisQuote.diff || null
       }
     });
   } catch (error) {
