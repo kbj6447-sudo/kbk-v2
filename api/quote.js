@@ -16,6 +16,22 @@ var kisToken = require('../lib/kisToken');
 var KIS_BASE_URL = kisToken.KIS_BASE_URL;
 var getKisAccessToken = kisToken.getKisAccessToken;
 
+function makeRequestId(prefix) {
+  return prefix + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+}
+
+function headerValue(headers, name) {
+  if (!headers) return '';
+  return headers[name] || headers[name.toLowerCase()] || headers[name.toUpperCase()] || '';
+}
+
+function getRequestContext(req, fallbackCaller) {
+  return {
+    caller: headerValue(req.headers, 'x-kis-caller') || fallbackCaller,
+    requestId: headerValue(req.headers, 'x-request-id') || makeRequestId(fallbackCaller)
+  };
+}
+
 function getKstParts(date) {
   var shifted = new Date(date.getTime() + 9 * 60 * 60 * 1000);
   return {
@@ -74,7 +90,7 @@ async function fetchKisQuoteForCode(symbol, marketCode, token) {
   return result.payload.output || null;
 }
 
-async function fetchKisQuote(symbol, exchangeName, sessionType) {
+async function fetchKisQuote(symbol, exchangeName, sessionType, requestContext) {
   if (sessionType !== 'DAY') {
     return {
       ok: false,
@@ -83,7 +99,10 @@ async function fetchKisQuote(symbol, exchangeName, sessionType) {
     };
   }
 
-  var token = await getKisAccessToken();
+  var token = await getKisAccessToken(requestContext.caller, {
+    requestId: requestContext.requestId,
+    symbol: symbol
+  });
   if (!token) {
     return {
       ok: false,
@@ -125,6 +144,8 @@ module.exports = async function handler(req, res) {
   try {
     var url = new URL(req.url, 'https://kbk-theta-accumulation.vercel.app');
     var symbol = url.searchParams.get('symbol') || '';
+    var requestContext = getRequestContext(req, 'quote');
+    console.log('[QUOTE] request requestId=' + requestContext.requestId + ' caller=' + requestContext.caller + ' symbol=' + symbol);
     if (!symbol || /^\d+$/.test(symbol)) {
       return res.status(400).json({ ok: false, code: 'BAD_SYMBOL', message: 'Invalid symbol: ' + symbol });
     }
@@ -208,7 +229,7 @@ module.exports = async function handler(req, res) {
     var avgVolume = orNum(q.averageDailyVolume3Month, orNum(q.averageDailyVolume10Day, orNum(meta.averageDailyVolume3Month, meta.averageDailyVolume10Day)));
     var currentVolume = orNum(q.regularMarketVolume, meta.regularMarketVolume);
     var exchangeName = q.exchangeName || meta.exchangeName || meta.fullExchangeName || '';
-    var kisQuote = await fetchKisQuote(symbol, exchangeName, sessionType);
+    var kisQuote = await fetchKisQuote(symbol, exchangeName, sessionType, requestContext);
 
     // 실시간 가격 우선순위:
     // latestClose (가장 최신 1분/2분봉 실거래가) 를 최우선으로 사용

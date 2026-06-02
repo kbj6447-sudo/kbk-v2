@@ -19,6 +19,15 @@ function logScannerStep(step, startedAt, details = {}) {
   logScannerElapsed(step, Date.now() - startedAt, details);
 }
 
+function makeRequestId(prefix) {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function headerValue(headers, name) {
+  if (!headers) return "";
+  return headers[name] || headers[name.toLowerCase()] || headers[name.toUpperCase()] || "";
+}
+
 function num(value) {
   if (value === null || value === undefined || value === "") return null;
   const parsed = Number(value);
@@ -90,7 +99,7 @@ function compactObject(object) {
   );
 }
 
-async function invokeLocalHandler(handler, path) {
+async function invokeLocalHandler(handler, path, headers = {}) {
   let statusCode = 200;
   let settled = false;
   let resolveResult;
@@ -100,7 +109,7 @@ async function invokeLocalHandler(handler, path) {
     rejectResult = reject;
   });
 
-  const req = { url: path, method: "GET", headers: {} };
+  const req = { url: path, method: "GET", headers };
   const res = {
     headers: {},
     setHeader(name, value) {
@@ -137,10 +146,14 @@ async function invokeLocalHandler(handler, path) {
   return resultPromise;
 }
 
-async function fetchLocalQuoteSnapshot(symbol) {
+async function fetchLocalQuoteSnapshot(symbol, requestId) {
   if (!symbol) return {};
   try {
-    const result = await invokeLocalHandler(quoteHandler, `/api/quote?symbol=${encodeURIComponent(symbol)}`);
+    const result = await invokeLocalHandler(
+      quoteHandler,
+      `/api/quote?symbol=${encodeURIComponent(symbol)}`,
+      { "x-kis-caller": "scanner", "x-request-id": requestId },
+    );
     if (result?.statusCode !== 200 || result?.body?.ok !== true || !result?.body?.data) return {};
     return result.body.data;
   } catch {
@@ -148,12 +161,13 @@ async function fetchLocalQuoteSnapshot(symbol) {
   }
 }
 
-async function fetchLocalHistorySnapshot(symbol, interval = "1m") {
+async function fetchLocalHistorySnapshot(symbol, interval = "1m", requestId) {
   if (!symbol) return {};
   try {
     const result = await invokeLocalHandler(
       historyHandler,
       `/api/history?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`,
+      { "x-kis-caller": "scanner", "x-request-id": requestId },
     );
     if (result?.statusCode !== 200 || result?.body?.ok !== true || !result?.body?.data) return {};
     return result.body.data;
@@ -874,6 +888,8 @@ async function normalizeItem(item, enrichVolume = true, metrics = null) {
 
 module.exports = async function handler(req, res) {
   const requestStartedAt = Date.now();
+  const requestId = headerValue(req.headers, "x-request-id") || makeRequestId("scanner");
+  console.log(`[SCANNER] start requestId=${requestId}`);
   try {
     const upstreamUrl = new URL(UPSTREAM);
     const requestUrl = new URL(req.url, "https://kbk-theta-accumulation.vercel.app");
@@ -886,6 +902,7 @@ module.exports = async function handler(req, res) {
     const payload = await response.json();
     const upstreamItems = Array.isArray(payload?.data?.items) ? payload.data.items.length : 0;
     logScannerStep("upstream fetch", upstreamStartedAt, {
+      requestId,
       status: response.status,
       items: upstreamItems,
     });
@@ -908,6 +925,7 @@ module.exports = async function handler(req, res) {
         const batchQuoteStartedAt = Date.now();
         const map = await fetchBatchQuoteMap(symbols);
         logScannerStep("batch quote fetch", batchQuoteStartedAt, {
+          requestId,
           symbols: symbols.length,
           quotes: map.size,
         });
@@ -917,6 +935,7 @@ module.exports = async function handler(req, res) {
         const chartStartedAt = Date.now();
         const snapshots = await mapWithLimit(chartSymbols, 4, async (symbol) => [symbol, await fetchChartSnapshot(symbol)]);
         logScannerStep("chart enrich", chartStartedAt, {
+          requestId,
           symbols: chartSymbols.length,
         });
         return snapshots;
@@ -924,9 +943,10 @@ module.exports = async function handler(req, res) {
       const localQuoteSnapshotsPromise = (async () => {
         const quoteStartedAt = Date.now();
         const snapshots = sessionType === "DAY"
-          ? await mapWithLimit(chartSymbols, 2, async (symbol) => [symbol, await fetchLocalQuoteSnapshot(symbol)])
+          ? await mapWithLimit(chartSymbols, 2, async (symbol) => [symbol, await fetchLocalQuoteSnapshot(symbol, requestId)])
           : [];
         logScannerStep("quote enrich", quoteStartedAt, {
+          requestId,
           symbols: chartSymbols.length,
           enabled: sessionType === "DAY",
         });
@@ -935,9 +955,10 @@ module.exports = async function handler(req, res) {
       const localHistorySnapshotsPromise = (async () => {
         const historyStartedAt = Date.now();
         const snapshots = sessionType === "DAY"
-          ? await mapWithLimit(chartSymbols, 2, async (symbol) => [symbol, await fetchLocalHistorySnapshot(symbol, "1m")])
+          ? await mapWithLimit(chartSymbols, 2, async (symbol) => [symbol, await fetchLocalHistorySnapshot(symbol, "1m", requestId)])
           : [];
         logScannerStep("history enrich", historyStartedAt, {
+          requestId,
           symbols: chartSymbols.length,
           enabled: sessionType === "DAY",
         });
@@ -1021,23 +1042,29 @@ module.exports = async function handler(req, res) {
       }))
         .sort((a, b) => (num(b.finalProbabilityScore) ?? 0) - (num(a.finalProbabilityScore) ?? 0));
       logScannerElapsed("volume profile", metrics.volumeProfileMs, {
+        requestId,
         calls: metrics.volumeProfileCount,
       });
       logScannerStep("normalize items", normalizeStartedAt, {
+        requestId,
         items: payload.data.items.length,
       });
     }
 
     res.setHeader("cache-control", "no-store");
     logScannerStep("completed", requestStartedAt, {
+      requestId,
       status: response.status,
       enrichLimit: ENRICH_SYMBOL_LIMIT,
     });
+    console.log(`[SCANNER] end requestId=${requestId} elapsed=${Date.now() - requestStartedAt}ms status=${response.status}`);
     res.status(response.status).json(payload);
   } catch (error) {
     logScannerStep("completed", requestStartedAt, {
+      requestId,
       status: 502,
     });
+    console.log(`[SCANNER] end requestId=${requestId} elapsed=${Date.now() - requestStartedAt}ms status=502`);
     res.status(502).json({
       ok: false,
       message: error instanceof Error ? error.message : "scanner proxy failed",
