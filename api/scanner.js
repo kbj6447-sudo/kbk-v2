@@ -485,6 +485,64 @@ function mergeSnapshots(...snapshots) {
   return snapshots.reduce((merged, snapshot) => ({ ...merged, ...compactObject(snapshot) }), {});
 }
 
+function debugQuoteSourceLabel(localQuoteSnapshot, hasYahooBatch) {
+  if (localQuoteSnapshot?.priceSource?.startsWith("kis")) return "local-quote-kis";
+  if (localQuoteSnapshot?.priceSource) return `local-quote-${localQuoteSnapshot.priceSource}`;
+  return hasYahooBatch ? "yahoo" : "none";
+}
+
+function debugHistorySourceLabel(localHistorySnapshot, hasYahooChart) {
+  if (localHistorySnapshot?.historySource === "kis-daymarket-bars") return "local-history-kis";
+  if (localHistorySnapshot?.historySource) return `local-history-${localHistorySnapshot.historySource}`;
+  return hasYahooChart ? "yahoo-chart" : "none";
+}
+
+function debugFallbackReason({
+  sessionType,
+  localQuoteSnapshot,
+  localHistorySnapshot,
+  mergedQuoteSnapshot,
+  liveQuote,
+  chartSnapshot,
+}) {
+  if (sessionType !== "DAY") return null;
+
+  const reasons = [];
+  const quoteHasKis = Boolean(localQuoteSnapshot?.priceSource?.startsWith("kis") && num(localQuoteSnapshot?.kisPrice) !== null);
+  const historyHasKis = localHistorySnapshot?.historySource === "kis-daymarket-bars" && Array.isArray(localHistorySnapshot?.bars) && localHistorySnapshot.bars.length > 0;
+
+  if (!quoteHasKis) {
+    reasons.push(`quote-${localQuoteSnapshot?.priceSource || "empty"}`);
+    if (num(localQuoteSnapshot?.kisPrice) === null) reasons.push("quote-kis-price-missing");
+    if (num(localQuoteSnapshot?.kisVolume) === null) reasons.push("quote-kis-volume-missing");
+  }
+
+  if (!historyHasKis) {
+    reasons.push(`history-${localHistorySnapshot?.historySource || "empty"}`);
+    if (localHistorySnapshot?.fallbackReason) reasons.push(`history-fallback-${localHistorySnapshot.fallbackReason}`);
+    if (localHistorySnapshot?.kisError) reasons.push(`history-kis-error-${localHistorySnapshot.kisError}`);
+    if (!Array.isArray(localHistorySnapshot?.bars) || localHistorySnapshot.bars.length === 0) reasons.push("history-bars-empty");
+  }
+
+  if (quoteHasKis && mergedQuoteSnapshot?.priceSource !== localQuoteSnapshot?.priceSource) {
+    reasons.push("merge-quote-priceSource-overwrite");
+  }
+  if (quoteHasKis && num(mergedQuoteSnapshot?.kisPrice) !== num(localQuoteSnapshot?.kisPrice)) {
+    reasons.push("merge-quote-kisPrice-overwrite");
+  }
+  if (historyHasKis && chartSnapshot?.historySource !== "kis-daymarket-bars") {
+    reasons.push("merge-historySource-overwrite");
+  }
+  if (quoteHasKis && liveQuote?.priceSource !== localQuoteSnapshot?.priceSource) {
+    reasons.push("final-priceSource-overwrite");
+  }
+  if (historyHasKis && liveQuote?.historySource !== "kis-daymarket-bars") {
+    reasons.push("final-historySource-overwrite");
+  }
+
+  return reasons.length ? [...new Set(reasons)].join("|") : null;
+}
+
 function normalizeLiveQuote(item, quoteSnapshot = {}, chartSnapshot = {}) {
   const sessionType = String(
     quoteSnapshot.sessionType
@@ -851,6 +909,16 @@ module.exports = async function handler(req, res) {
         const baseFinalScore = num(normalizedItem.finalProbabilityScore) ?? 0;
         const boostedScannerScore = Math.round(clamp(baseScannerScore + rankAuxiliaryScore));
         const boostedFinalScore = Math.round(clamp(baseFinalScore + rankAuxiliaryScore));
+        const debugQuoteSource = debugQuoteSourceLabel(localQuoteSnapshot, batchQuoteMap.has(symbolKey));
+        const debugHistorySource = debugHistorySourceLabel(localHistorySnapshot, chartMap.has(symbolKey));
+        const debugFallback = debugFallbackReason({
+          sessionType,
+          localQuoteSnapshot,
+          localHistorySnapshot,
+          mergedQuoteSnapshot: quoteSnapshot,
+          liveQuote,
+          chartSnapshot,
+        });
 
         return {
           ...normalizedItem,
@@ -867,6 +935,9 @@ module.exports = async function handler(req, res) {
             localHistorySnapshot?.historySource === "kis-daymarket-bars" ? "kis-local-history" : null,
             rankAuxiliaryScore > 0 ? "common-signal-rank-boost" : null,
           ].filter(Boolean))],
+          debugQuoteSource,
+          debugHistorySource,
+          debugFallbackReason: debugFallback,
           selectionReasons: [
             ...(Array.isArray(normalizedItem.selectionReasons) ? normalizedItem.selectionReasons : []),
             rankAuxiliaryScore > 0 ? `Common signal boost +${rankAuxiliaryScore}` : null,
