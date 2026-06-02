@@ -124,7 +124,8 @@ function updateCard(card, quote, livePrice, rate) {
     const value = match ? toNumber(match[1]) : null;
     return value !== null && value > 0 ? value : null;
   })();
-  const rvol = toNumber(quote?.relativeVolume) ?? toNumber(quote?.volumeRatio) ?? existingRvol;
+  const quoteRvol = toNumber(quote?.relativeVolume) ?? toNumber(quote?.volumeRatio);
+  const rvol = quoteRvol !== null && quoteRvol > 0 ? quoteRvol : existingRvol;
   const cells = Array.from(row.querySelectorAll("span"));
   const strong = row.querySelector("strong");
 

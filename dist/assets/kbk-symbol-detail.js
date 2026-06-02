@@ -731,6 +731,72 @@ function relativeVolumeOf(item) {
   return num(item?.relativeVolume) ?? num(item?.volumeRatio) ?? 1;
 }
 
+function setupBiasOf(item, price, change, rvol, vwapGood, trendGood) {
+  const rsi = num(item?.rsi ?? item?.technical?.rsi);
+  const dayHigh = positiveNum(item?.dayHigh ?? item?.regularMarketDayHigh);
+  const dayLow = positiveNum(item?.dayLow ?? item?.regularMarketDayLow);
+  const highPullbackPct = price > 0 && dayHigh ? ((dayHigh - price) / dayHigh) * 100 : null;
+  const highPosition = price > 0 && dayHigh && dayLow && dayHigh > dayLow
+    ? ((price - dayLow) / (dayHigh - dayLow)) * 100
+    : null;
+  const volumeAcceleration = num(item?.volumeAccelerationScore) ?? 50;
+  const higherLow = num(item?.higherLowScore) ?? 50;
+  const vwapHold = num(item?.vwapHoldScore) ?? 50;
+  const resurge = num(item?.reSurgeSetupScore) ?? 50;
+  const reclaim = num(item?.vwapReclaimScore) ?? 50;
+  const compression = num(item?.compressionScore) ?? 50;
+  const underDollarLowRvol = price > 0 && price < 1 && rvol < 3;
+  const volumeStarting = rvol >= 3;
+  const notOverChased = change >= 1 && change <= 45;
+  const lowRecovery = highPosition !== null && highPosition >= 15 && highPosition <= 70;
+  const highFailed = highPullbackPct !== null && highPullbackPct >= 18 && change >= 25;
+  const overheated = change >= 80 || rsi >= 80;
+  const extremeRvolWeak = rvol >= 8 && highPullbackPct !== null && highPullbackPct >= 22 && (!vwapGood || !trendGood);
+  const strongEarlySignal = volumeStarting
+    && notOverChased
+    && (vwapGood || reclaim >= 60)
+    && (higherLow >= 60 || resurge >= 60 || compression >= 70);
+  const earlyBonus = clampScore(
+    (volumeStarting ? 8 : 0)
+      + (volumeAcceleration >= 65 ? 5 : 0)
+      + (notOverChased ? 8 : 0)
+      + (vwapGood || reclaim >= 60 ? 7 : 0)
+      + (higherLow >= 65 ? 5 : 0)
+      + (resurge >= 65 ? 5 : 0)
+      + (lowRecovery ? 4 : 0),
+    0,
+    28
+  );
+  const riskPenalty = clampScore(
+    (overheated ? 18 : 0)
+      + (change >= 120 ? 12 : 0)
+      + (highFailed ? 12 : 0)
+      + (extremeRvolWeak ? 14 : 0)
+      + (underDollarLowRvol ? 18 : 0),
+    0,
+    44
+  );
+  return {
+    rsi,
+    highPullbackPct,
+    highPosition,
+    volumeAcceleration,
+    higherLow,
+    vwapHold,
+    resurge,
+    reclaim,
+    underDollarLowRvol,
+    volumeStarting,
+    lowRecovery,
+    highFailed,
+    overheated,
+    extremeRvolWeak,
+    strongEarlySignal,
+    earlyBonus,
+    riskPenalty,
+  };
+}
+
 function trendOf(item) {
   return trendLabel(item);
 }
@@ -750,9 +816,10 @@ function scoreTopPick(item) {
 
   const vwapGood = vwap.includes("위") || vwap.includes("near") || vwap.includes("근처");
   const trendGood = trend === "상승";
-  const volumeGood = volume >= 1_000_000 || rvol >= 1.5;
+  const setupBias = setupBiasOf(item, price, change, rvol, vwapGood, trendGood);
+  const volumeGood = volume >= 1_000_000 || rvol >= 3;
   const lowPriceBonus = price > 0 && price <= 8 ? 6 : 0;
-  const sweetChange = change >= 8 && change <= 45 ? 20 : change > 45 && change <= 80 ? 10 : change > 80 ? -12 : change >= 3 ? 12 : 0;
+  const sweetChange = change >= 4 && change <= 35 ? 20 : change > 35 && change <= 60 ? 6 : change > 60 ? -18 : change >= 1 ? 10 : 0;
 
   const scalpScore = clampScore(
     35
@@ -762,14 +829,18 @@ function scoreTopPick(item) {
       + sweetChange
       + (scanner >= 70 ? 10 : scanner >= 55 ? 5 : 0)
       + lowPriceBonus
+      + setupBias.earlyBonus * 0.55
+      - setupBias.riskPenalty * 0.65
   );
 
   const surgeScore = clampScore(
     scanner * 0.45
-      + clampScore(Math.max(change, 0), 0, 100) * 0.25
+      + clampScore(change <= 45 ? Math.max(change, 0) : 85 - (change - 45) * 1.4, 0, 70) * 0.25
       + (sourceTags.some((tag) => String(tag).includes("news") || String(tag).includes("sec-8k")) ? 14 : 0)
       + (storyTags.length ? Math.min(storyTags.length * 5, 12) : 0)
       + (volume >= 10_000_000 ? 10 : volume >= 2_000_000 ? 6 : 0)
+      + setupBias.earlyBonus * 0.35
+      - setupBias.riskPenalty * 0.45
   );
 
   const setupScore = clampScore(
@@ -780,6 +851,8 @@ function scoreTopPick(item) {
       + (pattern >= 65 ? 10 : pattern >= 55 ? 5 : 0)
       + (volumeGood ? 10 : -5)
       - (risk >= 75 ? 12 : risk >= 60 ? 6 : 0)
+      + setupBias.earlyBonus * 0.65
+      - setupBias.riskPenalty * 0.75
   );
 
   const chaseRisk = clampScore(
@@ -787,16 +860,25 @@ function scoreTopPick(item) {
       + (change >= 100 ? 30 : change >= 70 ? 20 : change >= 45 ? 12 : 0)
       + (!vwapGood ? 15 : 0)
       + (trendGood ? 0 : 10)
+      + setupBias.riskPenalty * 0.8
   );
   const safetyScore = clampScore(100 - chaseRisk);
-  const finalScore = Math.round(clampScore(scalpScore * 0.38 + surgeScore * 0.27 + setupScore * 0.25 + safetyScore * 0.10));
+  const finalScore = Math.round(clampScore(scalpScore * 0.38 + surgeScore * 0.27 + setupScore * 0.25 + safetyScore * 0.10 + setupBias.earlyBonus * 0.2 - setupBias.riskPenalty * 0.25));
 
   let verdict = "관찰 후보";
   if (finalScore >= 78 && chaseRisk < 62) verdict = "최우선 단타 후보";
   else if (finalScore >= 68 && chaseRisk < 75) verdict = "상위 감시 후보";
   else if (chaseRisk >= 80) verdict = "과열 주의 후보";
 
+  if (setupBias.overheated || setupBias.highFailed || setupBias.extremeRvolWeak || chaseRisk >= 82) verdict = "진입 금지";
+  else if (finalScore >= 76 && setupBias.strongEarlySignal && chaseRisk < 68) verdict = "매수 가능";
+  else verdict = "관찰";
+
   const reasons = [];
+  if (setupBias.strongEarlySignal) reasons.push("초입 회복 신호");
+  if (setupBias.underDollarLowRvol) reasons.push("RVOL 3배 미만 강등");
+  if (setupBias.highFailed) reasons.push("고점 이탈 위험");
+  if (setupBias.overheated) reasons.push("과열 구간");
   if (vwapGood) reasons.push("VWAP 위/근처");
   if (trendGood) reasons.push("1분 추세 상승");
   if (volumeGood) reasons.push("거래량 확인");
@@ -820,6 +902,7 @@ function scoreTopPick(item) {
     chaseRisk: Math.round(chaseRisk),
     finalScore,
     verdict,
+    setupBias,
     reasons: reasons.length ? reasons : ["가격/거래량 구조 감시"],
   };
 }
@@ -1110,10 +1193,11 @@ async function loadTopPicks() {
       .filter((pick) => pick.change >= 3)
       .filter((pick) => pick.vwap.includes("위") || pick.vwap.includes("근처"))
       .filter((pick) => pick.trend === "상승")
-      .filter((pick) => pick.volume >= 500_000 || pick.rvol >= 1.5)
+      .filter((pick) => pick.volume >= 500_000 || pick.rvol >= 3)
+      .filter((pick) => !pick.setupBias?.underDollarLowRvol || pick.setupBias?.strongEarlySignal)
       .filter((pick) => pick.chaseRisk < 85)
       .filter((pick) => pick.finalScore >= 62 || pick.scalpScore >= 72 || pick.surgeScore >= 72)
-      .sort((a, b) => b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk)
+      .sort((a, b) => (b.setupBias?.strongEarlySignal ? 1 : 0) - (a.setupBias?.strongEarlySignal ? 1 : 0) || b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk)
       .slice(0, 20);
     if (scored.length < 20) {
       const seen = new Set(scored.map((pick) => pick.symbol));
@@ -1122,11 +1206,12 @@ async function loadTopPicks() {
         .map(scoreTopPick)
         .filter((pick) => pick.change >= 3)
         .filter((pick) => !seen.has(pick.symbol))
-        .filter((pick) => pick.volume >= 300_000 || pick.rvol >= 1.2 || pick.surgeScore >= 58)
+        .filter((pick) => pick.volume >= 300_000 || pick.rvol >= 3 || pick.setupBias?.strongEarlySignal)
+        .filter((pick) => !pick.setupBias?.underDollarLowRvol || pick.setupBias?.strongEarlySignal)
         .filter((pick) => pick.chaseRisk < 92)
-        .sort((a, b) => b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk);
+        .sort((a, b) => (b.setupBias?.strongEarlySignal ? 1 : 0) - (a.setupBias?.strongEarlySignal ? 1 : 0) || b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk);
       scored.push(...supplemental.slice(0, 20 - scored.length));
-      scored.sort((a, b) => b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk);
+      scored.sort((a, b) => (b.setupBias?.strongEarlySignal ? 1 : 0) - (a.setupBias?.strongEarlySignal ? 1 : 0) || b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk);
     }
     if (!isTopPicksActive() || renderToken !== topPicksRenderToken) return;
     renderTopPicks(scored.slice(0, 20), payload?.data?.updatedAt ?? payload?.updatedAt);
@@ -1218,10 +1303,12 @@ function updateSurgeCardQuote(card, quote, livePrice = null) {
   const previousClose = num(quote?.previousClose);
   const change = price !== null && previousClose ? ((price - previousClose) / previousClose) * 100 : changePct(quote);
   const volume = num(quote?.volume) ?? num(quote?.preMarketVolume);
-  const rvol = relativeVolumeOf(quote);
   const vwap = vwapState(quote);
   const strong = priceRow.querySelector("strong");
   const spans = Array.from(priceRow.querySelectorAll("span"));
+  const existingRvol = num((spans[1]?.textContent || "").match(/([0-9.]+)\s*배/)?.[1]);
+  const quoteRvol = num(quote?.relativeVolume) ?? num(quote?.volumeRatio);
+  const rvol = quoteRvol !== null && quoteRvol > 0 ? quoteRvol : existingRvol;
 
   if (strong) strong.textContent = krwTextFromUsd(price);
   if (spans[0]) spans[0].textContent = pct(change);

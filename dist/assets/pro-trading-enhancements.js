@@ -57,16 +57,89 @@ function rvolValue(item) {
   return toNumber(item?.volumeRatio ?? item?.relativeVolume);
 }
 
-function topPickSignalScore(item, volume, change) {
+function topPickSetupProfile(item, price, volume, change) {
+  const rvol = rvolValue(item);
+  const rsi = toNumber(item?.rsi ?? item?.technical?.rsi);
+  const dayHigh = toNumber(item?.dayHigh ?? item?.regularMarketDayHigh);
+  const dayLow = toNumber(item?.dayLow ?? item?.regularMarketDayLow);
+  const vwap = toNumber(item?.technical?.vwap ?? item?.vwap);
+  const vwapState = String(item?.technical?.vwapState ?? item?.vwapState ?? "").toLowerCase();
+  const highPullbackPct = price > 0 && dayHigh > 0 ? ((dayHigh - price) / dayHigh) * 100 : null;
+  const highPosition = price > 0 && dayHigh > 0 && dayLow > 0 && dayHigh > dayLow
+    ? ((price - dayLow) / (dayHigh - dayLow)) * 100
+    : null;
+  const vwapAbove = item?.aboveVwap === true || vwapState === "above" || (price > 0 && vwap > 0 && price >= vwap);
+  const vwapNear = !vwapAbove && price > 0 && vwap > 0 && price >= vwap * 0.985;
+  const vwapBelow = item?.aboveVwap === false || vwapState === "below" || (price > 0 && vwap > 0 && price < vwap * 0.985);
   const volumeAcceleration = toNumber(item?.volumeAccelerationScore) ?? 50;
   const higherLow = toNumber(item?.higherLowScore) ?? 50;
   const vwapHold = toNumber(item?.vwapHoldScore) ?? 50;
   const compression = toNumber(item?.compressionScore) ?? 50;
   const resurge = toNumber(item?.reSurgeSetupScore) ?? 50;
   const reclaim = toNumber(item?.vwapReclaimScore) ?? 50;
-  const rvol = rvolValue(item);
+
+  const overheated = change >= 80 || rsi >= 80;
+  const veryExtended = change >= 120 || (highPosition !== null && highPosition >= 88 && change >= 60);
+  const highFailed = highPullbackPct !== null && highPullbackPct >= 18 && change >= 25;
+  const extremeRvolWeak = rvol !== null && rvol >= 8 && highPullbackPct !== null && highPullbackPct >= 22 && !vwapAbove;
+  const lowRecovery = highPosition !== null && highPosition >= 15 && highPosition <= 70;
+  const notOverChased = change >= 1 && change <= 45;
+  const volumeStarting = rvol !== null && rvol >= 3;
+  const vwapRecovering = vwapAbove || vwapNear || reclaim >= 60;
+
+  const earlyBonus = Math.max(0, Math.min(14, Math.round(
+    (volumeStarting ? 3 : 0)
+    + (volumeAcceleration >= 65 ? 2 : 0)
+    + (notOverChased ? 3 : change <= 70 ? 1 : 0)
+    + (vwapRecovering ? 3 : 0)
+    + (higherLow >= 65 ? 2 : 0)
+    + (resurge >= 65 ? 2 : 0)
+    + (lowRecovery ? 2 : 0)
+  )));
+  const riskPenalty = Math.max(0, Math.min(32, Math.round(
+    (overheated ? 12 : 0)
+    + (veryExtended ? 10 : 0)
+    + (highFailed ? 8 : 0)
+    + (extremeRvolWeak ? 10 : 0)
+    + (vwapBelow && change < 0 ? 8 : 0)
+  )));
+
+  return {
+    rvol,
+    rsi,
+    highPullbackPct,
+    highPosition,
+    vwapAbove,
+    vwapNear,
+    vwapBelow,
+    volumeAcceleration,
+    higherLow,
+    vwapHold,
+    compression,
+    resurge,
+    reclaim,
+    earlyBonus,
+    riskPenalty,
+    overheated,
+    highFailed,
+    extremeRvolWeak,
+    volumeStarting,
+    lowRecovery,
+    vwapRecovering,
+    notOverChased,
+  };
+}
+
+function topPickSignalScore(item, price, volume, change) {
+  const setup = topPickSetupProfile(item, price, volume, change);
+  const volumeAcceleration = toNumber(item?.volumeAccelerationScore) ?? 50;
+  const higherLow = toNumber(item?.higherLowScore) ?? 50;
+  const vwapHold = toNumber(item?.vwapHoldScore) ?? 50;
+  const compression = toNumber(item?.compressionScore) ?? 50;
+  const resurge = toNumber(item?.reSurgeSetupScore) ?? 50;
+  const reclaim = toNumber(item?.vwapReclaimScore) ?? 50;
   const volumeBonus = volume >= 5_000_000 ? 14 : volume >= 1_000_000 ? 8 : 0;
-  const changeBonus = change >= 20 ? 8 : 0;
+  const changeBonus = change >= 4 && change <= 35 ? 8 : change > 35 && change <= 60 ? 3 : change >= 80 ? -8 : 0;
   const rawSignalBonus =
     (volumeAcceleration - 50) * 0.03
     + (higherLow - 50) * 0.025
@@ -74,15 +147,18 @@ function topPickSignalScore(item, volume, change) {
     + (compression - 50) * 0.03
     + (resurge - 50) * 0.04
     + (reclaim - 50) * 0.025
-    + (rvol !== null && rvol >= 3 ? 1 : 0);
-  const signalBonus = Math.max(0, Math.min(8, Math.round(rawSignalBonus)));
-  return { signalBonus, volumeBonus, changeBonus, rvol };
+    + (setup.rvol !== null && setup.rvol >= 3 ? 1 : 0)
+    + setup.earlyBonus
+    - setup.riskPenalty;
+  const signalBonus = Math.max(-32, Math.min(14, Math.round(rawSignalBonus)));
+  return { signalBonus, volumeBonus, changeBonus, rvol: setup.rvol, setup };
 }
 
 function topPickReasoning(item, metrics) {
   const value = (key) => toNumber(item?.[key]);
   const reasons = [];
   const cautions = [];
+  const setup = metrics.setup ?? {};
   const resurge = value("reSurgeSetupScore");
   const compression = value("compressionScore");
   const reclaim = value("vwapReclaimScore");
@@ -90,32 +166,35 @@ function topPickReasoning(item, metrics) {
   const vwapHold = value("vwapHoldScore");
   const volumeAccel = value("volumeAccelerationScore");
 
-  if (metrics.surge >= 75) reasons.push("폭등 감시 점수 우수");
-  if (metrics.pattern >= 65) reasons.push("패턴 유사도 양호");
-  if (resurge !== null && resurge >= 70) reasons.push("재상승 준비도 양호");
-  if (compression !== null && compression >= 70) reasons.push("박스권 압축 확인");
-  if (reclaim !== null && reclaim >= 70) reasons.push("VWAP 재탈환 양호");
-  if (higherLow !== null && higherLow >= 70) reasons.push("저점 상승 구조");
-  if (vwapHold !== null && vwapHold >= 70) reasons.push("VWAP 유지 흐름");
-  if (volumeAccel !== null && volumeAccel >= 70) reasons.push("거래량 가속도 증가");
-  if (metrics.rvol !== null && metrics.rvol >= 3) reasons.push(`RVOL ${metrics.rvol.toFixed(1)}배`);
-  if (metrics.volume >= 5_000_000) reasons.push("원시 거래량 충분");
+  if (setup.volumeStarting) reasons.push("거래량이 증가하기 시작했습니다");
+  if (metrics.rvol !== null && metrics.rvol >= 3) reasons.push(`RVOL ${metrics.rvol.toFixed(1)}배로 기준 이상입니다`);
+  if (volumeAccel !== null && volumeAccel >= 65) reasons.push("거래량 가속도가 양호합니다");
+  if (setup.vwapRecovering) reasons.push(setup.vwapAbove ? "VWAP 위에서 회복 흐름입니다" : "VWAP 재돌파를 시도 중입니다");
+  if (higherLow !== null && higherLow >= 65) reasons.push("Higher Low 구조가 감지됩니다");
+  if (resurge !== null && resurge >= 65) reasons.push("눌림 후 재상승 가능성이 있습니다");
+  if (setup.lowRecovery) reasons.push("가격이 하단부에서 회복 중입니다");
+  if (compression !== null && compression >= 70) reasons.push("박스권 압축이 확인됩니다");
 
-  if (metrics.risk >= 70) cautions.push("추격 위험 높음");
-  if (metrics.change >= 80) cautions.push("단기 과열 확인 필요");
-  if (reclaim !== null && reclaim < 45) cautions.push("VWAP 재탈환 약함");
-  if (vwapHold !== null && vwapHold < 45) cautions.push("VWAP 유지 약함");
-  if (metrics.rvol !== null && metrics.rvol < 1) cautions.push("상대거래량 낮음");
+  if (setup.highFailed) cautions.push("이미 크게 오른 뒤 고점에서 밀렸습니다");
+  if (setup.rsi !== null && setup.rsi >= 80) cautions.push("RSI 과열 구간입니다");
+  if (setup.extremeRvolWeak) cautions.push("RVOL은 높지만 가격 흐름이 약합니다");
+  if (setup.vwapBelow) cautions.push("VWAP 아래라 바로 진입은 위험합니다");
+  if (metrics.risk >= 70) cautions.push("추격 위험 점수가 높습니다");
+  if (metrics.change >= 80) cautions.push("단기 상승률이 과합니다");
+  if (metrics.rvol !== null && metrics.rvol < 3) cautions.push("RVOL 기준이 아직 부족합니다");
 
-  let decision = "확인 필요";
-  if (metrics.risk >= 78 || metrics.change >= 120) decision = "눌림 대기";
-  else if (metrics.finalScore >= 82 && cautions.length <= 1) decision = "우선 관찰";
-  else if (metrics.finalScore >= 72) decision = "관찰 유지";
+  let decision = "관찰";
+  if (setup.overheated || setup.highFailed || setup.extremeRvolWeak || metrics.risk >= 78 || metrics.finalScore < 58) {
+    decision = "진입 금지";
+  } else if (metrics.finalScore >= 74 && setup.volumeStarting && setup.vwapRecovering && !setup.vwapBelow && metrics.risk < 70) {
+    decision = "매수 가능";
+  }
 
   return {
-    reasons: reasons.length ? reasons.slice(0, 4) : ["통합 점수 기준 통과"],
-    cautions: cautions.length ? cautions.slice(0, 3) : ["실제 진입 전 눌림/VWAP 재확인"],
+    reasons: reasons.length ? reasons.slice(0, 4) : ["초입 회복 조건을 관찰 중입니다"],
+    cautions: cautions.length ? cautions.slice(0, 3) : ["실제 진입 전 VWAP/체결 반응 재확인"],
     decision,
+    priority: decision === "매수 가능" ? 3 : decision === "관찰" ? 2 : 0,
   };
 }
 
@@ -384,14 +463,14 @@ async function renderTopPicksOnly() {
         const surge = Math.round(Number(item.finalProbabilityScore ?? item.scannerScore ?? 0));
         const risk = Math.round(Number(item.riskScore ?? 50));
         const pattern = Math.round(Number(item.patternSimilarityScore ?? 50));
-        const signal = topPickSignalScore(item, volume, change);
+        const signal = topPickSignalScore(item, price, volume, change);
         const baseScore = surge * .55 + pattern * .2 + signal.volumeBonus + signal.changeBonus - risk * .12;
         const finalScore = Math.round(Math.max(0, Math.min(100, baseScore + signal.signalBonus)));
-        const reasoning = topPickReasoning(item, { change, volume, surge, risk, pattern, finalScore, rvol: signal.rvol });
+        const reasoning = topPickReasoning(item, { change, volume, surge, risk, pattern, finalScore, rvol: signal.rvol, setup: signal.setup });
         return { item, price, change, volume, surge, risk, pattern, finalScore, signalBonus: signal.signalBonus, reasoning };
       })
-      .filter((pick) => pick.finalScore >= 62)
-      .sort((a, b) => b.finalScore - a.finalScore)
+      .filter((pick) => pick.finalScore >= 58 || pick.reasoning.priority >= 2)
+      .sort((a, b) => b.reasoning.priority - a.reasoning.priority || b.finalScore - a.finalScore)
       .slice(0, 20);
     panel.innerHTML = `
       <section class="accumulation-hero">
@@ -402,7 +481,7 @@ async function renderTopPicksOnly() {
         </div>
         <div class="hero-scoreboard">
           <div class="score-card"><span>후보</span><strong>${items.length}</strong></div>
-          <div class="score-card"><span>기준</span><strong>62점 이상</strong></div>
+          <div class="score-card"><span>기준</span><strong>초입 우선</strong></div>
         </div>
       </section>
       ${items.length ? items.map(({ item, price, change, volume, surge, risk, pattern, finalScore, signalBonus, reasoning }) => `
@@ -420,7 +499,7 @@ async function renderTopPicksOnly() {
             <div><span>폭등 감시</span><b>${surge}점</b></div>
             <div><span>패턴</span><b>${pattern}점</b></div>
             <div><span>위험</span><b>${risk}점</b></div>
-            <div><span>통합</span><b>${finalScore}점${signalBonus ? ` (+${signalBonus})` : ""}</b></div>
+            <div><span>통합</span><b>${finalScore}점${signalBonus ? ` (${signalBonus > 0 ? "+" : ""}${signalBonus})` : ""}</b></div>
           </div>
           <div class="kbk-pro-top-meta">
             <div><span>선정 이유</span><p>${reasoning.reasons.map(textEscape).join(" · ")}</p></div>
