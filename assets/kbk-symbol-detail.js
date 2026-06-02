@@ -952,10 +952,13 @@ let topPicksRenderToken = 0;
 let topPicksLastStartedAt = 0;
 
 function isTopPicksActive() {
-  return window.location.hash === "#top-picks";
+  return window.location.pathname === "/top-picks" || window.location.hash === "#top-picks";
 }
 
 async function loadTopPicks() {
+  if (typeof window.__kbkRenderTopPicksOnly === "function") {
+    return null;
+  }
   const panel = topPickPanel();
   if (!panel) return null;
   const startedAt = Date.now();
@@ -1021,9 +1024,21 @@ function syncTopPicksMenu() {
     button.addEventListener("click", () => {
       if (isTopPicksActive() && topPicksLoadPromise) return;
       window.location.hash = "top-picks";
+      if (typeof window.__kbkRenderTopPicksOnly === "function") {
+        window.__kbkRenderTopPicksOnly();
+        return;
+      }
       setTopPickMode(true);
     });
     menu.appendChild(button);
+  }
+  if (typeof window.__kbkRenderTopPicksOnly === "function" && isTopPicksActive()) {
+    const panel = document.getElementById("kbk-top-picks-panel");
+    if (panel) {
+      panel.hidden = true;
+      panel.style.display = "none";
+    }
+    return;
   }
   setTopPickMode(window.location.hash === "#top-picks");
 }

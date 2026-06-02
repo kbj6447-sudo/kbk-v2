@@ -235,11 +235,35 @@ function isTopPicksViewActive() {
   return window.location.pathname === "/top-picks" || window.location.hash === "#top-picks";
 }
 
+function hideNonTopPicksPanels() {
+  document.querySelectorAll(".page-stack > .page-panel").forEach((panel) => {
+    panel.style.display = "none";
+  });
+  const legacyTopPicks = document.getElementById("kbk-top-picks-panel");
+  if (legacyTopPicks) {
+    legacyTopPicks.hidden = true;
+    legacyTopPicks.style.display = "none";
+  }
+}
+
+function topPicksOnlyPanel() {
+  let panel = document.getElementById("kbk-pro-top-picks");
+  const stack = document.querySelector(".page-stack");
+  if (!panel && stack) {
+    panel = document.createElement("section");
+    panel.id = "kbk-pro-top-picks";
+    stack.prepend(panel);
+  }
+  if (panel) {
+    panel.hidden = false;
+    panel.style.display = "grid";
+  }
+  return panel;
+}
+
 function showAllPanels() {
   if (isTopPicksViewActive()) {
-    document.querySelectorAll(".page-stack > .page-panel").forEach((panel) => {
-      panel.style.display = "none";
-    });
+    hideNonTopPicksPanels();
     return;
   }
   document.querySelectorAll(".page-stack > .page-panel").forEach((panel) => {
@@ -265,42 +289,20 @@ function routeScroll(targetId, message) {
 
 let topPicksRouteBusyUntil = 0;
 
-async function renderTopPicks() {
+async function renderTopPicksOnly() {
   const now = Date.now();
   if (topPicksRouteBusyUntil > now) return;
   topPicksRouteBusyUntil = now + 800;
-  document.querySelectorAll(".page-stack > .page-panel").forEach((panel) => {
-    panel.style.display = "none";
-  });
-  document.getElementById("kbk-pro-top-picks")?.remove();
-  const legacyButton = document.getElementById("kbk-top-picks-menu");
-  if (legacyButton) {
-    legacyButton.click();
-    window.setTimeout(() => {
-      topPicksRouteBusyUntil = 0;
-    }, 250);
-    return;
-  }
+  hideNonTopPicksPanels();
   if (window.location.hash !== "#top-picks") {
     window.location.hash = "top-picks";
-  } else {
-    window.dispatchEvent(new HashChangeEvent("hashchange"));
   }
+  history.replaceState({}, "", "/top-picks");
   window.setTimeout(() => {
     topPicksRouteBusyUntil = 0;
   }, 250);
-  return;
-  const stack = document.querySelector(".page-stack");
-  if (!stack) return;
-  document.querySelectorAll(".page-stack > .page-panel").forEach((panel) => {
-    panel.style.display = "none";
-  });
-  let panel = document.getElementById("kbk-pro-top-picks");
-  if (!panel) {
-    panel = document.createElement("section");
-    panel.id = "kbk-pro-top-picks";
-    stack.prepend(panel);
-  }
+  const panel = topPicksOnlyPanel();
+  if (!panel) return;
   panel.innerHTML = `<section class="kbk-route-note">통합 최종 후보를 계산하는 중입니다.</section>`;
   try {
     const payload = await fetch("/api/scanner", { cache: "no-store" }).then((res) => res.json());
@@ -356,13 +358,16 @@ async function renderTopPicks() {
   }
 }
 
+async function renderTopPicks() {
+  return renderTopPicksOnly();
+}
+
+window.__kbkRenderTopPicksOnly = renderTopPicksOnly;
+
 function handleRoute() {
   const path = window.location.pathname;
   if (path === "/top-picks" || window.location.hash === "#top-picks") {
-    document.querySelectorAll(".page-stack > .page-panel").forEach((panel) => {
-      panel.style.display = "none";
-    });
-    renderTopPicks();
+    renderTopPicksOnly();
     return;
   }
   if (path === "/backtest") {
@@ -767,6 +772,7 @@ function boot() {
   });
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
   window.addEventListener("popstate", handleRoute);
+  window.addEventListener("hashchange", handleRoute);
 }
 
 ready(() => window.setTimeout(boot, 250));
