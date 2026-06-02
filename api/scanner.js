@@ -1,4 +1,6 @@
 const UPSTREAM = "https://kbk-theta-accumulation-pro.vercel.app/api/scanner";
+const quoteHandler = require("./quote");
+const historyHandler = require("./history");
 
 function num(value) {
   if (value === null || value === undefined || value === "") return null;
@@ -44,6 +46,105 @@ function positive(value) {
   return parsed !== null && parsed > 0 ? parsed : null;
 }
 
+function getKstParts(date) {
+  const shifted = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+  return {
+    hour: shifted.getUTCHours(),
+    minute: shifted.getUTCMinutes(),
+  };
+}
+
+function getSessionType(date) {
+  const parts = getKstParts(date);
+  const totalMinutes = parts.hour * 60 + parts.minute;
+  if (totalMinutes >= 9 * 60 && totalMinutes < 17 * 60) return "DAY";
+  if (totalMinutes >= 17 * 60 && totalMinutes < 22 * 60 + 30) return "PRE";
+  if (totalMinutes >= 22 * 60 + 30 || totalMinutes < 5 * 60) return "REGULAR";
+  return "AFTER";
+}
+
+function barAmount(bar) {
+  return positive(bar?.tradeAmount) ?? positive(bar?.amount);
+}
+
+function compactObject(object) {
+  return Object.fromEntries(
+    Object.entries(object || {}).filter(([, value]) => value !== null && value !== undefined),
+  );
+}
+
+async function invokeLocalHandler(handler, path) {
+  let statusCode = 200;
+  let settled = false;
+  let resolveResult;
+  let rejectResult;
+  const resultPromise = new Promise((resolve, reject) => {
+    resolveResult = resolve;
+    rejectResult = reject;
+  });
+
+  const req = { url: path, method: "GET", headers: {} };
+  const res = {
+    headers: {},
+    setHeader(name, value) {
+      this.headers[String(name).toLowerCase()] = value;
+      return this;
+    },
+    status(code) {
+      statusCode = code;
+      return this;
+    },
+    json(body) {
+      if (!settled) {
+        settled = true;
+        resolveResult({ statusCode, headers: this.headers, body });
+      }
+      return this;
+    },
+  };
+
+  Promise.resolve(handler(req, res))
+    .then((body) => {
+      if (!settled) {
+        settled = true;
+        resolveResult({ statusCode, headers: res.headers, body });
+      }
+    })
+    .catch((error) => {
+      if (!settled) {
+        settled = true;
+        rejectResult(error);
+      }
+    });
+
+  return resultPromise;
+}
+
+async function fetchLocalQuoteSnapshot(symbol) {
+  if (!symbol) return {};
+  try {
+    const result = await invokeLocalHandler(quoteHandler, `/api/quote?symbol=${encodeURIComponent(symbol)}`);
+    if (result?.statusCode !== 200 || result?.body?.ok !== true || !result?.body?.data) return {};
+    return result.body.data;
+  } catch {
+    return {};
+  }
+}
+
+async function fetchLocalHistorySnapshot(symbol, interval = "1m") {
+  if (!symbol) return {};
+  try {
+    const result = await invokeLocalHandler(
+      historyHandler,
+      `/api/history?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`,
+    );
+    if (result?.statusCode !== 200 || result?.body?.ok !== true || !result?.body?.data) return {};
+    return result.body.data;
+  } catch {
+    return {};
+  }
+}
+
 function volumeAccelerationScoreFromRatio(ratio) {
   const value = num(ratio);
   if (value === null) return 50;
@@ -55,7 +156,7 @@ function volumeAccelerationScoreFromRatio(ratio) {
   return 38;
 }
 
-function calculateVolumeAcceleration(bars) {
+function calculateVolumeAcceleration(bars, source = null) {
   const volumes = bars.map((bar) => positive(bar.volume));
   const current1mVolume = volumes.at(-1) ?? null;
   const previous5 = volumes.slice(-6, -1).filter((value) => value !== null);
@@ -76,7 +177,40 @@ function calculateVolumeAcceleration(bars) {
     volumeAcceleration1m,
     volumeAcceleration5m,
     volumeAccelerationScore: availableScores.length ? Math.round(average(availableScores)) : 50,
+    volumeAccelerationSource: source,
     volumeAccelerationStatus: availableScores.length ? "ok" : "데이터 부족",
+  };
+}
+
+function buildVwapEvaluations(bars, lookback = 30) {
+  const sample = bars.slice(-lookback);
+  let totalNotional = 0;
+  let totalVolume = 0;
+  let usedAmount = false;
+  const evaluated = [];
+
+  for (const bar of bars) {
+    const close = positive(bar.close);
+    const volume = positive(bar.volume);
+    if (close === null || volume === null) continue;
+
+    const high = positive(bar.high) ?? close;
+    const low = positive(bar.low) ?? close;
+    const amount = barAmount(bar);
+    const notional = amount ?? (((high + low + close) / 3) * volume);
+    if (!Number.isFinite(notional) || notional <= 0) continue;
+
+    if (amount !== null) usedAmount = true;
+    totalNotional += notional;
+    totalVolume += volume;
+    if (!sample.includes(bar) || totalVolume <= 0) continue;
+    const vwap = totalNotional / totalVolume;
+    evaluated.push({ close, volume, vwap, above: close >= vwap });
+  }
+
+  return {
+    evaluated,
+    vwapSource: usedAmount ? "kis-amount-volume" : "yahoo-fallback",
   };
 }
 
@@ -117,25 +251,7 @@ function calculateHigherLowScore(bars) {
 }
 
 function calculateVwapHold(bars) {
-  const sample = bars.slice(-24);
-  if (sample.length < 3) return { vwapHoldMinutes: null, vwapHoldScore: 50 };
-
-  let pv = 0;
-  let totalVolume = 0;
-  const evaluated = [];
-  for (const bar of bars) {
-    const high = positive(bar.high);
-    const low = positive(bar.low);
-    const close = positive(bar.close);
-    const volume = positive(bar.volume);
-    if (high === null || low === null || close === null || volume === null) continue;
-    pv += ((high + low + close) / 3) * volume;
-    totalVolume += volume;
-    if (!sample.includes(bar) || totalVolume <= 0) continue;
-    const vwap = pv / totalVolume;
-    evaluated.push({ close, vwap });
-  }
-
+  const { evaluated, vwapSource } = buildVwapEvaluations(bars, 24);
   if (evaluated.length < 3) return { vwapHoldMinutes: null, vwapHoldScore: 50 };
 
   let vwapHoldMinutes = 0;
@@ -153,6 +269,7 @@ function calculateVwapHold(bars) {
 
   return {
     vwapHoldMinutes,
+    vwapSource,
     vwapHoldScore: Math.round(clamp(score)),
   };
 }
@@ -200,22 +317,7 @@ function calculateCompressionScore(bars) {
 }
 
 function vwapEvaluations(bars, lookback = 30) {
-  const sample = bars.slice(-lookback);
-  let pv = 0;
-  let totalVolume = 0;
-  const evaluated = [];
-  for (const bar of bars) {
-    const high = positive(bar.high);
-    const low = positive(bar.low);
-    const close = positive(bar.close);
-    const volume = positive(bar.volume);
-    if (high === null || low === null || close === null || volume === null) continue;
-    pv += ((high + low + close) / 3) * volume;
-    totalVolume += volume;
-    if (!sample.includes(bar) || totalVolume <= 0) continue;
-    evaluated.push({ close, volume, vwap: pv / totalVolume, above: close >= pv / totalVolume });
-  }
-  return evaluated;
+  return buildVwapEvaluations(bars, lookback).evaluated;
 }
 
 function calculateVwapReclaimScore(bars, vwapHoldMinutes = null) {
@@ -343,14 +445,65 @@ function pickDisplayPrice({ marketState, regularPrice, preMarketPrice, postMarke
   return latestClose ?? regularPrice ?? preMarketPrice ?? postMarketPrice ?? null;
 }
 
+function buildChartSnapshotFromHistory(historySnapshot = {}) {
+  const bars = Array.isArray(historySnapshot.bars) ? historySnapshot.bars : [];
+  const latestBar = bars.at(-1) || {};
+  const latestTimestampMs = num(latestBar.timestamp) ?? (latestBar.time ? Date.parse(latestBar.time) : null);
+  const volumes = bars.map((bar) => positive(bar.volume)).filter((value) => value !== null);
+  const vwapEvaluation = buildVwapEvaluations(bars, 30);
+  const latestVwap = vwapEvaluation.evaluated.at(-1)?.vwap ?? null;
+  const historySource = historySnapshot.historySource || "yahoo";
+  const isKisHistory = historySource === "kis-daymarket-bars";
+
+  return {
+    latestClose: positive(latestBar.close),
+    latestBarAge: latestTimestampMs ? Math.max(0, Math.round((Date.now() - latestTimestampMs) / 60000)) : null,
+    priceUpdatedAt: latestTimestampMs ? new Date(latestTimestampMs).toISOString() : null,
+    marketState: null,
+    regularMarketPrice: positive(historySnapshot.regularMarketPrice) ?? positive(latestBar.close),
+    previousClose: positive(historySnapshot.previousClose),
+    chartPreviousClose: positive(historySnapshot.previousClose),
+    regularMarketVolume: positive(historySnapshot.regularMarketVolume),
+    volume: volumes.length ? volumes.reduce((total, value) => total + value, 0) : null,
+    bars,
+    commonSignals: {
+      ...calculateCommonSignals(bars),
+      vwapSource: vwapEvaluation.vwapSource,
+      volumeAccelerationSource: isKisHistory ? "kis-bars" : "yahoo-fallback",
+    },
+    historySource,
+    volumeSource: historySnapshot.volumeSource || (isKisHistory ? "kis-evol" : "yahoo-fallback"),
+    sessionType: historySnapshot.sessionType || getSessionType(new Date()),
+    kisMarketCode: historySnapshot.kisMarketCode || null,
+    kisBarCount: positive(historySnapshot.kisBarCount) ?? bars.length,
+    vwap: latestVwap,
+    vwapSource: vwapEvaluation.vwapSource,
+  };
+}
+
+function mergeSnapshots(...snapshots) {
+  return snapshots.reduce((merged, snapshot) => ({ ...merged, ...compactObject(snapshot) }), {});
+}
+
 function normalizeLiveQuote(item, quoteSnapshot = {}, chartSnapshot = {}) {
+  const sessionType = String(
+    quoteSnapshot.sessionType
+    ?? item.sessionType
+    ?? chartSnapshot.sessionType
+    ?? getSessionType(new Date()),
+  ).toUpperCase();
   const marketState = String(
     quoteSnapshot.marketState
     ?? item.marketState
     ?? chartSnapshot.marketState
     ?? "",
   ).toUpperCase();
-  const regularPrice = num(quoteSnapshot.regularMarketPrice)
+  const kisPrice = num(quoteSnapshot.kisPrice)
+    ?? num(item.kisPrice)
+    ?? null;
+  const regularPrice = num(quoteSnapshot.price)
+    ?? kisPrice
+    ?? num(quoteSnapshot.regularMarketPrice)
     ?? num(item.regularMarketPrice)
     ?? num(chartSnapshot.regularMarketPrice)
     ?? num(item.price);
@@ -362,7 +515,7 @@ function normalizeLiveQuote(item, quoteSnapshot = {}, chartSnapshot = {}) {
     ?? num(item.postMarketPrice)
     ?? num(chartSnapshot.postMarketPrice);
   const latestClose = num(chartSnapshot.latestClose);
-  const displayPrice = pickDisplayPrice({
+  const displayPrice = num(quoteSnapshot.price) ?? pickDisplayPrice({
     marketState,
     regularPrice,
     preMarketPrice,
@@ -374,25 +527,62 @@ function normalizeLiveQuote(item, quoteSnapshot = {}, chartSnapshot = {}) {
     ?? num(item.previousClose)
     ?? num(chartSnapshot.previousClose)
     ?? num(chartSnapshot.chartPreviousClose);
-  const change = displayPrice !== null && previousClose !== null ? displayPrice - previousClose : null;
-  const changePercent = change !== null && previousClose ? (change / previousClose) * 100 : null;
+  const change = num(quoteSnapshot.change)
+    ?? num(item.change)
+    ?? (displayPrice !== null && previousClose !== null ? displayPrice - previousClose : null);
+  const changePercent = num(quoteSnapshot.changePercent)
+    ?? num(item.changePercent)
+    ?? num(item.preMarketChangePercent)
+    ?? (change !== null && previousClose ? (change / previousClose) * 100 : null);
   const currentVolume = Math.max(
+    num(quoteSnapshot.kisVolume) ?? 0,
+    num(item.kisVolume) ?? 0,
     num(item.volume) ?? 0,
     num(item.preMarketVolume) ?? 0,
     num(quoteSnapshot.regularMarketVolume) ?? 0,
     num(chartSnapshot.regularMarketVolume) ?? 0,
     num(chartSnapshot.volume) ?? 0,
   ) || null;
+  const priceSource = quoteSnapshot.priceSource
+    ?? item.priceSource
+    ?? (kisPrice !== null ? (sessionType === "DAY" ? "kis-daymarket" : "kis") : "yahoo");
+  const volumeSource = quoteSnapshot.volumeSource
+    ?? item.volumeSource
+    ?? chartSnapshot.volumeSource
+    ?? (num(quoteSnapshot.kisVolume) !== null ? "kis-tvol" : "yahoo-fallback");
+  const historySource = chartSnapshot.historySource
+    ?? item.historySource
+    ?? null;
+  const kisVolume = num(quoteSnapshot.kisVolume)
+    ?? num(item.kisVolume)
+    ?? null;
+  const kisMarketCode = quoteSnapshot.kisMarketCode
+    ?? chartSnapshot.kisMarketCode
+    ?? item.kisMarketCode
+    ?? null;
+  const kisBarCount = positive(chartSnapshot.kisBarCount)
+    ?? positive(item.kisBarCount)
+    ?? 0;
+  const vwap = num(chartSnapshot.vwap)
+    ?? num(item.vwap);
+  const vwapSource = chartSnapshot.vwapSource
+    ?? chartSnapshot.commonSignals?.vwapSource
+    ?? item.vwapSource
+    ?? null;
+  const volumeAccelerationSource = chartSnapshot.commonSignals?.volumeAccelerationSource
+    ?? chartSnapshot.volumeAccelerationSource
+    ?? item.volumeAccelerationSource
+    ?? null;
 
   return {
     price: displayPrice ?? item.price,
     normalizedLivePriceUsd: displayPrice,
     regularMarketPrice: regularPrice,
-    preMarketPrice: preMarketPrice,
-    postMarketPrice: postMarketPrice,
+    preMarketPrice,
+    postMarketPrice,
     previousClose: previousClose ?? item.previousClose ?? null,
-    change: change ?? num(item.change) ?? null,
-    changePercent: changePercent ?? num(item.changePercent) ?? num(item.preMarketChangePercent) ?? null,
+    change: change ?? null,
+    changePercent: changePercent ?? null,
     marketState,
     extendedHours: marketState === "PRE" || marketState === "POST" || marketState === "POSTPOST",
     latestClose,
@@ -402,6 +592,19 @@ function normalizeLiveQuote(item, quoteSnapshot = {}, chartSnapshot = {}) {
     averageVolume: num(quoteSnapshot.averageDailyVolume3Month)
       ?? num(quoteSnapshot.averageDailyVolume10Day)
       ?? num(item.averageVolume),
+    sessionType,
+    priceSource,
+    volumeSource,
+    historySource,
+    vwap,
+    vwapSource,
+    volumeAccelerationSource,
+    rvolSource: item.rvolSource ?? null,
+    kisMarketCode,
+    kisPrice,
+    kisVolume,
+    kisBarCount,
+    aboveVwap: vwap !== null && displayPrice !== null ? displayPrice >= vwap : num(item.aboveVwap),
   };
 }
 
@@ -468,6 +671,7 @@ async function fetchChartSnapshot(symbol) {
 
     const volumes = rawVolumes.filter((value) => value !== null && value > 0);
     const latestBarAge = latestTimestamp ? Math.max(0, Math.round((Date.now() - latestTimestamp * 1000) / 60000)) : null;
+    const vwapEvaluation = buildVwapEvaluations(bars, 30);
     return {
       latestClose,
       latestBarAge,
@@ -478,14 +682,26 @@ async function fetchChartSnapshot(symbol) {
       chartPreviousClose: num(meta.chartPreviousClose),
       regularMarketVolume: num(meta.regularMarketVolume),
       volume: volumes.reduce((sum, value) => sum + value, 0) || null,
-      commonSignals: calculateCommonSignals(bars),
+      bars,
+      commonSignals: {
+        ...calculateCommonSignals(bars),
+        vwapSource: vwapEvaluation.vwapSource,
+        volumeAccelerationSource: "yahoo-fallback",
+      },
+      historySource: "yahoo",
+      volumeSource: "yahoo-fallback",
+      sessionType: getSessionType(new Date()),
+      kisMarketCode: null,
+      kisBarCount: bars.length,
+      vwap: vwapEvaluation.evaluated.at(-1)?.vwap ?? null,
+      vwapSource: vwapEvaluation.vwapSource,
     };
   } catch {
     return {};
   }
 }
 
-async function fetchVolumeProfile(symbol, currentVolume) {
+async function fetchVolumeProfile(symbol, currentVolume, currentVolumeSource = "yahoo") {
   if (!symbol) return {};
   try {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1mo&interval=1d&includePrePost=true`;
@@ -512,7 +728,7 @@ async function fetchVolumeProfile(symbol, currentVolume) {
       volumeRatio: averageVolume20d ? liveVolume / averageVolume20d : null,
       previousDayVolumeRatio: previousDayVolume ? liveVolume / previousDayVolume : null,
       volume: liveVolume || currentVolume,
-      volumeSource: "yahoo-daily-chart",
+      rvolSource: String(currentVolumeSource || "").startsWith("kis") ? "kis-current-volume-yahoo-average" : "yahoo",
       volumeProfileStatus: "ok",
     };
   } catch {
@@ -552,8 +768,8 @@ async function normalizeItem(item, enrichVolume = true) {
 
   const rawVolume = Math.max(num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0);
   const needsVolumeProfile = enrichVolume && ((num(item.relativeVolume) ?? num(item.volumeRatio)) === null || num(item.averageVolume) === null);
-  const volumeProfile = needsVolumeProfile ? await fetchVolumeProfile(item.symbol, rawVolume) : {};
-  const merged = { ...item, ...Object.fromEntries(Object.entries(volumeProfile).filter(([, value]) => value !== null && value !== undefined)) };
+  const volumeProfile = needsVolumeProfile ? await fetchVolumeProfile(item.symbol, rawVolume, item.volumeSource) : {};
+  const merged = { ...item, ...compactObject(volumeProfile) };
   const boosted = boostedScore(merged);
   const correctedVolumeScore = volumeStrength(merged);
 
@@ -596,18 +812,37 @@ module.exports = async function handler(req, res) {
         .slice(0, 120);
       const enrichSymbols = new Set(rankedForVolume.map((item) => item.symbol));
       const symbols = payload.data.items.map((item) => String(item?.symbol || "").toUpperCase()).filter(Boolean);
+      const sessionType = getSessionType(new Date());
       const batchQuoteMap = await fetchBatchQuoteMap(symbols);
       const chartSymbols = symbols.filter((symbol) => enrichSymbols.has(symbol));
       const chartSnapshots = await mapWithLimit(chartSymbols, 4, async (symbol) => [symbol, await fetchChartSnapshot(symbol)]);
       const chartMap = new Map(chartSnapshots);
+      const localQuoteSnapshots = sessionType === "DAY"
+        ? await mapWithLimit(chartSymbols, 2, async (symbol) => [symbol, await fetchLocalQuoteSnapshot(symbol)])
+        : [];
+      const localHistorySnapshots = sessionType === "DAY"
+        ? await mapWithLimit(chartSymbols, 2, async (symbol) => [symbol, await fetchLocalHistorySnapshot(symbol, "1m")])
+        : [];
+      const localQuoteMap = new Map(localQuoteSnapshots);
+      const localHistoryMap = new Map(localHistorySnapshots);
 
       payload.data.items = (await mapWithLimit(payload.data.items, 2, async (item) => {
-        const normalizedItem = await normalizeItem(item, enrichSymbols.has(item.symbol));
         const symbolKey = String(item?.symbol || "").toUpperCase();
-        const chartSnapshot = chartMap.get(symbolKey) || {};
+        const yahooChartSnapshot = chartMap.get(symbolKey) || {};
+        const localQuoteSnapshot = localQuoteMap.get(symbolKey) || {};
+        const localHistorySnapshot = localHistoryMap.get(symbolKey) || {};
+        const chartSnapshot = Array.isArray(localHistorySnapshot?.bars) && localHistorySnapshot.bars.length
+          ? buildChartSnapshotFromHistory(localHistorySnapshot)
+          : yahooChartSnapshot;
+        const quoteSnapshot = mergeSnapshots(batchQuoteMap.get(symbolKey) || {}, localQuoteSnapshot);
+        const preNormalizedLiveQuote = normalizeLiveQuote(item, quoteSnapshot, chartSnapshot);
+        const normalizedItem = await normalizeItem(
+          { ...item, ...compactObject(preNormalizedLiveQuote) },
+          enrichSymbols.has(item.symbol),
+        );
         const liveQuote = normalizeLiveQuote(
           normalizedItem,
-          batchQuoteMap.get(symbolKey),
+          quoteSnapshot,
           chartSnapshot,
         );
         const commonSignals = chartSnapshot.commonSignals || calculateCommonSignals([]);
@@ -619,7 +854,7 @@ module.exports = async function handler(req, res) {
 
         return {
           ...normalizedItem,
-          ...Object.fromEntries(Object.entries(liveQuote).filter(([, value]) => value !== null && value !== undefined)),
+          ...compactObject(liveQuote),
           ...commonSignals,
           rankAuxiliaryScore,
           scannerScore: Math.max(baseScannerScore, boostedScannerScore),
@@ -628,6 +863,8 @@ module.exports = async function handler(req, res) {
             ...(Array.isArray(normalizedItem.sourceTags) ? normalizedItem.sourceTags : []),
             batchQuoteMap.has(symbolKey) ? "yahoo-v7-batch" : null,
             chartMap.has(symbolKey) ? "yahoo-1m-live" : null,
+            localQuoteSnapshot?.priceSource?.startsWith("kis") ? "kis-local-quote" : null,
+            localHistorySnapshot?.historySource === "kis-daymarket-bars" ? "kis-local-history" : null,
             rankAuxiliaryScore > 0 ? "common-signal-rank-boost" : null,
           ].filter(Boolean))],
           selectionReasons: [
