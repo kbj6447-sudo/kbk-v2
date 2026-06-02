@@ -57,6 +57,68 @@ function rvolValue(item) {
   return toNumber(item?.volumeRatio ?? item?.relativeVolume);
 }
 
+function topPickSignalScore(item, volume, change) {
+  const volumeAcceleration = toNumber(item?.volumeAccelerationScore) ?? 50;
+  const higherLow = toNumber(item?.higherLowScore) ?? 50;
+  const vwapHold = toNumber(item?.vwapHoldScore) ?? 50;
+  const compression = toNumber(item?.compressionScore) ?? 50;
+  const resurge = toNumber(item?.reSurgeSetupScore) ?? 50;
+  const reclaim = toNumber(item?.vwapReclaimScore) ?? 50;
+  const rvol = rvolValue(item);
+  const volumeBonus = volume >= 5_000_000 ? 14 : volume >= 1_000_000 ? 8 : 0;
+  const changeBonus = change >= 20 ? 8 : 0;
+  const rawSignalBonus =
+    (volumeAcceleration - 50) * 0.03
+    + (higherLow - 50) * 0.025
+    + (vwapHold - 50) * 0.025
+    + (compression - 50) * 0.03
+    + (resurge - 50) * 0.04
+    + (reclaim - 50) * 0.025
+    + (rvol !== null && rvol >= 3 ? 1 : 0);
+  const signalBonus = Math.max(0, Math.min(8, Math.round(rawSignalBonus)));
+  return { signalBonus, volumeBonus, changeBonus, rvol };
+}
+
+function topPickReasoning(item, metrics) {
+  const value = (key) => toNumber(item?.[key]);
+  const reasons = [];
+  const cautions = [];
+  const resurge = value("reSurgeSetupScore");
+  const compression = value("compressionScore");
+  const reclaim = value("vwapReclaimScore");
+  const higherLow = value("higherLowScore");
+  const vwapHold = value("vwapHoldScore");
+  const volumeAccel = value("volumeAccelerationScore");
+
+  if (metrics.surge >= 75) reasons.push("폭등 감시 점수 우수");
+  if (metrics.pattern >= 65) reasons.push("패턴 유사도 양호");
+  if (resurge !== null && resurge >= 70) reasons.push("재상승 준비도 양호");
+  if (compression !== null && compression >= 70) reasons.push("박스권 압축 확인");
+  if (reclaim !== null && reclaim >= 70) reasons.push("VWAP 재탈환 양호");
+  if (higherLow !== null && higherLow >= 70) reasons.push("저점 상승 구조");
+  if (vwapHold !== null && vwapHold >= 70) reasons.push("VWAP 유지 흐름");
+  if (volumeAccel !== null && volumeAccel >= 70) reasons.push("거래량 가속도 증가");
+  if (metrics.rvol !== null && metrics.rvol >= 3) reasons.push(`RVOL ${metrics.rvol.toFixed(1)}배`);
+  if (metrics.volume >= 5_000_000) reasons.push("원시 거래량 충분");
+
+  if (metrics.risk >= 70) cautions.push("추격 위험 높음");
+  if (metrics.change >= 80) cautions.push("단기 과열 확인 필요");
+  if (reclaim !== null && reclaim < 45) cautions.push("VWAP 재탈환 약함");
+  if (vwapHold !== null && vwapHold < 45) cautions.push("VWAP 유지 약함");
+  if (metrics.rvol !== null && metrics.rvol < 1) cautions.push("상대거래량 낮음");
+
+  let decision = "확인 필요";
+  if (metrics.risk >= 78 || metrics.change >= 120) decision = "눌림 대기";
+  else if (metrics.finalScore >= 82 && cautions.length <= 1) decision = "우선 관찰";
+  else if (metrics.finalScore >= 72) decision = "관찰 유지";
+
+  return {
+    reasons: reasons.length ? reasons.slice(0, 4) : ["통합 점수 기준 통과"],
+    cautions: cautions.length ? cautions.slice(0, 3) : ["실제 진입 전 눌림/VWAP 재확인"],
+    decision,
+  };
+}
+
 function textEscape(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;",
@@ -154,6 +216,12 @@ function ensureStyles() {
     .kbk-pro-top-grid div{background:#f8fafc;border-radius:10px;padding:9px}
     .kbk-pro-top-grid span{display:block;color:#64748b;font-size:.76rem}
     .kbk-pro-top-grid b{display:block;margin-top:4px;color:#0f172a}
+    .kbk-pro-top-meta{display:grid;grid-template-columns:1fr 1fr 150px;gap:8px}
+    .kbk-pro-top-meta div{background:#f8fafc;border:1px solid rgba(15,23,42,.08);border-radius:10px;padding:9px}
+    .kbk-pro-top-meta span{display:block;color:#64748b;font-size:.74rem;font-weight:900;margin-bottom:5px}
+    .kbk-pro-top-meta p{margin:0;color:#0f172a;font-size:.82rem;font-weight:800;line-height:1.45}
+    .kbk-pro-top-decision{background:#eff6ff!important;border-color:rgba(37,99,235,.18)!important}
+    .kbk-pro-top-decision b{display:block;color:#1d4ed8;font-size:.95rem}
     @media (max-width:1100px){
       .accumulation-hero{grid-template-columns:1fr!important}
       .stock-grid{grid-template-columns:repeat(2,minmax(240px,1fr))!important}
@@ -168,6 +236,7 @@ function ensureStyles() {
       .terminal-layout{grid-template-columns:1fr!important}
       .candidate-table,.signal-table,.debug-table{min-width:760px!important}
       .kbk-pro-top-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .kbk-pro-top-meta{grid-template-columns:1fr}
       .kbk-pro-basis{grid-template-columns:1fr}
     }
   `;
@@ -315,8 +384,11 @@ async function renderTopPicksOnly() {
         const surge = Math.round(Number(item.finalProbabilityScore ?? item.scannerScore ?? 0));
         const risk = Math.round(Number(item.riskScore ?? 50));
         const pattern = Math.round(Number(item.patternSimilarityScore ?? 50));
-        const finalScore = Math.round(Math.max(0, Math.min(100, surge * .55 + pattern * .2 + (volume >= 5_000_000 ? 14 : volume >= 1_000_000 ? 8 : 0) + (change >= 20 ? 8 : 0) - risk * .12)));
-        return { item, price, change, volume, surge, risk, pattern, finalScore };
+        const signal = topPickSignalScore(item, volume, change);
+        const baseScore = surge * .55 + pattern * .2 + signal.volumeBonus + signal.changeBonus - risk * .12;
+        const finalScore = Math.round(Math.max(0, Math.min(100, baseScore + signal.signalBonus)));
+        const reasoning = topPickReasoning(item, { change, volume, surge, risk, pattern, finalScore, rvol: signal.rvol });
+        return { item, price, change, volume, surge, risk, pattern, finalScore, signalBonus: signal.signalBonus, reasoning };
       })
       .filter((pick) => pick.finalScore >= 62)
       .sort((a, b) => b.finalScore - a.finalScore)
@@ -333,7 +405,7 @@ async function renderTopPicksOnly() {
           <div class="score-card"><span>기준</span><strong>62점 이상</strong></div>
         </div>
       </section>
-      ${items.length ? items.map(({ item, price, change, volume, surge, risk, pattern, finalScore }) => `
+      ${items.length ? items.map(({ item, price, change, volume, surge, risk, pattern, finalScore, signalBonus, reasoning }) => `
         <article class="kbk-pro-top-card">
           <div class="kbk-pro-top-head">
             <div><h3>${textEscape(item.symbol)}</h3><p>${textEscape(item.name || item.symbol)}</p></div>
@@ -348,7 +420,12 @@ async function renderTopPicksOnly() {
             <div><span>폭등 감시</span><b>${surge}점</b></div>
             <div><span>패턴</span><b>${pattern}점</b></div>
             <div><span>위험</span><b>${risk}점</b></div>
-            <div><span>통합</span><b>${finalScore}점</b></div>
+            <div><span>통합</span><b>${finalScore}점${signalBonus ? ` (+${signalBonus})` : ""}</b></div>
+          </div>
+          <div class="kbk-pro-top-meta">
+            <div><span>선정 이유</span><p>${reasoning.reasons.map(textEscape).join(" · ")}</p></div>
+            <div><span>주의 요인</span><p>${reasoning.cautions.map(textEscape).join(" · ")}</p></div>
+            <div class="kbk-pro-top-decision"><span>최종 판단</span><b>${textEscape(reasoning.decision)}</b></div>
           </div>
         </article>
       `).join("") : `<section class="kbk-empty-note">현재 통합 기준을 통과한 후보가 없습니다. 새로고침으로 다시 확인해 주세요.</section>`}
