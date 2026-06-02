@@ -4,6 +4,8 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+const { KIS_BASE_URL, getKisAccessToken } = require("../lib/kisToken");
+
 function orNum(a, b) {
   const va = num(a);
   return va !== null ? va : num(b);
@@ -287,54 +289,10 @@ function buildNextKey(rawSeries, intervalMinutes) {
   return `${yyyy}${mm}${dd}${hh}${min}${ss}`;
 }
 
-const KIS_BASE_URL = "https://openapi.koreainvestment.com:9443";
-const KIS_TOKEN_CACHE = {
-  accessToken: "",
-  expiresAt: 0,
-};
-
 async function fetchJson(url, options) {
   const response = await fetch(url, options);
   const payload = await response.json().catch(() => null);
   return { response, payload };
-}
-
-async function getKisAccessToken() {
-  const now = Date.now();
-  if (KIS_TOKEN_CACHE.accessToken && KIS_TOKEN_CACHE.expiresAt > now + 60 * 1000) {
-    return KIS_TOKEN_CACHE.accessToken;
-  }
-
-  if (process.env.KIS_ACCESS_TOKEN) {
-    KIS_TOKEN_CACHE.accessToken = process.env.KIS_ACCESS_TOKEN;
-    KIS_TOKEN_CACHE.expiresAt = now + 6 * 60 * 60 * 1000;
-    return KIS_TOKEN_CACHE.accessToken;
-  }
-
-  const appKey = process.env.KIS_APP_KEY;
-  const appSecret = process.env.KIS_APP_SECRET;
-  if (!appKey || !appSecret) return null;
-
-  const tokenResult = await fetchJson(`${KIS_BASE_URL}/oauth2/tokenP`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json",
-    },
-    body: JSON.stringify({
-      grant_type: "client_credentials",
-      appkey: appKey,
-      appsecret: appSecret,
-    }),
-  });
-
-  const accessToken = tokenResult?.payload?.access_token || null;
-  if (!tokenResult.response.ok || !accessToken) return null;
-
-  const expiresIn = num(tokenResult.payload.expires_in) || 24 * 60 * 60;
-  KIS_TOKEN_CACHE.accessToken = accessToken;
-  KIS_TOKEN_CACHE.expiresAt = now + expiresIn * 1000;
-  return accessToken;
 }
 
 async function fetchKisBarsPage(symbol, marketCode, token, intervalInfo, keyb) {
