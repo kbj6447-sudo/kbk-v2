@@ -231,7 +231,17 @@ function ensureRouteLinks() {
   }
 }
 
+function isTopPicksViewActive() {
+  return window.location.pathname === "/top-picks" || window.location.hash === "#top-picks";
+}
+
 function showAllPanels() {
+  if (isTopPicksViewActive()) {
+    document.querySelectorAll(".page-stack > .page-panel").forEach((panel) => {
+      panel.style.display = "none";
+    });
+    return;
+  }
   document.querySelectorAll(".page-stack > .page-panel").forEach((panel) => {
     panel.style.display = "";
   });
@@ -259,6 +269,9 @@ async function renderTopPicks() {
   const now = Date.now();
   if (topPicksRouteBusyUntil > now) return;
   topPicksRouteBusyUntil = now + 800;
+  document.querySelectorAll(".page-stack > .page-panel").forEach((panel) => {
+    panel.style.display = "none";
+  });
   document.getElementById("kbk-pro-top-picks")?.remove();
   const legacyButton = document.getElementById("kbk-top-picks-menu");
   if (legacyButton) {
@@ -345,7 +358,10 @@ async function renderTopPicks() {
 
 function handleRoute() {
   const path = window.location.pathname;
-  if (path === "/top-picks") {
+  if (path === "/top-picks" || window.location.hash === "#top-picks") {
+    document.querySelectorAll(".page-stack > .page-panel").forEach((panel) => {
+      panel.style.display = "none";
+    });
     renderTopPicks();
     return;
   }
