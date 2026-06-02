@@ -873,13 +873,14 @@ function topPickPanel() {
 function setTopPickMode(enabled) {
   const panel = topPickPanel();
   if (!panel) return;
+  window.__kbkActiveCategoryKey = enabled ? "top-picks" : window.location.pathname || "default";
   document.querySelectorAll(".page-stack > .page-panel").forEach((section) => {
     section.style.display = enabled ? "none" : "";
   });
   panel.hidden = !enabled;
   document.querySelectorAll(".menu-link").forEach((link) => link.classList.remove("active"));
   document.getElementById("kbk-top-picks-menu")?.classList.toggle("active", enabled);
-  if (enabled && !panel.dataset.loaded) loadTopPicks();
+  if (enabled && !panel.dataset.loaded && !topPicksLoadPromise) loadTopPicks();
 }
 
 function renderTopPickLoading() {
@@ -946,9 +947,25 @@ function priceUsdText(value) {
   return usdText(value);
 }
 
+let topPicksLoadPromise = null;
+let topPicksRenderToken = 0;
+let topPicksLastStartedAt = 0;
+
+function isTopPicksActive() {
+  return window.location.hash === "#top-picks";
+}
+
 async function loadTopPicks() {
+  const panel = topPickPanel();
+  if (!panel) return null;
+  const startedAt = Date.now();
+  if (topPicksLoadPromise && startedAt - topPicksLastStartedAt < 1200) {
+    return topPicksLoadPromise;
+  }
+  topPicksLastStartedAt = startedAt;
+  const renderToken = ++topPicksRenderToken;
   renderTopPickLoading();
-  try {
+  topPicksLoadPromise = (async () => {
     const [payload, exchangePayload] = await Promise.all([
       fetchJson("/api/scanner"),
       fetchJson("/api/exchange").catch(() => null),
@@ -979,11 +996,18 @@ async function loadTopPicks() {
       scored.push(...supplemental.slice(0, 20 - scored.length));
       scored.sort((a, b) => b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk);
     }
+    if (!isTopPicksActive() || renderToken !== topPicksRenderToken) return;
     renderTopPicks(scored.slice(0, 20), payload?.data?.updatedAt ?? payload?.updatedAt);
-  } catch (error) {
-    const panel = topPickPanel();
-    if (panel) panel.innerHTML = `<section class="kbk-top-empty">통합 후보 계산 실패: ${esc(error.message)}</section>`;
-  }
+  })().catch((error) => {
+    if (!isTopPicksActive() || renderToken !== topPicksRenderToken) return;
+    const activePanel = topPickPanel();
+    if (activePanel) activePanel.innerHTML = `<section class="kbk-top-empty">통합 후보 계산 실패: ${esc(error.message)}</section>`;
+  }).finally(() => {
+    if (renderToken === topPicksRenderToken) {
+      topPicksLoadPromise = null;
+    }
+  });
+  return topPicksLoadPromise;
 }
 
 function syncTopPicksMenu() {
@@ -995,9 +1019,9 @@ function syncTopPicksMenu() {
     button.className = "menu-link menu-button";
     button.textContent = "통합 최종 후보";
     button.addEventListener("click", () => {
+      if (isTopPicksActive() && topPicksLoadPromise) return;
       window.location.hash = "top-picks";
       setTopPickMode(true);
-      loadTopPicks();
     });
     menu.appendChild(button);
   }

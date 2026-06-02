@@ -16,9 +16,6 @@
   var cachedEntry = null;
   var inFlightEntryPromise = null;
   var forceRefreshUntil = readPersistedForceUntil();
-  var servedCachedBody = "";
-  var usedCachedResponse = false;
-  var refreshScheduled = false;
 
   function now() {
     return Date.now();
@@ -121,15 +118,6 @@
     });
   }
 
-  function maybeScheduleRefresh(nextBody) {
-    if (!usedCachedResponse || !servedCachedBody) return;
-    if (refreshScheduled || !nextBody || nextBody === servedCachedBody) return;
-    refreshScheduled = true;
-    window.setTimeout(function reloadAfterRefresh() {
-      window.location.reload();
-    }, 60);
-  }
-
   async function fetchAndCache(input, init) {
     var response = await originalFetch(input, init);
     var body = await response.clone().text();
@@ -142,7 +130,6 @@
     var entry = createEntry(body, response.status, response.statusText, headers, now());
     if (response.ok && body) {
       setCachedEntry(entry);
-      maybeScheduleRefresh(body);
     }
 
     return entry;
@@ -182,9 +169,6 @@
   window.__kbkClearScannerCache = function clearScannerCache() {
     cachedEntry = null;
     inFlightEntryPromise = null;
-    servedCachedBody = "";
-    usedCachedResponse = false;
-    refreshScheduled = false;
     clearPersistedCache();
     markForceRefresh();
   };
@@ -202,15 +186,11 @@
     var age = cachedEntry ? now() - cachedEntry.cachedAt : Infinity;
 
     if (!force && cachedEntry && age <= SCANNER_CACHE_TTL_MS) {
-      usedCachedResponse = true;
-      servedCachedBody = cachedEntry.body;
       refreshInBackground(input, init);
       return Promise.resolve(responseFromEntry(cachedEntry));
     }
 
     if (!force && cachedEntry && age <= SCANNER_STALE_MS) {
-      usedCachedResponse = true;
-      servedCachedBody = cachedEntry.body;
       refreshInBackground(input, init);
       return Promise.resolve(responseFromEntry(cachedEntry));
     }

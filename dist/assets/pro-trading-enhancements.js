@@ -253,11 +253,19 @@ function routeScroll(targetId, message) {
   if (targetId === "backtest-panel") window.setTimeout(renderBacktestExpectation, 300);
 }
 
+let topPicksRouteBusyUntil = 0;
+
 async function renderTopPicks() {
+  const now = Date.now();
+  if (topPicksRouteBusyUntil > now) return;
+  topPicksRouteBusyUntil = now + 800;
   document.getElementById("kbk-pro-top-picks")?.remove();
   const legacyButton = document.getElementById("kbk-top-picks-menu");
   if (legacyButton) {
     legacyButton.click();
+    window.setTimeout(() => {
+      topPicksRouteBusyUntil = 0;
+    }, 250);
     return;
   }
   if (window.location.hash !== "#top-picks") {
@@ -265,6 +273,9 @@ async function renderTopPicks() {
   } else {
     window.dispatchEvent(new HashChangeEvent("hashchange"));
   }
+  window.setTimeout(() => {
+    topPicksRouteBusyUntil = 0;
+  }, 250);
   return;
   const stack = document.querySelector(".page-stack");
   if (!stack) return;
