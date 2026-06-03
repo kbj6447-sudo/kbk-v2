@@ -5,9 +5,6 @@ let pollTimer = null;
 let lastQuote = null;
 let lastBars = [];
 let usdKrw = 1365;
-let selectedDetailCalculating = false;
-let selectedDetailRefreshQueued = false;
-let selectedFallbackScore = null;
 
 const fmt = new Intl.NumberFormat("ko-KR");
 
@@ -26,11 +23,6 @@ function num(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function positiveNum(value) {
-  const n = num(value);
-  return n !== null && n > 0 ? n : null;
-}
-
 function pct(value) {
   const n = num(value);
   return n === null ? "-" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
@@ -45,31 +37,8 @@ function compact(value) {
   return fmt.format(Math.round(n));
 }
 
-function usdText(value) {
-  const n = num(value);
-  if (n === null) return "-";
-  return `$${n.toFixed(n >= 10 ? 2 : 4)}`;
-}
-
-function levelText(value, fallback = "데이터 부족") {
-  const n = positiveNum(value);
-  return n === null ? fallback : usdText(n);
-}
-
-function krwText(value) {
-  const n = num(value);
-  if (n === null) return "-";
-  return `${fmt.format(Math.round(n * usdKrw))}원`;
-}
-
-function pricePairText(value) {
-  const n = num(value);
-  if (n === null) return "-";
-  return `${krwText(n)} (${usdText(n)})`;
-}
-
 function priceUsd(quote) {
-  return positiveNum(quote?.price) ?? positiveNum(quote?.preMarketPrice) ?? positiveNum(quote?.regularMarketPrice);
+  return num(quote?.price) ?? num(quote?.preMarketPrice) ?? num(quote?.regularMarketPrice);
 }
 
 function changePct(quote) {
@@ -77,7 +46,7 @@ function changePct(quote) {
 }
 
 function vwapValue(quote) {
-  return positiveNum(quote?.technical?.vwap) ?? positiveNum(quote?.vwap);
+  return num(quote?.technical?.vwap) ?? num(quote?.vwap);
 }
 
 function vwapState(quote) {
@@ -98,226 +67,24 @@ function trendLabel(quote) {
 }
 
 function supportResistance(quote, bars) {
-  const lows = bars.map((bar) => positiveNum(bar.low ?? bar.l)).filter((v) => v !== null);
-  const highs = bars.map((bar) => positiveNum(bar.high ?? bar.h)).filter((v) => v !== null);
-  const support = lows.length ? Math.min(...lows) : positiveNum(quote?.dayLow);
-  const resistance = highs.length ? Math.max(...highs) : positiveNum(quote?.dayHigh);
+  const lows = bars.map((bar) => num(bar.low ?? bar.l)).filter((v) => v !== null);
+  const highs = bars.map((bar) => num(bar.high ?? bar.h)).filter((v) => v !== null);
+  const support = lows.length ? Math.min(...lows) : num(quote?.dayLow);
+  const resistance = highs.length ? Math.max(...highs) : num(quote?.dayHigh);
   return { support, resistance };
-}
-
-function localHigherLowScore(bars) {
-  const sample = bars.slice(-10)
-    .map((bar) => ({
-      low: positiveNum(bar.low ?? bar.l),
-      close: positiveNum(bar.close ?? bar.c ?? bar.price),
-    }))
-    .filter((bar) => bar.low !== null && bar.close !== null);
-  if (sample.length < 5) return 50;
-  let defendedPairs = 0;
-  for (let i = 1; i < sample.length; i += 1) {
-    if (sample[i].low >= sample[i - 1].low * 0.998) defendedPairs += 1;
-  }
-  let consecutiveHigherLows = 0;
-  for (let i = sample.length - 1; i > 0; i -= 1) {
-    if (sample[i].low >= sample[i - 1].low * 1.001) consecutiveHigherLows += 1;
-    else break;
-  }
-  const recent = sample.slice(-4);
-  const recentFloor = Math.min(...recent.slice(0, -1).map((bar) => bar.low));
-  const last = sample.at(-1);
-  const closeMaintains = last.close >= last.low * 1.002 && last.close >= recentFloor * 0.998;
-  const damaged = last.low < recentFloor * 0.992 || last.close < recentFloor * 0.995;
-  let score = 35 + (defendedPairs / (sample.length - 1)) * 38 + Math.min(consecutiveHigherLows, 4) * 7;
-  if (consecutiveHigherLows >= 3 && closeMaintains && !damaged) score = Math.max(score, 90);
-  else if (consecutiveHigherLows >= 2 && closeMaintains && !damaged) score = Math.max(score, 74);
-  else if (damaged) score = Math.min(score - 22, 38);
-  if (closeMaintains) score += 6;
-  return Math.round(Math.max(0, Math.min(100, score)));
-}
-
-function localVwapHold(bars) {
-  const sample = bars.slice(-24);
-  if (sample.length < 3) return { vwapHoldMinutes: null, vwapHoldScore: 50 };
-  let pv = 0;
-  let totalVolume = 0;
-  const evaluated = [];
-  for (const bar of bars) {
-    const high = positiveNum(bar.high ?? bar.h ?? bar.close);
-    const low = positiveNum(bar.low ?? bar.l ?? bar.close);
-    const close = positiveNum(bar.close ?? bar.c ?? bar.price);
-    const volume = positiveNum(bar.volume ?? bar.v);
-    if (high === null || low === null || close === null || volume === null) continue;
-    pv += ((high + low + close) / 3) * volume;
-    totalVolume += volume;
-    if (!sample.includes(bar) || totalVolume <= 0) continue;
-    evaluated.push({ close, vwap: pv / totalVolume });
-  }
-  if (evaluated.length < 3) return { vwapHoldMinutes: null, vwapHoldScore: 50 };
-  let vwapHoldMinutes = 0;
-  for (let i = evaluated.length - 1; i >= 0; i -= 1) {
-    if (evaluated[i].close >= evaluated[i].vwap) vwapHoldMinutes += 1;
-    else break;
-  }
-  const holdRatio = evaluated.filter((bar) => bar.close >= bar.vwap).length / evaluated.length;
-  const vwapHoldScore = vwapHoldMinutes >= 10 ? 96
-    : vwapHoldMinutes >= 5 ? 82
-      : vwapHoldMinutes >= 3 ? 66
-        : vwapHoldMinutes >= 1 ? 44
-          : Math.max(22, holdRatio * 48);
-  return { vwapHoldMinutes, vwapHoldScore: Math.round(Math.max(0, Math.min(100, vwapHoldScore))) };
-}
-
-function localCompressionScore(bars) {
-  const sample = bars.slice(-20)
-    .map((bar) => ({
-      high: positiveNum(bar.high ?? bar.h ?? bar.close),
-      low: positiveNum(bar.low ?? bar.l ?? bar.close),
-      close: positiveNum(bar.close ?? bar.c ?? bar.price),
-      volume: positiveNum(bar.volume ?? bar.v),
-    }))
-    .filter((bar) => bar.high !== null && bar.low !== null && bar.close !== null);
-  if (sample.length < 8) return 50;
-  const lastClose = sample.at(-1).close;
-  const rangePct = ((Math.max(...sample.map((bar) => bar.high)) - Math.min(...sample.map((bar) => bar.low))) / Math.max(lastClose, 0.0001)) * 100;
-  const recent = sample.slice(-8);
-  const prior = sample.slice(0, Math.max(sample.length - 8, 1));
-  const avgRange = (items) => {
-    const ranges = items.map((bar) => ((bar.high - bar.low) / Math.max(bar.close, 0.0001)) * 100).filter(Number.isFinite);
-    return ranges.length ? ranges.reduce((sum, value) => sum + value, 0) / ranges.length : null;
-  };
-  const recentRange = avgRange(recent);
-  const priorRange = avgRange(prior);
-  const rangeContracting = recentRange !== null && priorRange !== null && recentRange <= priorRange * 0.82;
-  const lowsDefended = Math.min(...recent.map((bar) => bar.low)) >= Math.min(...sample.slice(0, -4).map((bar) => bar.low)) * 0.995;
-  const volumeRebuilding = (() => {
-    const volumes = sample.map((bar) => bar.volume).filter((value) => value !== null);
-    const lastVol = volumes.slice(-3);
-    const midVol = volumes.slice(-12, -3);
-    const avg = (values) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
-    const a = avg(lastVol);
-    const b = avg(midVol);
-    return a !== null && b !== null ? a >= b * 1.08 : false;
-  })();
-  const base = rangePct <= 3 ? 88 : rangePct <= 5 ? 78 : rangePct <= 8 ? 64 : rangePct <= 12 ? 52 : 38;
-  const score = base + (rangeContracting ? 12 : -4) + (lowsDefended ? 10 : -12) + (volumeRebuilding ? 7 : 0) + (localHigherLowScore(sample) - 50) * 0.10;
-  return Math.round(Math.max(0, Math.min(100, score)));
-}
-
-function localVwapReclaimScore(bars, vwapHoldMinutes = null) {
-  const sample = bars.slice(-30);
-  if (sample.length < 8) return 50;
-  let pv = 0;
-  let totalVolume = 0;
-  const evaluated = [];
-  for (const bar of bars) {
-    const high = positiveNum(bar.high ?? bar.h ?? bar.close);
-    const low = positiveNum(bar.low ?? bar.l ?? bar.close);
-    const close = positiveNum(bar.close ?? bar.c ?? bar.price);
-    const volume = positiveNum(bar.volume ?? bar.v);
-    if (high === null || low === null || close === null || volume === null) continue;
-    pv += ((high + low + close) / 3) * volume;
-    totalVolume += volume;
-    if (!sample.includes(bar) || totalVolume <= 0) continue;
-    const vwap = pv / totalVolume;
-    evaluated.push({ close, volume, vwap, above: close >= vwap });
-  }
-  if (evaluated.length < 8) return 50;
-  let reclaimIndex = -1;
-  for (let i = 1; i < evaluated.length; i += 1) {
-    if (!evaluated[i - 1].above && evaluated[i].above) reclaimIndex = i;
-  }
-  if (reclaimIndex < 0) return evaluated.at(-1)?.above ? 58 : 32;
-  const after = evaluated.slice(reclaimIndex);
-  const before = evaluated.slice(Math.max(0, reclaimIndex - 5), reclaimIndex);
-  const avg = (values) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
-  const hold = num(vwapHoldMinutes) ?? after.filter((bar) => bar.above).length;
-  const reclaimVol = avg(after.slice(0, 3).map((bar) => bar.volume));
-  const priorVol = avg(before.map((bar) => bar.volume));
-  const volumeExpanded = reclaimVol !== null && priorVol !== null && reclaimVol >= priorVol * 1.15;
-  const last = evaluated.at(-1);
-  const score = 40 + Math.min(hold, 10) * 5 + (volumeExpanded ? 16 : 0) + (last?.close >= last?.vwap * 0.996 ? 12 : -14) + (last?.above ? 8 : 0);
-  return Math.round(Math.max(0, Math.min(100, score)));
-}
-
-function localReSurgeSetupScore(bars, higherLowScore, vwapHoldScore, vwapReclaimScore) {
-  const sample = bars.slice(-40)
-    .map((bar) => ({
-      high: positiveNum(bar.high ?? bar.h ?? bar.close),
-      low: positiveNum(bar.low ?? bar.l ?? bar.close),
-      close: positiveNum(bar.close ?? bar.c ?? bar.price),
-      volume: positiveNum(bar.volume ?? bar.v),
-    }))
-    .filter((bar) => bar.high !== null && bar.low !== null && bar.close !== null);
-  if (sample.length < 15) return 50;
-  const last = sample.at(-1);
-  const firstHalf = sample.slice(0, -10);
-  const recent = sample.slice(-14);
-  const priorLow = Math.min(...firstHalf.map((bar) => bar.low));
-  const impulseHigh = Math.max(...firstHalf.map((bar) => bar.high));
-  const impulseMovePct = priorLow > 0 ? ((impulseHigh - priorLow) / priorLow) * 100 : null;
-  const recentLow = Math.min(...recent.map((bar) => bar.low));
-  const recentHigh = Math.max(...recent.map((bar) => bar.high));
-  const pullbackPct = impulseHigh > 0 ? ((impulseHigh - recentLow) / impulseHigh) * 100 : null;
-  const sidewaysRangePct = ((recentHigh - recentLow) / Math.max(last.close, 0.0001)) * 100;
-  let score = 28;
-  if (impulseMovePct !== null && impulseMovePct >= 18) score += 18;
-  else if (impulseMovePct !== null && impulseMovePct >= 9) score += 10;
-  if (pullbackPct !== null && pullbackPct <= 18 && last.close >= impulseHigh * 0.72) score += 16;
-  if (sidewaysRangePct <= 8) score += 12;
-  else if (sidewaysRangePct <= 13) score += 6;
-  if ((num(higherLowScore) ?? 50) >= 50) score += 10;
-  if ((num(vwapHoldScore) ?? 50) >= 60 || (num(vwapReclaimScore) ?? 50) >= 65) score += 10;
-  if (recentHigh > 0 && last.close >= recentHigh * 0.985) score += 12;
-  return Math.round(Math.max(0, Math.min(100, score)));
-}
-
-function higherLowLabel(score) {
-  const value = num(score);
-  if (value === null) return "데이터 부족";
-  if (value >= 90) return "강함";
-  if (value >= 70) return "보통";
-  if (value >= 40) return "중립";
-  return "없음";
-}
-
-function vwapHoldText(minutes) {
-  const value = num(minutes);
-  return value === null ? "데이터 부족" : `${Math.round(value)}분`;
-}
-
-function strengthLabel(score) {
-  const value = num(score);
-  if (value === null) return "데이터 부족";
-  if (value >= 90) return "강함";
-  if (value >= 70) return "양호";
-  if (value >= 40) return "관찰";
-  return "약함";
-}
-
-function cardScore(card) {
-  const scoreNode = card?.querySelector?.(".score-number,.kbk-top-score");
-  const raw = scoreNode?.childNodes?.[0]?.textContent ?? scoreNode?.textContent ?? "";
-  return num(String(raw).match(/\d+(?:\.\d+)?/)?.[0]);
 }
 
 function analyzeSignal(quote, bars) {
   const price = priceUsd(quote);
   const change = changePct(quote);
   const risk = num(quote?.riskScore) ?? 50;
-  const probability = num(quote?.finalProbabilityScore) ?? num(quote?.scannerScore);
+  const probability = num(quote?.finalProbabilityScore) ?? num(quote?.scannerScore) ?? 0;
   const pattern = num(quote?.patternSimilarityScore) ?? 0;
   const vwap = vwapState(quote);
   const trend = trendLabel(quote);
   const { support, resistance } = supportResistance(quote, bars);
   const closePosition = num(quote?.technical?.closePosition);
   const volume = num(quote?.volume) ?? num(quote?.preMarketVolume);
-  const localVwap = localVwapHold(bars);
-  const higherLowScore = num(quote?.higherLowScore) ?? localHigherLowScore(bars);
-  const vwapHoldScore = num(quote?.vwapHoldScore) ?? localVwap.vwapHoldScore;
-  const vwapHoldMinutes = num(quote?.vwapHoldMinutes) ?? localVwap.vwapHoldMinutes;
-  const compressionScore = num(quote?.compressionScore) ?? localCompressionScore(bars);
-  const vwapReclaimScore = num(quote?.vwapReclaimScore) ?? localVwapReclaimScore(bars, vwapHoldMinutes);
-  const reSurgeSetupScore = num(quote?.reSurgeSetupScore) ?? localReSurgeSetupScore(bars, higherLowScore, vwapHoldScore, vwapReclaimScore);
 
   let action = "관찰 후 눌림 대기";
   let tone = "neutral";
@@ -342,12 +109,9 @@ function analyzeSignal(quote, bars) {
   }
 
   const position = closePosition === null ? "위치 확인 중" : closePosition >= 75 ? "상단권" : closePosition >= 45 ? "박스권 중앙" : "하단권";
-  const stopLine = support !== null ? support * 0.985 : null;
-  const entryBase = resistance ?? price;
-  const entryLine = entryBase !== null ? entryBase * (resistance !== null ? 1.002 : 1) : null;
-  const profitLine = entryLine !== null
-    ? Math.max(price !== null ? price * 1.03 : 0, entryLine * 1.015)
-    : null;
+  const stopLine = support !== null ? support * 0.985 : price !== null ? price * 0.97 : null;
+  const entryLine = resistance !== null ? resistance * 1.002 : price;
+  const profitLine = price !== null ? price * 1.03 : null;
 
   return {
     action,
@@ -362,13 +126,6 @@ function analyzeSignal(quote, bars) {
     trend,
     position,
     volume,
-    higherLowScore,
-    higherLowLabel: higherLowLabel(higherLowScore),
-    vwapHoldScore,
-    vwapHoldMinutes,
-    compressionScore,
-    vwapReclaimScore,
-    reSurgeSetupScore,
     support,
     resistance,
     stopLine,
@@ -381,9 +138,9 @@ function normalizeBars(payload) {
   const bars = payload?.data?.bars ?? payload?.bars ?? payload?.candles ?? [];
   return bars.map((bar) => ({
     time: bar.time ?? bar.date ?? bar.timestamp,
-    close: positiveNum(bar.close ?? bar.c ?? bar.price),
-    high: positiveNum(bar.high ?? bar.h ?? bar.close ?? bar.c ?? bar.price),
-    low: positiveNum(bar.low ?? bar.l ?? bar.close ?? bar.c ?? bar.price),
+    close: num(bar.close ?? bar.c ?? bar.price),
+    high: num(bar.high ?? bar.h ?? bar.close ?? bar.c ?? bar.price),
+    low: num(bar.low ?? bar.l ?? bar.close ?? bar.c ?? bar.price),
     volume: num(bar.volume ?? bar.v),
   })).filter((bar) => bar.close !== null).slice(-60);
 }
@@ -391,8 +148,8 @@ function normalizeBars(payload) {
 function fallbackBars(quote) {
   const price = priceUsd(quote);
   if (price === null) return [];
-  const low = positiveNum(quote?.dayLow) ?? price * 0.97;
-  const high = positiveNum(quote?.dayHigh) ?? price * 1.03;
+  const low = num(quote?.dayLow) ?? price * 0.97;
+  const high = num(quote?.dayHigh) ?? price * 1.03;
   return Array.from({ length: 16 }, (_, i) => {
     const t = i / 15;
     const wave = Math.sin(t * Math.PI * 2) * (high - low) * 0.08;
@@ -407,7 +164,7 @@ function chartSvg(bars, signal) {
   const width = 760;
   const height = 260;
   const pad = 28;
-  const values = usable.flatMap((bar) => [bar.close, bar.high, bar.low]).filter((v) => positiveNum(v) !== null);
+  const values = usable.flatMap((bar) => [bar.close, bar.high, bar.low]).filter((v) => v !== null);
   if (signal.support !== null) values.push(signal.support);
   if (signal.resistance !== null) values.push(signal.resistance);
   const min = Math.min(...values);
@@ -418,7 +175,7 @@ function chartSvg(bars, signal) {
   const path = usable.map((bar, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(bar.close).toFixed(1)}`).join(" ");
   const area = `${path} L${width - pad} ${height - pad} L${pad} ${height - pad} Z`;
 
-  const level = (value, cls, label) => positiveNum(value) === null ? "" : `
+  const level = (value, cls, label) => value === null ? "" : `
     <line class="${cls}" x1="${pad}" y1="${y(value).toFixed(1)}" x2="${width - pad}" y2="${y(value).toFixed(1)}"></line>
     <text class="kbk-chart-label" x="${width - pad - 6}" y="${(y(value) - 6).toFixed(1)}">${label} $${value.toFixed(4)}</text>
   `;
@@ -437,9 +194,8 @@ function chartSvg(bars, signal) {
 function detailHtml(quote, bars, loading = false) {
   const signal = analyzeSignal(quote, bars);
   const price = signal.price;
-  const krw = pricePairText(price);
-  const usd = price === null ? "-" : `USD ${usdText(price)}`;
-  const scoreText = signal.probability === null ? "계산중" : Math.round(signal.probability);
+  const krw = price === null ? "-" : `${fmt.format(Math.round(price * usdKrw))}원`;
+  const usd = price === null ? "-" : `$${price.toFixed(price >= 10 ? 2 : 4)}`;
   const badge = signal.tone === "danger" ? "위험" : signal.tone === "strong" ? "관심" : signal.tone === "wait" ? "대기" : "감시";
 
   return `
@@ -450,7 +206,7 @@ function detailHtml(quote, bars, loading = false) {
         <p>${esc(signal.reason)}</p>
       </div>
       <div class="kbk-detail-score">
-        <strong>${scoreText}</strong>
+        <strong>${Math.round(signal.probability)}</strong>
         <span>${badge}</span>
       </div>
       <button type="button" class="kbk-detail-close" aria-label="상세 닫기">×</button>
@@ -462,9 +218,6 @@ function detailHtml(quote, bars, loading = false) {
       <span>${pct(signal.change)}</span>
       <span>거래량 ${compact(signal.volume)}</span>
       <span>${esc(signal.vwap)}</span>
-      <span>Higher Lows: ${esc(signal.higherLowLabel)}</span>
-      <span>VWAP 유지: ${esc(vwapHoldText(signal.vwapHoldMinutes))}</span>
-      <span>재상승 준비도: ${Math.round(signal.reSurgeSetupScore)}점</span>
       ${loading ? `<span class="kbk-live-chip">실시간 갱신 중</span>` : ""}
     </div>
 
@@ -475,14 +228,9 @@ function detailHtml(quote, bars, loading = false) {
       </div>
       <div class="kbk-signal-grid">
         <div><span>현재 위치</span><strong>${esc(signal.position)}</strong><small>박스권 내 위치</small></div>
-        <div><span>Higher Lows</span><strong>${esc(signal.higherLowLabel)}</strong><small>${Math.round(signal.higherLowScore)}점</small></div>
-        <div><span>VWAP 유지</span><strong>${esc(vwapHoldText(signal.vwapHoldMinutes))}</strong><small>${Math.round(signal.vwapHoldScore)}점</small></div>
-        <div><span>재상승 준비도</span><strong>${Math.round(signal.reSurgeSetupScore)}점</strong><small>${esc(strengthLabel(signal.reSurgeSetupScore))}</small></div>
-        <div><span>박스 압축률</span><strong>${Math.round(signal.compressionScore)}점</strong><small>돌파 전 압축</small></div>
-        <div><span>VWAP 재탈환</span><strong>${esc(strengthLabel(signal.vwapReclaimScore))}</strong><small>${Math.round(signal.vwapReclaimScore)}점</small></div>
-        <div><span>진입 확인선</span><strong>${levelText(signal.entryLine, "계산중")}</strong><small>돌파/재지지 확인</small></div>
-        <div><span>손절 기준선</span><strong>${levelText(signal.stopLine, "데이터 부족")}</strong><small>지지 이탈 시 주의</small></div>
-        <div><span>1차 익절 참고</span><strong>${levelText(signal.profitLine, "계산중")}</strong><small>단기 +3% 기준</small></div>
+        <div><span>진입 확인선</span><strong>${signal.entryLine === null ? "-" : `$${signal.entryLine.toFixed(4)}`}</strong><small>돌파/재지지 확인</small></div>
+        <div><span>손절 기준선</span><strong>${signal.stopLine === null ? "-" : `$${signal.stopLine.toFixed(4)}`}</strong><small>지지 이탈 시 주의</small></div>
+        <div><span>1차 익절 참고</span><strong>${signal.profitLine === null ? "-" : `$${signal.profitLine.toFixed(4)}`}</strong><small>단기 +3% 기준</small></div>
       </div>
       ${chartSvg(bars, signal)}
     </section>
@@ -490,7 +238,7 @@ function detailHtml(quote, bars, loading = false) {
     <section class="kbk-explain-grid">
       <div><span>개별 설명</span><p>${esc(quote.symbol ?? selectedSymbol)}는 현재 ${esc(signal.trend)} 흐름, ${esc(signal.vwap)} 상태입니다. 점수만 보지 말고 거래량 유지, 고점 돌파 실패 여부, 눌림 후 재상승을 같이 보셔야 합니다.</p></div>
       <div><span>리스크 설명</span><p>추격 위험 ${Math.round(signal.risk)}점, 유사 패턴 ${Math.round(signal.pattern)}점입니다. 상승률이 큰 종목은 신호가 좋아도 신규 진입 리스크가 빠르게 커집니다.</p></div>
-      <div><span>확인 순서</span><p>1. VWAP 회복/유지 2. Higher Lows 유지 3. 직전 고점 돌파 4. 눌림 시 거래량 감소 5. 재상승 거래량 증가 순서로 확인하세요.</p></div>
+      <div><span>확인 순서</span><p>1. VWAP 회복/유지 2. 직전 고점 돌파 3. 눌림 시 거래량 감소 4. 재상승 거래량 증가 순서로 확인하세요.</p></div>
     </section>
   `;
 }
@@ -511,7 +259,7 @@ function ensureShell() {
     .kbk-detail-head h3 span{font-size:1rem;color:#64748b;font-weight:700}
     .kbk-detail-head p{margin:8px 0 0;color:#475569;line-height:1.55}
     .kbk-detail-score{text-align:center;background:#eff6ff;border-radius:18px;padding:14px}
-    .kbk-detail-score strong{display:block;font-size:clamp(1rem,4vw,2.5rem);line-height:1;overflow-wrap:anywhere}
+    .kbk-detail-score strong{display:block;font-size:2.5rem;line-height:1}
     .kbk-detail-score span{display:inline-flex;margin-top:8px;padding:6px 10px;border-radius:999px;color:#fff;background:#2563eb;font-weight:800;font-size:.78rem}
     .kbk-detail-close{width:34px;height:34px;border:0;border-radius:999px;background:#e2e8f0;color:#0f172a;font-size:24px;line-height:1;cursor:pointer}
     .kbk-detail-price{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin:18px 0;color:#334155}
@@ -561,57 +309,31 @@ async function fetchJson(url) {
 }
 
 async function refreshDetail(symbol, loading = false) {
-  const requestedSymbol = symbol?.toUpperCase?.() ?? symbol;
-  if (!requestedSymbol) return;
-  if (selectedDetailCalculating) {
-    selectedDetailRefreshQueued = true;
-    return;
-  }
-
-  selectedDetailCalculating = true;
   const shell = ensureShell();
   shell.hidden = false;
   if (loading && !lastQuote) {
-    shell.innerHTML = `<div class="kbk-detail-head"><div><p class="kbk-kicker">선택 종목 상세 감시</p><h3>${esc(requestedSymbol)}</h3><p>실시간 시세와 분봉 차트를 불러오는 중입니다.</p></div><button type="button" class="kbk-detail-close" aria-label="상세 닫기">×</button></div>`;
+    shell.innerHTML = `<div class="kbk-detail-head"><div><p class="kbk-kicker">선택 종목 상세 감시</p><h3>${esc(symbol)}</h3><p>실시간 시세와 분봉 차트를 불러오는 중입니다.</p></div><button type="button" class="kbk-detail-close" aria-label="상세 닫기">×</button></div>`;
   }
 
   try {
     const from = encodeURIComponent(new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString());
     const [quotePayload, historyPayload, exchangePayload] = await Promise.all([
-      fetchJson(`/api/quote?symbol=${encodeURIComponent(requestedSymbol)}`),
-      fetchJson(`/api/history?symbol=${encodeURIComponent(requestedSymbol)}&from=${from}`).catch(() => null),
+      fetchJson(`/api/quote?symbol=${encodeURIComponent(symbol)}`),
+      fetchJson(`/api/history?symbol=${encodeURIComponent(symbol)}&from=${from}`).catch(() => null),
       fetchJson(`/api/exchange`).catch(() => null),
     ]);
-    if (selectedSymbol !== requestedSymbol) return;
-    lastQuote = { ...(quotePayload.data ?? quotePayload) };
-    if (num(lastQuote.finalProbabilityScore) === null && num(lastQuote.scannerScore) === null && selectedFallbackScore !== null) {
-      lastQuote.scannerScore = selectedFallbackScore;
-    }
+    lastQuote = quotePayload.data ?? quotePayload;
     lastBars = historyPayload ? normalizeBars(historyPayload) : fallbackBars(lastQuote);
     usdKrw = num(exchangePayload?.rate) ?? num(exchangePayload?.usdKrw) ?? num(exchangePayload?.data?.rate) ?? usdKrw;
-    shell.innerHTML = detailHtml(lastQuote, lastBars, false);
+    shell.innerHTML = detailHtml(lastQuote, lastBars, loading);
   } catch (error) {
-    if (selectedSymbol !== requestedSymbol) return;
     shell.innerHTML = `
       <div class="kbk-detail-head">
-        <div><p class="kbk-kicker">선택 종목 상세 감시</p><h3>${esc(requestedSymbol)}</h3><p>${esc(error.message || "상세 데이터를 불러오지 못했습니다.")}</p></div>
+        <div><p class="kbk-kicker">선택 종목 상세 감시</p><h3>${esc(symbol)}</h3><p>${esc(error.message || "상세 데이터를 불러오지 못했습니다.")}</p></div>
         <button type="button" class="kbk-detail-close" aria-label="상세 닫기">×</button>
       </div>
     `;
-  } finally {
-    selectedDetailCalculating = false;
-    if (selectedDetailRefreshQueued && selectedSymbol === requestedSymbol) {
-      selectedDetailRefreshQueued = false;
-      window.setTimeout(() => refreshDetail(requestedSymbol, false), 0);
-    }
   }
-}
-
-function startSelectedSymbolMonitor() {
-  window.clearInterval(pollTimer);
-  pollTimer = window.setInterval(() => {
-    if (selectedSymbol) refreshDetail(selectedSymbol, false);
-  }, POLL_MS);
 }
 
 function selectSymbol(symbol, card) {
@@ -619,22 +341,17 @@ function selectSymbol(symbol, card) {
   selectedSymbol = symbol.toUpperCase();
   lastQuote = null;
   lastBars = [];
-  selectedFallbackScore = cardScore(card);
-  selectedDetailCalculating = false;
-  selectedDetailRefreshQueued = false;
   document.querySelectorAll(".stock-card.kbk-selected-card,.setup-card.kbk-selected-card").forEach((el) => el.classList.remove("kbk-selected-card"));
   card?.classList.add("kbk-selected-card");
   refreshDetail(selectedSymbol, true);
-  startSelectedSymbolMonitor();
+  window.clearInterval(pollTimer);
+  pollTimer = null;
 }
 
 function closeDetail() {
   selectedSymbol = null;
   window.clearInterval(pollTimer);
   pollTimer = null;
-  selectedDetailCalculating = false;
-  selectedDetailRefreshQueued = false;
-  selectedFallbackScore = null;
   document.querySelectorAll(".stock-card.kbk-selected-card,.setup-card.kbk-selected-card").forEach((el) => el.classList.remove("kbk-selected-card"));
   const shell = ensureShell();
   shell.hidden = true;
@@ -731,94 +448,8 @@ function relativeVolumeOf(item) {
   return num(item?.relativeVolume) ?? num(item?.volumeRatio) ?? 1;
 }
 
-function setupBiasOf(item, price, change, rvol, vwapGood, trendGood) {
-  const rsi = num(item?.rsi ?? item?.technical?.rsi);
-  const dayHigh = positiveNum(item?.dayHigh ?? item?.regularMarketDayHigh);
-  const dayLow = positiveNum(item?.dayLow ?? item?.regularMarketDayLow);
-  const highPullbackPct = price > 0 && dayHigh ? ((dayHigh - price) / dayHigh) * 100 : null;
-  const highPosition = price > 0 && dayHigh && dayLow && dayHigh > dayLow
-    ? ((price - dayLow) / (dayHigh - dayLow)) * 100
-    : null;
-  const volumeAcceleration = num(item?.volumeAccelerationScore) ?? 50;
-  const higherLow = num(item?.higherLowScore) ?? 50;
-  const vwapHold = num(item?.vwapHoldScore) ?? 50;
-  const resurge = num(item?.reSurgeSetupScore) ?? 50;
-  const reclaim = num(item?.vwapReclaimScore) ?? 50;
-  const compression = num(item?.compressionScore) ?? 50;
-  const underDollarLowRvol = price > 0 && price < 1 && rvol < 3;
-  const volumeStarting = rvol >= 3;
-  const notOverChased = change >= 1 && change <= 45;
-  const lowRecovery = highPosition !== null && highPosition >= 15 && highPosition <= 70;
-  const highFailed = highPullbackPct !== null && highPullbackPct >= 18 && change >= 25;
-  const overheated = change >= 80 || rsi >= 80;
-  const extremeRvolWeak = rvol >= 8 && highPullbackPct !== null && highPullbackPct >= 22 && (!vwapGood || !trendGood);
-  const strongEarlySignal = volumeStarting
-    && notOverChased
-    && (vwapGood || reclaim >= 60)
-    && (higherLow >= 60 || resurge >= 60 || compression >= 70);
-  const earlyBonus = clampScore(
-    (volumeStarting ? 8 : 0)
-      + (volumeAcceleration >= 65 ? 5 : 0)
-      + (notOverChased ? 8 : 0)
-      + (vwapGood || reclaim >= 60 ? 7 : 0)
-      + (higherLow >= 65 ? 5 : 0)
-      + (resurge >= 65 ? 5 : 0)
-      + (lowRecovery ? 4 : 0),
-    0,
-    28
-  );
-  const riskPenalty = clampScore(
-    (overheated ? 18 : 0)
-      + (change >= 120 ? 12 : 0)
-      + (highFailed ? 12 : 0)
-      + (extremeRvolWeak ? 14 : 0)
-      + (underDollarLowRvol ? 18 : 0),
-    0,
-    44
-  );
-  return {
-    rsi,
-    highPullbackPct,
-    highPosition,
-    volumeAcceleration,
-    higherLow,
-    vwapHold,
-    resurge,
-    reclaim,
-    underDollarLowRvol,
-    volumeStarting,
-    lowRecovery,
-    highFailed,
-    overheated,
-    extremeRvolWeak,
-    strongEarlySignal,
-    earlyBonus,
-    riskPenalty,
-  };
-}
-
 function trendOf(item) {
   return trendLabel(item);
-}
-
-function topPickVwapRetentionAdjustment(item, price, change, volume, setupBias) {
-  const vwap = String(vwapState(item));
-  const vwapAbove = vwap.includes("위") || vwap.toLowerCase().includes("above");
-  const vwapNear = vwap.includes("근처") || vwap.toLowerCase().includes("near");
-  const vwapBelow = vwap.includes("아래") || vwap.toLowerCase().includes("below");
-  const higherLow = num(item?.higherLowScore) ?? setupBias?.higherLow ?? 50;
-  const vwapHold = num(item?.vwapHoldScore) ?? setupBias?.vwapHold ?? 50;
-  const reclaim = num(item?.vwapReclaimScore) ?? setupBias?.reclaim ?? 50;
-  const volumeAcceleration = num(item?.volumeAccelerationScore) ?? setupBias?.volumeAcceleration ?? 50;
-  const heavyVolumeWeakness = vwapBelow && change < 0 && (volumeAcceleration >= 65 || volume >= 1_000_000 || (setupBias?.rvol ?? 0) >= 3);
-  const suspiciousBreakdown = vwapBelow && (reclaim >= 60 || vwapHold >= 58);
-  if (vwapAbove && higherLow >= 65) return 10;
-  if (!vwapAbove && (vwapNear || reclaim >= 60)) return 7;
-  if (vwapAbove) return 5;
-  if (heavyVolumeWeakness) return -15;
-  if (suspiciousBreakdown) return -10;
-  if (vwapBelow) return -8;
-  return 0;
 }
 
 function scoreTopPick(item) {
@@ -836,11 +467,9 @@ function scoreTopPick(item) {
 
   const vwapGood = vwap.includes("위") || vwap.includes("near") || vwap.includes("근처");
   const trendGood = trend === "상승";
-  const setupBias = setupBiasOf(item, price, change, rvol, vwapGood, trendGood);
-  const vwapRetentionAdjustment = topPickVwapRetentionAdjustment(item, price, change, volume, setupBias);
-  const volumeGood = volume >= 1_000_000 || rvol >= 3;
+  const volumeGood = volume >= 1_000_000 || rvol >= 1.5;
   const lowPriceBonus = price > 0 && price <= 8 ? 6 : 0;
-  const sweetChange = change >= 4 && change <= 35 ? 20 : change > 35 && change <= 60 ? 6 : change > 60 ? -18 : change >= 1 ? 10 : 0;
+  const sweetChange = change >= 8 && change <= 45 ? 20 : change > 45 && change <= 80 ? 10 : change > 80 ? -12 : change >= 3 ? 12 : 0;
 
   const scalpScore = clampScore(
     35
@@ -850,18 +479,14 @@ function scoreTopPick(item) {
       + sweetChange
       + (scanner >= 70 ? 10 : scanner >= 55 ? 5 : 0)
       + lowPriceBonus
-      + setupBias.earlyBonus * 0.55
-      - setupBias.riskPenalty * 0.65
   );
 
   const surgeScore = clampScore(
     scanner * 0.45
-      + clampScore(change <= 45 ? Math.max(change, 0) : 85 - (change - 45) * 1.4, 0, 70) * 0.25
+      + clampScore(Math.max(change, 0), 0, 100) * 0.25
       + (sourceTags.some((tag) => String(tag).includes("news") || String(tag).includes("sec-8k")) ? 14 : 0)
       + (storyTags.length ? Math.min(storyTags.length * 5, 12) : 0)
       + (volume >= 10_000_000 ? 10 : volume >= 2_000_000 ? 6 : 0)
-      + setupBias.earlyBonus * 0.35
-      - setupBias.riskPenalty * 0.45
   );
 
   const setupScore = clampScore(
@@ -872,8 +497,6 @@ function scoreTopPick(item) {
       + (pattern >= 65 ? 10 : pattern >= 55 ? 5 : 0)
       + (volumeGood ? 10 : -5)
       - (risk >= 75 ? 12 : risk >= 60 ? 6 : 0)
-      + setupBias.earlyBonus * 0.65
-      - setupBias.riskPenalty * 0.75
   );
 
   const chaseRisk = clampScore(
@@ -881,26 +504,16 @@ function scoreTopPick(item) {
       + (change >= 100 ? 30 : change >= 70 ? 20 : change >= 45 ? 12 : 0)
       + (!vwapGood ? 15 : 0)
       + (trendGood ? 0 : 10)
-      + setupBias.riskPenalty * 0.8
   );
   const safetyScore = clampScore(100 - chaseRisk);
-  const baseFinalScore = Math.round(clampScore(scalpScore * 0.38 + surgeScore * 0.27 + setupScore * 0.25 + safetyScore * 0.10 + setupBias.earlyBonus * 0.2 - setupBias.riskPenalty * 0.25));
-  const finalScore = Math.round(clampScore(baseFinalScore + vwapRetentionAdjustment));
+  const finalScore = Math.round(clampScore(scalpScore * 0.38 + surgeScore * 0.27 + setupScore * 0.25 + safetyScore * 0.10));
 
   let verdict = "관찰 후보";
   if (finalScore >= 78 && chaseRisk < 62) verdict = "최우선 단타 후보";
   else if (finalScore >= 68 && chaseRisk < 75) verdict = "상위 감시 후보";
   else if (chaseRisk >= 80) verdict = "과열 주의 후보";
 
-  if (setupBias.overheated || setupBias.highFailed || setupBias.extremeRvolWeak || chaseRisk >= 82) verdict = "진입 금지";
-  else if (finalScore >= 76 && setupBias.strongEarlySignal && chaseRisk < 68) verdict = "매수 가능";
-  else verdict = "관찰";
-
   const reasons = [];
-  if (setupBias.strongEarlySignal) reasons.push("초입 회복 신호");
-  if (setupBias.underDollarLowRvol) reasons.push("RVOL 3배 미만 강등");
-  if (setupBias.highFailed) reasons.push("고점 이탈 위험");
-  if (setupBias.overheated) reasons.push("과열 구간");
   if (vwapGood) reasons.push("VWAP 위/근처");
   if (trendGood) reasons.push("1분 추세 상승");
   if (volumeGood) reasons.push("거래량 확인");
@@ -922,189 +535,13 @@ function scoreTopPick(item) {
     surgeScore: Math.round(surgeScore),
     setupScore: Math.round(setupScore),
     chaseRisk: Math.round(chaseRisk),
-    baseFinalScore,
     finalScore,
-    vwapRetentionAdjustment,
     verdict,
-    setupBias,
     reasons: reasons.length ? reasons : ["가격/거래량 구조 감시"],
   };
 }
 
-function evaluateTopPickNewsSignal(item) {
-  const sourceTags = Array.isArray(item?.sourceTags) ? item.sourceTags.map((tag) => String(tag)) : [];
-  const storyTags = Array.isArray(item?.storyTags) ? item.storyTags.map((tag) => String(tag)) : [];
-  const selectionReasons = Array.isArray(item?.selectionReasons) ? item.selectionReasons.map((reason) => String(reason)) : [];
-  const storySignalText = String(item?.storySignalText ?? "");
-
-  const normalizedSourceTags = sourceTags.map((tag) => tag.toLowerCase());
-  const normalizedStoryTags = storyTags.map((tag) => tag.toLowerCase());
-  const normalizedReasons = selectionReasons.map((reason) => reason.toLowerCase());
-  const joined = [storySignalText.toLowerCase(), ...normalizedReasons, ...normalizedSourceTags, ...normalizedStoryTags].join(" ");
-
-  const riskKeywords = [
-    { keyword: "offering", reason: "??? ???", penalty: 16 },
-    { keyword: "warrant", reason: "??? ?? ???", penalty: 14 },
-    { keyword: "dilution", reason: "?? ???", penalty: 16 },
-    { keyword: "reverse split", reason: "??? ??? ???", penalty: 18 },
-    { keyword: "delisting", reason: "???? ??", penalty: 22 },
-    { keyword: "deficiency", reason: "?? ?? ?? ?? ???", penalty: 16 },
-    { keyword: "compliance notice", reason: "?????? ?? ??", penalty: 14 },
-    { keyword: "bankruptcy", reason: "?? ?? ??", penalty: 25 },
-    { keyword: "going concern", reason: "???? ??", penalty: 20 },
-    { keyword: "lawsuit", reason: "?? ???", penalty: 12 },
-    { keyword: "investigation", reason: "?? ???", penalty: 12 },
-  ];
-
-  let positive = 0;
-  let negative = 0;
-  const newsReasons = [];
-
-  if (normalizedSourceTags.includes("news-story-signal")) {
-    positive += 6;
-    newsReasons.push("??? ?? ?? ??");
-  }
-  if (normalizedSourceTags.includes("benchmark-catalyst-seed")) {
-    positive += 4;
-    newsReasons.push("?? ?? ?? ??");
-  }
-  if (normalizedSourceTags.includes("structural-event-monitor")) {
-    positive += 3;
-    newsReasons.push("?? ??? ??? ?? ??");
-  }
-
-  const hasStoryTags = storyTags.length > 0;
-  if (hasStoryTags) {
-    positive += Math.min(5, 2 + storyTags.length);
-    newsReasons.push(`storyTags ${storyTags.length}?`);
-  }
-
-  const matchedRisks = [];
-  for (const rule of riskKeywords) {
-    if (!joined.includes(rule.keyword)) continue;
-    negative += rule.penalty;
-    matchedRisks.push(rule.reason);
-  }
-
-  const hasSevereRisk = negative >= 18;
-  if (normalizedSourceTags.includes("sec-8k-signal") && !hasSevereRisk) {
-    positive += 3;
-    newsReasons.push("8-K ?? ??? ??");
-  }
-
-  if (selectionReasons.some((reason) => reason.toLowerCase().includes("news"))) {
-    positive += 2;
-    newsReasons.push("?? ??? ?? ?? ??");
-  }
-
-  negative = Math.min(negative, 25);
-  positive = Math.min(positive, 8);
-
-  const newsScore = positive - negative;
-  let newsLabel = "??";
-  if (negative >= 10) newsLabel = "?? ??";
-  else if (normalizedSourceTags.includes("sec-8k-signal")) newsLabel = "?? ???";
-  else if (positive >= 5) newsLabel = "??? ??";
-
-  if (matchedRisks.length) newsReasons.push(...matchedRisks.slice(0, 3));
-  if (!newsReasons.length) newsReasons.push("?? ?? ?? ?? ?? ?? ?? ??");
-
-  return {
-    newsScore,
-    newsLabel,
-    newsReasons: [...new Set(newsReasons)].slice(0, 4),
-    newsPositiveScore: positive,
-    newsNegativeScore: negative,
-    hasSevereRisk,
-    hasRiskKeyword: matchedRisks.length > 0,
-  };
-}
-
-function enrichTopPickDecision(pick) {
-  const item = pick?.item ?? {};
-  const preMarketChange = num(item?.preMarketChangePercent) ?? pick?.change ?? 0;
-  const vwap = String(pick?.vwap ?? "");
-  const vwapBelow = vwap.includes("??") || vwap.toLowerCase().includes("below");
-  const negativeSession = preMarketChange < 0 || (pick?.change ?? 0) < 0;
-  const severeDrop = preMarketChange <= -8 || (pick?.change ?? 0) <= -8;
-  const riskScore = num(item?.riskScore) ?? pick?.chaseRisk ?? 50;
-  const accumulationScore = num(item?.scannerScore) ?? num(item?.finalProbabilityScore) ?? 50;
-  const patternScore = num(item?.patternSimilarityScore) ?? 50;
-  const elevatedRisk = riskScore >= 72 || (pick?.chaseRisk ?? 0) >= 72;
-  const overheated = (pick?.change ?? 0) >= 45;
-  const veryOverheated = (pick?.change ?? 0) >= 70;
-  const volumeGood = (pick?.volume ?? 0) >= 1000000 || (pick?.rvol ?? 0) >= 1.5;
-  const priceWeak = (pick?.change ?? 0) < 0 || pick?.trend !== "??";
-  const volumeButWeak = volumeGood && priceWeak;
-  const newsSignal = evaluateTopPickNewsSignal(item);
-
-  let finalScore = num(pick?.finalScore) ?? 0;
-  if (negativeSession && vwapBelow) finalScore -= severeDrop ? 22 : 14;
-  if (elevatedRisk && (pick?.change ?? 0) >= 12) finalScore -= 10;
-  if (volumeButWeak) finalScore -= 8;
-  if (overheated) finalScore -= veryOverheated ? 12 : 6;
-  finalScore += newsSignal.newsScore;
-  finalScore = Math.round(clampScore(finalScore));
-
-  let verdict = "??";
-  if (finalScore >= 78 && !negativeSession && !vwapBelow && !elevatedRisk && !newsSignal.hasRiskKeyword && (pick?.chaseRisk ?? 0) < 62) verdict = "?? ??";
-  if (severeDrop && vwapBelow) verdict = "?? ??";
-  else if ((negativeSession && vwapBelow) || elevatedRisk || volumeButWeak || veryOverheated) verdict = "??";
-  else if (finalScore <= 44 || ((pick?.chaseRisk ?? 0) >= 82 && vwapBelow)) verdict = "?? ??";
-  if (newsSignal.newsNegativeScore >= 10 && verdict === "?? ??") verdict = "??";
-  if (newsSignal.newsNegativeScore >= 18 && (vwapBelow || priceWeak || elevatedRisk)) verdict = "?? ??";
-
-  const reasons = Array.isArray(pick?.reasons) ? [...pick.reasons] : [];
-  const detailReasons = [];
-  const cautions = [];
-
-  if (volumeGood) {
-    if (!reasons.includes("??? ??")) reasons.unshift("??? ??");
-    detailReasons.push("??? ??: ?? ??? " + compact(pick?.volume ?? 0) + " / RVOL " + ((pick?.rvol ?? 0) ? pick.rvol.toFixed(1) : "-"));
-  }
-  if ((pick?.rvol ?? 0) >= 1.5) detailReasons.push("????? RVOL: " + pick.rvol.toFixed(1));
-  detailReasons.push("?? ?? ??: " + Math.round(num(pick?.surgeScore) ?? 0) + "?");
-  detailReasons.push("?? ??: " + Math.round(accumulationScore) + "?");
-  detailReasons.push("?? ??: " + Math.round(patternScore) + "?");
-  detailReasons.push("VWAP ??: " + (vwap || "-"));
-  detailReasons.push("???/???: " + pct(pick?.change ?? 0) + " / " + compact(pick?.volume ?? 0));
-
-  if (newsSignal.newsLabel === "??? ??" || newsSignal.newsLabel === "?? ???") {
-    if (!reasons.includes(newsSignal.newsLabel)) reasons.push(newsSignal.newsLabel);
-  }
-
-  if (preMarketChange < 0) cautions.push("???? ??: " + pct(preMarketChange));
-  if (vwapBelow) cautions.push("VWAP ??");
-  if (elevatedRisk) cautions.push("?? ?? ??: " + Math.round(Math.max(riskScore, pick?.chaseRisk ?? 0)) + "?");
-  if (overheated) cautions.push("?? ???: " + pct(pick?.change ?? 0));
-  if (volumeButWeak) cautions.push("???? ??? ?? ??");
-  if ((pick?.chaseRisk ?? 0) >= 80 || riskScore >= 80) cautions.push("??? ??");
-  if (overheated) cautions.push("???? ??");
-  if (newsSignal.newsLabel === "?? ??") cautions.push("??/?? ?? ??");
-
-  return {
-    ...pick,
-    preMarketChange,
-    finalScore,
-    verdict,
-    reasons: reasons.length ? reasons : ["??/??? ?? ??"],
-    detailReasons: detailReasons.length ? detailReasons : ["?? ??? ?? ?? ????."],
-    cautions: cautions.length ? cautions : ["??? ?? ??? ?? ?? ????."],
-    accumulationScore: Math.round(accumulationScore),
-    patternScore: Math.round(patternScore),
-    riskScore: Math.round(riskScore),
-    baseFinalScore: num(pick?.finalScore) ?? 0,
-    newsScore: newsSignal.newsScore,
-    newsLabel: newsSignal.newsLabel,
-    newsReasons: newsSignal.newsReasons,
-    newsPositiveScore: newsSignal.newsPositiveScore,
-    newsNegativeScore: newsSignal.newsNegativeScore,
-  };
-}
-
 function ensureTopPickStyles() {
-
-
   if (document.getElementById("kbk-top-picks-style")) return;
   const style = document.createElement("style");
   style.id = "kbk-top-picks-style";
@@ -1129,20 +566,9 @@ function ensureTopPickStyles() {
     .kbk-top-metrics b{display:block;color:#0f172a;margin-top:5px}
     .kbk-top-reasons{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
     .kbk-top-reasons span{background:#cffafe;color:#155e75;border-radius:999px;padding:7px 10px;font-size:.78rem;font-weight:700}
-    .kbk-top-card.is-open{border-color:rgba(37,99,235,.38);box-shadow:0 22px 48px rgba(37,99,235,.16)}
-    .kbk-top-toggle{margin-top:14px;color:#2563eb;font-size:.85rem;font-weight:700}
-    .kbk-top-detail{margin-top:18px;padding-top:18px;border-top:1px solid rgba(15,23,42,.1)}
-    .kbk-top-detail-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
-    .kbk-top-detail-section{background:#f8fafc;border-radius:16px;padding:14px 16px}
-    .kbk-top-detail-section h4{margin:0 0 10px;color:#0f172a;font-size:.96rem}
-    .kbk-top-detail-section ul{margin:0;padding-left:18px;color:#334155;line-height:1.55}
-    .kbk-top-judgement{display:inline-flex;align-items:center;border-radius:999px;padding:8px 12px;font-weight:800}
-    .kbk-top-judgement.buy{background:#dcfce7;color:#166534}
-    .kbk-top-judgement.watch{background:#fef3c7;color:#92400e}
-    .kbk-top-judgement.block{background:#fee2e2;color:#991b1b}
     .kbk-top-note{background:#fff7ed;border:1px solid rgba(249,115,22,.22);border-radius:20px;color:#7c2d12;padding:16px 18px;line-height:1.65}
     .kbk-top-loading,.kbk-top-empty{background:#fff;border:1px solid rgba(15,23,42,.12);border-radius:20px;padding:22px;color:#334155}
-    @media (max-width:1100px){.kbk-top-grid{grid-template-columns:1fr}.kbk-top-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.kbk-top-detail-grid{grid-template-columns:1fr}}
+    @media (max-width:1100px){.kbk-top-grid{grid-template-columns:1fr}.kbk-top-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
     @media (max-width:700px){.kbk-top-head{display:grid}.kbk-top-score{text-align:left}.kbk-top-metrics{grid-template-columns:1fr}}
   `;
   document.head.appendChild(style);
@@ -1164,14 +590,13 @@ function topPickPanel() {
 function setTopPickMode(enabled) {
   const panel = topPickPanel();
   if (!panel) return;
-  window.__kbkActiveCategoryKey = enabled ? "top-picks" : window.location.pathname || "default";
   document.querySelectorAll(".page-stack > .page-panel").forEach((section) => {
     section.style.display = enabled ? "none" : "";
   });
   panel.hidden = !enabled;
   document.querySelectorAll(".menu-link").forEach((link) => link.classList.remove("active"));
   document.getElementById("kbk-top-picks-menu")?.classList.toggle("active", enabled);
-  if (enabled && !panel.dataset.loaded && !topPicksLoadPromise) loadTopPicks();
+  if (enabled && !panel.dataset.loaded) loadTopPicks();
 }
 
 function renderTopPickLoading() {
@@ -1191,156 +616,59 @@ function renderTopPickLoading() {
 function renderTopPicks(picks, updatedAt) {
   const panel = topPickPanel();
   if (!panel) return;
-  const enrichedPicks = picks.map(enrichTopPickDecision);
-  try {
-    if (typeof window.__kbkPersistRecommendationSnapshots === "function") {
-      window.__kbkPersistRecommendationSnapshots(enrichedPicks.map((pick) => ({
-        category: "통합 최종 후보",
-        symbol: pick.symbol,
-        name: pick.name,
-        price: pick.price,
-        score: pick.finalScore,
-        statusLabel: pick.verdict,
-        rvol: pick.rvol,
-        vwapStatus: pick.vwap,
-        changePercent: pick.change,
-        volume: pick.volume,
-        reasons: pick.detailReasons,
-        warnings: pick.cautions,
-      })), { category: "통합 최종 후보" });
-    }
-  } catch {}
-  const top = enrichedPicks[0];
+  const top = picks[0];
   panel.dataset.loaded = "true";
   panel.innerHTML = `
     <section class="kbk-top-hero">
       <p>Integrated Top Picks</p>
-      <h2>?? ?? ??</h2>
-      <p>??? ?? ??, ?? ??, ?? ??? ? ?? ?? ?? ??? ???? ??? ? ????? ?????.</p>
-      <button type="button" class="kbk-page-refresh kbk-top-refresh" data-kbk-page-refresh>????</button>
+      <h2>통합 최종 후보</h2>
+      <p>실시간 단타 시그널은 지금 진입 조건, 폭등 감시는 강한 움직임, 매집 스캐너는 신규 진입 리스크를 봅니다. 이 메뉴는 세 기준을 합쳐 최종 점수가 높은 종목만 보여줍니다.</p>
+      <button type="button" class="kbk-page-refresh kbk-top-refresh" data-kbk-page-refresh>새로고침</button>
     </section>
     <section class="kbk-top-note">
-      ${top ? `?? 1??? ${esc(top.symbol)} ???. ?? ?? ??? ?? ????? ???, ?? ??? ?? ??, ?? ??? ?? ???? ???.` : `?? ?? ??? ??? ???? ?? ??? ????.`}
-      <br>??? ??: ${updatedAt ? new Date(updatedAt).toLocaleTimeString("ko-KR") : new Date().toLocaleTimeString("ko-KR")}
+      ${top ? `현재 1순위는 ${esc(top.symbol)}입니다. 단, 통합 점수도 매수 확정이 아니라 눌림, VWAP, 체결 강도 재확인을 위한 우선순위입니다.` : "현재 세 조건을 동시에 만족하는 강한 후보가 없습니다."}
+      <br>마지막 계산: ${updatedAt ? new Date(updatedAt).toLocaleTimeString("ko-KR") : new Date().toLocaleTimeString("ko-KR")}
     </section>
-    ${enrichedPicks.length ? `<section class="kbk-top-grid">
-      ${enrichedPicks.map((pick, index) => {
-        const verdictTone = pick.verdict === "?? ??" ? "buy" : pick.verdict === "??" ? "watch" : "block";
-        return `
-        <article class="kbk-top-card" data-top-pick-card="${esc(pick.symbol)}" tabindex="0" role="button" aria-expanded="false">
+    ${picks.length ? `<section class="kbk-top-grid">
+      ${picks.map((pick, index) => `
+        <article class="kbk-top-card">
           <div class="kbk-top-head">
             <div>
               <h3>${esc(pick.symbol)}</h3>
               <p>${esc(pick.name)}</p>
             </div>
-            <div class="kbk-top-score">${pick.finalScore}<span>${index === 0 ? "1?" : esc(pick.verdict)}</span></div>
+            <div class="kbk-top-score">${pick.finalScore}<span>${index === 0 ? "1순위" : esc(pick.verdict)}</span></div>
           </div>
           <div class="kbk-top-row">
-            <strong>${pricePairText(pick.price)}</strong>
+            <strong>${priceUsdText(pick.price)}</strong>
             <span>${pct(pick.change)}</span>
-            <span>??? ${compact(pick.volume)}</span>
+            <span>거래량 ${compact(pick.volume)}</span>
             <span>RVOL ${pick.rvol ? pick.rvol.toFixed(1) : "-"}</span>
             <span>${esc(pick.vwap)}</span>
           </div>
           <div class="kbk-top-metrics">
-            <div><span>?? ??</span><b>${pick.scalpScore}?</b></div>
-            <div><span>?? ??</span><b>${pick.surgeScore}?</b></div>
-            <div><span>?? ??</span><b>${pick.setupScore}?</b></div>
-            <div><span>?? ??</span><b>${pick.chaseRisk}?</b></div>
+            <div><span>단타 적합</span><b>${pick.scalpScore}점</b></div>
+            <div><span>폭등 감시</span><b>${pick.surgeScore}점</b></div>
+            <div><span>진입 구조</span><b>${pick.setupScore}점</b></div>
+            <div><span>추격 위험</span><b>${pick.chaseRisk}점</b></div>
           </div>
           <div class="kbk-top-reasons">${pick.reasons.map((reason) => `<span>${esc(reason)}</span>`).join("")}</div>
-          <div class="kbk-top-toggle">??? ???? ?? ??? ?? ??, ?? ??? ? ? ????.</div>
-          <div class="kbk-top-detail" hidden>
-            <div class="kbk-top-detail-grid">
-              <section class="kbk-top-detail-section">
-                <h4>?? ??</h4>
-                <ul>${pick.detailReasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}</ul>
-              </section>
-              <section class="kbk-top-detail-section">
-                <h4>?? ??</h4>
-                <ul>${pick.cautions.map((reason) => `<li>${esc(reason)}</li>`).join("")}</ul>
-              </section>
-              <section class="kbk-top-detail-section">
-                <h4>??/?? ??</h4>
-                <div class="kbk-top-judgement ${pick.newsLabel === "?? ??" ? "block" : pick.newsLabel === "??" ? "watch" : "buy"}">${esc(pick.newsLabel)} ? ${pick.newsScore > 0 ? "+" : ""}${pick.newsScore}</div>
-                <ul>${pick.newsReasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}</ul>
-              </section>
-              <section class="kbk-top-detail-section">
-                <h4>?? ??</h4>
-                <div class="kbk-top-judgement ${verdictTone}">${esc(pick.verdict)}</div>
-                <ul>
-                  <li>?? ??: ${pick.finalScore}?</li>
-                  <li>?? ? ??: ${pick.baseFinalScore}?</li>
-                  <li>??/?? ?? ??: ${pick.newsScore > 0 ? "+" : ""}${pick.newsScore}?</li>
-                </ul>
-              </section>
-            </div>
-          </div>
-        </article>`;
-      }).join("")}
-    </section>` : `<section class="kbk-top-empty">?? ?? ??? ??? ??? ????. ?? ?? ????.</section>`}
+        </article>
+      `).join("")}
+    </section>` : `<section class="kbk-top-empty">현재 통합 조건을 통과한 종목이 없습니다. 자동 갱신 중입니다.</section>`}
   `;
-  bindTopPickCardDetails(panel);
-}
-
-function bindTopPickCardDetails(panel) {
-
-  panel.querySelectorAll('[data-top-pick-card]').forEach((card) => {
-    const toggle = () => {
-      const detail = card.querySelector('.kbk-top-detail');
-      if (!detail) return;
-      const nextOpen = detail.hidden;
-      panel.querySelectorAll('[data-top-pick-card]').forEach((other) => {
-        other.classList.remove('is-open');
-        other.setAttribute('aria-expanded', 'false');
-        const otherDetail = other.querySelector('.kbk-top-detail');
-        if (otherDetail) otherDetail.hidden = true;
-      });
-      detail.hidden = !nextOpen;
-      card.classList.toggle('is-open', nextOpen);
-      card.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
-    };
-    card.addEventListener('click', toggle);
-    card.addEventListener('keydown', (event) => {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      event.preventDefault();
-      toggle();
-    });
-  });
 }
 
 function priceUsdText(value) {
-
-  return usdText(value);
-}
-
-let topPicksLoadPromise = null;
-let topPicksRenderToken = 0;
-let topPicksLastStartedAt = 0;
-
-function isTopPicksActive() {
-  return window.location.pathname === "/top-picks" || window.location.hash === "#top-picks";
+  const n = num(value);
+  if (n === null) return "-";
+  return `$${n.toFixed(n >= 10 ? 2 : 4)}`;
 }
 
 async function loadTopPicks() {
-  if (typeof window.__kbkRenderTopPicksOnly === "function") {
-    return null;
-  }
-  const panel = topPickPanel();
-  if (!panel) return null;
-  const startedAt = Date.now();
-  if (topPicksLoadPromise && startedAt - topPicksLastStartedAt < 1200) {
-    return topPicksLoadPromise;
-  }
-  topPicksLastStartedAt = startedAt;
-  const renderToken = ++topPicksRenderToken;
   renderTopPickLoading();
-  topPicksLoadPromise = (async () => {
-    const [payload, exchangePayload] = await Promise.all([
-      fetchJson("/api/scanner"),
-      fetchJson("/api/exchange").catch(() => null),
-    ]);
-    usdKrw = num(exchangePayload?.rate) ?? num(exchangePayload?.usdKrw) ?? num(exchangePayload?.data?.rate) ?? usdKrw;
+  try {
+    const payload = await fetchJson("/api/scanner");
     const items = payload?.data?.items ?? payload?.items ?? [];
     const scored = items
       .filter((item) => item?.symbol && item.included !== false)
@@ -1348,11 +676,10 @@ async function loadTopPicks() {
       .filter((pick) => pick.change >= 3)
       .filter((pick) => pick.vwap.includes("위") || pick.vwap.includes("근처"))
       .filter((pick) => pick.trend === "상승")
-      .filter((pick) => pick.volume >= 500_000 || pick.rvol >= 3)
-      .filter((pick) => !pick.setupBias?.underDollarLowRvol || pick.setupBias?.strongEarlySignal)
+      .filter((pick) => pick.volume >= 500_000 || pick.rvol >= 1.5)
       .filter((pick) => pick.chaseRisk < 85)
-      .filter((pick) => pick.baseFinalScore >= 62 || pick.scalpScore >= 72 || pick.surgeScore >= 72)
-      .sort((a, b) => (b.setupBias?.strongEarlySignal ? 1 : 0) - (a.setupBias?.strongEarlySignal ? 1 : 0) || b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk)
+      .filter((pick) => pick.finalScore >= 62 || pick.scalpScore >= 72 || pick.surgeScore >= 72)
+      .sort((a, b) => b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk)
       .slice(0, 20);
     if (scored.length < 20) {
       const seen = new Set(scored.map((pick) => pick.symbol));
@@ -1361,25 +688,17 @@ async function loadTopPicks() {
         .map(scoreTopPick)
         .filter((pick) => pick.change >= 3)
         .filter((pick) => !seen.has(pick.symbol))
-        .filter((pick) => pick.volume >= 300_000 || pick.rvol >= 3 || pick.setupBias?.strongEarlySignal)
-        .filter((pick) => !pick.setupBias?.underDollarLowRvol || pick.setupBias?.strongEarlySignal)
+        .filter((pick) => pick.volume >= 300_000 || pick.rvol >= 1.2 || pick.surgeScore >= 58)
         .filter((pick) => pick.chaseRisk < 92)
-        .sort((a, b) => (b.setupBias?.strongEarlySignal ? 1 : 0) - (a.setupBias?.strongEarlySignal ? 1 : 0) || b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk);
+        .sort((a, b) => b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk);
       scored.push(...supplemental.slice(0, 20 - scored.length));
-      scored.sort((a, b) => (b.setupBias?.strongEarlySignal ? 1 : 0) - (a.setupBias?.strongEarlySignal ? 1 : 0) || b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk);
+      scored.sort((a, b) => b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk);
     }
-    if (!isTopPicksActive() || renderToken !== topPicksRenderToken) return;
     renderTopPicks(scored.slice(0, 20), payload?.data?.updatedAt ?? payload?.updatedAt);
-  })().catch((error) => {
-    if (!isTopPicksActive() || renderToken !== topPicksRenderToken) return;
-    const activePanel = topPickPanel();
-    if (activePanel) activePanel.innerHTML = `<section class="kbk-top-empty">통합 후보 계산 실패: ${esc(error.message)}</section>`;
-  }).finally(() => {
-    if (renderToken === topPicksRenderToken) {
-      topPicksLoadPromise = null;
-    }
-  });
-  return topPicksLoadPromise;
+  } catch (error) {
+    const panel = topPickPanel();
+    if (panel) panel.innerHTML = `<section class="kbk-top-empty">통합 후보 계산 실패: ${esc(error.message)}</section>`;
+  }
 }
 
 function syncTopPicksMenu() {
@@ -1391,23 +710,11 @@ function syncTopPicksMenu() {
     button.className = "menu-link menu-button";
     button.textContent = "통합 최종 후보";
     button.addEventListener("click", () => {
-      if (isTopPicksActive() && topPicksLoadPromise) return;
       window.location.hash = "top-picks";
-      if (typeof window.__kbkRenderTopPicksOnly === "function") {
-        window.__kbkRenderTopPicksOnly();
-        return;
-      }
       setTopPickMode(true);
+      loadTopPicks();
     });
     menu.appendChild(button);
-  }
-  if (typeof window.__kbkRenderTopPicksOnly === "function" && isTopPicksActive()) {
-    const panel = document.getElementById("kbk-top-picks-panel");
-    if (panel) {
-      panel.hidden = true;
-      panel.style.display = "none";
-    }
-    return;
   }
   setTopPickMode(window.location.hash === "#top-picks");
 }
@@ -1448,7 +755,8 @@ function visibleSurgeCards() {
 }
 
 function krwTextFromUsd(price) {
-  return pricePairText(price);
+  const n = num(price);
+  return n === null ? "-" : `${fmt.format(Math.round(n * usdKrw))}원`;
 }
 
 function updateSurgeCardQuote(card, quote, livePrice = null) {
@@ -1458,12 +766,10 @@ function updateSurgeCardQuote(card, quote, livePrice = null) {
   const previousClose = num(quote?.previousClose);
   const change = price !== null && previousClose ? ((price - previousClose) / previousClose) * 100 : changePct(quote);
   const volume = num(quote?.volume) ?? num(quote?.preMarketVolume);
+  const rvol = relativeVolumeOf(quote);
   const vwap = vwapState(quote);
   const strong = priceRow.querySelector("strong");
   const spans = Array.from(priceRow.querySelectorAll("span"));
-  const existingRvol = num((spans[1]?.textContent || "").match(/([0-9.]+)\s*배/)?.[1]);
-  const quoteRvol = num(quote?.relativeVolume) ?? num(quote?.volumeRatio);
-  const rvol = quoteRvol !== null && quoteRvol > 0 ? quoteRvol : existingRvol;
 
   if (strong) strong.textContent = krwTextFromUsd(price);
   if (spans[0]) spans[0].textContent = pct(change);
@@ -1505,7 +811,6 @@ async function refreshSurgeLiveQuotes() {
       const data = quoteMap.get(symbol);
       if (data?.quote) updateSurgeCardQuote(card, data.quote, data.livePrice);
     }
-    if (selectedSymbol && quoteMap.has(selectedSymbol)) refreshDetail(selectedSymbol, false);
   } finally {
     surgeLiveQuoteBusy = false;
   }
@@ -1629,54 +934,6 @@ function isAccumulationPage() {
   return window.location.pathname.includes("/scanner/accumulation") || window.location.pathname.includes("/accumulation");
 }
 
-function recommendationCategoryForStockGrid() {
-  const pathname = window.location.pathname || "";
-  if (pathname.includes("/scanner/surge-watch-under-1") || pathname.includes("/surge-watch-under-1")) return "1달러 미만 폭등 후보";
-  if (pathname.includes("/scanner/surge-watch-over-1") || pathname.includes("/surge-watch-over-1")) return "1달러 이상 폭등 후보";
-  if (pathname.includes("/scanner/accumulation") || pathname.includes("/accumulation")) return "매집 스캐너";
-  return null;
-}
-
-function stockGridSnapshotItems() {
-  try {
-    const raw = localStorage.getItem("kbk:scanner:lastResponse");
-    const parsed = raw ? JSON.parse(raw) : null;
-    const items = parsed?.data?.items ?? parsed?.items ?? [];
-    return new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
-  } catch {
-    return new Map();
-  }
-}
-
-function captureStockGridRecommendationSnapshots() {
-  try {
-    const category = recommendationCategoryForStockGrid();
-    if (!category || typeof window.__kbkPersistRecommendationSnapshots !== "function") return;
-    const itemMap = stockGridSnapshotItems();
-    if (!itemMap.size) return;
-    const entries = Array.from(document.querySelectorAll(".stock-grid .stock-card")).map((card) => {
-      const symbol = card.querySelector("h3")?.textContent?.trim()?.match(/\b[A-Z][A-Z0-9.-]{0,10}\b/)?.[0];
-      const item = symbol ? itemMap.get(symbol) : null;
-      if (!item) return null;
-      return {
-        category,
-        symbol: item.symbol,
-        name: item.name ?? item.symbol,
-        price: priceUsd(item),
-        score: cardScore(card) ?? num(item?.scannerScore) ?? num(item?.finalProbabilityScore),
-        statusLabel: card.querySelector(".signal-box strong,.accent-badge,.type-chip")?.textContent?.trim() ?? null,
-        rvol: relativeVolumeOf(item),
-        vwapStatus: vwapState(item),
-        changePercent: changePct(item),
-        volume: num(item?.volume) ?? num(item?.preMarketVolume),
-        reasons: Array.isArray(item?.selectionReasons) ? item.selectionReasons.slice(0, 4) : [],
-        warnings: Array.isArray(item?.warnings) ? item.warnings.slice(0, 3) : [],
-      };
-    }).filter(Boolean);
-    if (entries.length) window.__kbkPersistRecommendationSnapshots(entries, { category });
-  } catch {}
-}
-
 function refreshCurrentScannerView() {
   if (window.location.hash === "#top-picks") {
     loadTopPicks();
@@ -1740,14 +997,8 @@ document.addEventListener("click", (event) => {
 window.addEventListener("DOMContentLoaded", () => {
   for (let i = 1; i <= 10; i += 1) {
     window.setTimeout(ensurePageRefreshButton, i * 250);
-    window.setTimeout(captureStockGridRecommendationSnapshots, i * 350);
   }
 });
 window.addEventListener("hashchange", () => window.setTimeout(ensurePageRefreshButton, 100));
 window.addEventListener("popstate", () => window.setTimeout(ensurePageRefreshButton, 100));
-window.addEventListener("hashchange", () => window.setTimeout(captureStockGridRecommendationSnapshots, 180));
-window.addEventListener("popstate", () => window.setTimeout(captureStockGridRecommendationSnapshots, 180));
-document.addEventListener("click", () => {
-  window.setTimeout(ensurePageRefreshButton, 150);
-  window.setTimeout(captureStockGridRecommendationSnapshots, 260);
-});
+document.addEventListener("click", () => window.setTimeout(ensurePageRefreshButton, 150));
