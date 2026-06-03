@@ -907,6 +907,95 @@ function scoreTopPick(item) {
   };
 }
 
+function evaluateTopPickNewsSignal(item) {
+  const sourceTags = Array.isArray(item?.sourceTags) ? item.sourceTags.map((tag) => String(tag)) : [];
+  const storyTags = Array.isArray(item?.storyTags) ? item.storyTags.map((tag) => String(tag)) : [];
+  const selectionReasons = Array.isArray(item?.selectionReasons) ? item.selectionReasons.map((reason) => String(reason)) : [];
+  const storySignalText = String(item?.storySignalText ?? "");
+
+  const normalizedSourceTags = sourceTags.map((tag) => tag.toLowerCase());
+  const normalizedStoryTags = storyTags.map((tag) => tag.toLowerCase());
+  const normalizedReasons = selectionReasons.map((reason) => reason.toLowerCase());
+  const joined = [storySignalText.toLowerCase(), ...normalizedReasons, ...normalizedSourceTags, ...normalizedStoryTags].join(" ");
+
+  const riskKeywords = [
+    { keyword: "offering", reason: "??? ???", penalty: 16 },
+    { keyword: "warrant", reason: "??? ?? ???", penalty: 14 },
+    { keyword: "dilution", reason: "?? ???", penalty: 16 },
+    { keyword: "reverse split", reason: "??? ??? ???", penalty: 18 },
+    { keyword: "delisting", reason: "???? ??", penalty: 22 },
+    { keyword: "deficiency", reason: "?? ?? ?? ?? ???", penalty: 16 },
+    { keyword: "compliance notice", reason: "?????? ?? ??", penalty: 14 },
+    { keyword: "bankruptcy", reason: "?? ?? ??", penalty: 25 },
+    { keyword: "going concern", reason: "???? ??", penalty: 20 },
+    { keyword: "lawsuit", reason: "?? ???", penalty: 12 },
+    { keyword: "investigation", reason: "?? ???", penalty: 12 },
+  ];
+
+  let positive = 0;
+  let negative = 0;
+  const newsReasons = [];
+
+  if (normalizedSourceTags.includes("news-story-signal")) {
+    positive += 6;
+    newsReasons.push("??? ?? ?? ??");
+  }
+  if (normalizedSourceTags.includes("benchmark-catalyst-seed")) {
+    positive += 4;
+    newsReasons.push("?? ?? ?? ??");
+  }
+  if (normalizedSourceTags.includes("structural-event-monitor")) {
+    positive += 3;
+    newsReasons.push("?? ??? ??? ?? ??");
+  }
+
+  const hasStoryTags = storyTags.length > 0;
+  if (hasStoryTags) {
+    positive += Math.min(5, 2 + storyTags.length);
+    newsReasons.push(`storyTags ${storyTags.length}?`);
+  }
+
+  const matchedRisks = [];
+  for (const rule of riskKeywords) {
+    if (!joined.includes(rule.keyword)) continue;
+    negative += rule.penalty;
+    matchedRisks.push(rule.reason);
+  }
+
+  const hasSevereRisk = negative >= 18;
+  if (normalizedSourceTags.includes("sec-8k-signal") && !hasSevereRisk) {
+    positive += 3;
+    newsReasons.push("8-K ?? ??? ??");
+  }
+
+  if (selectionReasons.some((reason) => reason.toLowerCase().includes("news"))) {
+    positive += 2;
+    newsReasons.push("?? ??? ?? ?? ??");
+  }
+
+  negative = Math.min(negative, 25);
+  positive = Math.min(positive, 8);
+
+  const newsScore = positive - negative;
+  let newsLabel = "??";
+  if (negative >= 10) newsLabel = "?? ??";
+  else if (normalizedSourceTags.includes("sec-8k-signal")) newsLabel = "?? ???";
+  else if (positive >= 5) newsLabel = "??? ??";
+
+  if (matchedRisks.length) newsReasons.push(...matchedRisks.slice(0, 3));
+  if (!newsReasons.length) newsReasons.push("?? ?? ?? ?? ?? ?? ?? ??");
+
+  return {
+    newsScore,
+    newsLabel,
+    newsReasons: [...new Set(newsReasons)].slice(0, 4),
+    newsPositiveScore: positive,
+    newsNegativeScore: negative,
+    hasSevereRisk,
+    hasRiskKeyword: matchedRisks.length > 0,
+  };
+}
+
 function enrichTopPickDecision(pick) {
   const item = pick?.item ?? {};
   const preMarketChange = num(item?.preMarketChangePercent) ?? pick?.change ?? 0;
@@ -923,19 +1012,23 @@ function enrichTopPickDecision(pick) {
   const volumeGood = (pick?.volume ?? 0) >= 1000000 || (pick?.rvol ?? 0) >= 1.5;
   const priceWeak = (pick?.change ?? 0) < 0 || pick?.trend !== "??";
   const volumeButWeak = volumeGood && priceWeak;
+  const newsSignal = evaluateTopPickNewsSignal(item);
 
   let finalScore = num(pick?.finalScore) ?? 0;
   if (negativeSession && vwapBelow) finalScore -= severeDrop ? 22 : 14;
   if (elevatedRisk && (pick?.change ?? 0) >= 12) finalScore -= 10;
   if (volumeButWeak) finalScore -= 8;
   if (overheated) finalScore -= veryOverheated ? 12 : 6;
+  finalScore += newsSignal.newsScore;
   finalScore = Math.round(clampScore(finalScore));
 
   let verdict = "??";
-  if (finalScore >= 78 && !negativeSession && !vwapBelow && !elevatedRisk && (pick?.chaseRisk ?? 0) < 62) verdict = "?? ??";
+  if (finalScore >= 78 && !negativeSession && !vwapBelow && !elevatedRisk && !newsSignal.hasRiskKeyword && (pick?.chaseRisk ?? 0) < 62) verdict = "?? ??";
   if (severeDrop && vwapBelow) verdict = "?? ??";
   else if ((negativeSession && vwapBelow) || elevatedRisk || volumeButWeak || veryOverheated) verdict = "??";
   else if (finalScore <= 44 || ((pick?.chaseRisk ?? 0) >= 82 && vwapBelow)) verdict = "?? ??";
+  if (newsSignal.newsNegativeScore >= 10 && verdict === "?? ??") verdict = "??";
+  if (newsSignal.newsNegativeScore >= 18 && (vwapBelow || priceWeak || elevatedRisk)) verdict = "?? ??";
 
   const reasons = Array.isArray(pick?.reasons) ? [...pick.reasons] : [];
   const detailReasons = [];
@@ -952,6 +1045,10 @@ function enrichTopPickDecision(pick) {
   detailReasons.push("VWAP ??: " + (vwap || "-"));
   detailReasons.push("???/???: " + pct(pick?.change ?? 0) + " / " + compact(pick?.volume ?? 0));
 
+  if (newsSignal.newsLabel === "??? ??" || newsSignal.newsLabel === "?? ???") {
+    if (!reasons.includes(newsSignal.newsLabel)) reasons.push(newsSignal.newsLabel);
+  }
+
   if (preMarketChange < 0) cautions.push("???? ??: " + pct(preMarketChange));
   if (vwapBelow) cautions.push("VWAP ??");
   if (elevatedRisk) cautions.push("?? ?? ??: " + Math.round(Math.max(riskScore, pick?.chaseRisk ?? 0)) + "?");
@@ -959,6 +1056,7 @@ function enrichTopPickDecision(pick) {
   if (volumeButWeak) cautions.push("???? ??? ?? ??");
   if ((pick?.chaseRisk ?? 0) >= 80 || riskScore >= 80) cautions.push("??? ??");
   if (overheated) cautions.push("???? ??");
+  if (newsSignal.newsLabel === "?? ??") cautions.push("??/?? ?? ??");
 
   return {
     ...pick,
@@ -972,10 +1070,16 @@ function enrichTopPickDecision(pick) {
     patternScore: Math.round(patternScore),
     riskScore: Math.round(riskScore),
     baseFinalScore: num(pick?.finalScore) ?? 0,
+    newsScore: newsSignal.newsScore,
+    newsLabel: newsSignal.newsLabel,
+    newsReasons: newsSignal.newsReasons,
+    newsPositiveScore: newsSignal.newsPositiveScore,
+    newsNegativeScore: newsSignal.newsNegativeScore,
   };
 }
 
 function ensureTopPickStyles() {
+
 
   if (document.getElementById("kbk-top-picks-style")) return;
   const style = document.createElement("style");
@@ -1004,7 +1108,7 @@ function ensureTopPickStyles() {
     .kbk-top-card.is-open{border-color:rgba(37,99,235,.38);box-shadow:0 22px 48px rgba(37,99,235,.16)}
     .kbk-top-toggle{margin-top:14px;color:#2563eb;font-size:.85rem;font-weight:700}
     .kbk-top-detail{margin-top:18px;padding-top:18px;border-top:1px solid rgba(15,23,42,.1)}
-    .kbk-top-detail-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+    .kbk-top-detail-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
     .kbk-top-detail-section{background:#f8fafc;border-radius:16px;padding:14px 16px}
     .kbk-top-detail-section h4{margin:0 0 10px;color:#0f172a;font-size:.96rem}
     .kbk-top-detail-section ul{margin:0;padding-left:18px;color:#334155;line-height:1.55}
@@ -1066,70 +1170,79 @@ function renderTopPicks(picks, updatedAt) {
   const enrichedPicks = picks.map(enrichTopPickDecision);
   const top = enrichedPicks[0];
   panel.dataset.loaded = "true";
-  panel.innerHTML =
-    '<section class="kbk-top-hero">'
-    + '<p>Integrated Top Picks</p>'
-    + '<h2>?? ?? ??</h2>'
-    + '<p>??? ?? ??, ?? ??, ?? ??? ? ?? ?? ?? ??? ???? ??? ? ????? ?????.</p>'
-    + '<button type="button" class="kbk-page-refresh kbk-top-refresh" data-kbk-page-refresh>????</button>'
-    + '</section>'
-    + '<section class="kbk-top-note">'
-    + (top ? ('?? 1??? ' + esc(top.symbol) + ' ???. ?? ?? ??? ?? ????? ???, ?? ??? ?? ??, ?? ??? ?? ???? ???.') : '?? ?? ??? ??? ???? ?? ??? ????.')
-    + '<br>??? ??: ' + (updatedAt ? new Date(updatedAt).toLocaleTimeString('ko-KR') : new Date().toLocaleTimeString('ko-KR'))
-    + '</section>'
-    + (enrichedPicks.length ? ('<section class="kbk-top-grid">' + enrichedPicks.map((pick, index) => {
-      const verdictTone = pick.verdict === '?? ??' ? 'buy' : pick.verdict === '??' ? 'watch' : 'block';
-      return ''
-        + '<article class="kbk-top-card" data-top-pick-card="' + esc(pick.symbol) + '" tabindex="0" role="button" aria-expanded="false">'
-        +   '<div class="kbk-top-head">'
-        +     '<div>'
-        +       '<h3>' + esc(pick.symbol) + '</h3>'
-        +       '<p>' + esc(pick.name) + '</p>'
-        +     '</div>'
-        +     '<div class="kbk-top-score">' + pick.finalScore + '<span>' + (index === 0 ? '1?' : esc(pick.verdict)) + '</span></div>'
-        +   '</div>'
-        +   '<div class="kbk-top-row">'
-        +     '<strong>' + pricePairText(pick.price) + '</strong>'
-        +     '<span>' + pct(pick.change) + '</span>'
-        +     '<span>??? ' + compact(pick.volume) + '</span>'
-        +     '<span>RVOL ' + (pick.rvol ? pick.rvol.toFixed(1) : '-') + '</span>'
-        +     '<span>' + esc(pick.vwap) + '</span>'
-        +   '</div>'
-        +   '<div class="kbk-top-metrics">'
-        +     '<div><span>?? ??</span><b>' + pick.scalpScore + '?</b></div>'
-        +     '<div><span>?? ??</span><b>' + pick.surgeScore + '?</b></div>'
-        +     '<div><span>?? ??</span><b>' + pick.setupScore + '?</b></div>'
-        +     '<div><span>?? ??</span><b>' + pick.chaseRisk + '?</b></div>'
-        +   '</div>'
-        +   '<div class="kbk-top-reasons">' + pick.reasons.map((reason) => '<span>' + esc(reason) + '</span>').join('') + '</div>'
-        +   '<div class="kbk-top-toggle">??? ???? ?? ??? ?? ??, ?? ??? ? ? ????.</div>'
-        +   '<div class="kbk-top-detail" hidden>'
-        +     '<div class="kbk-top-detail-grid">'
-        +       '<section class="kbk-top-detail-section">'
-        +         '<h4>?? ??</h4>'
-        +         '<ul>' + pick.detailReasons.map((reason) => '<li>' + esc(reason) + '</li>').join('') + '</ul>'
-        +       '</section>'
-        +       '<section class="kbk-top-detail-section">'
-        +         '<h4>?? ??</h4>'
-        +         '<ul>' + pick.cautions.map((reason) => '<li>' + esc(reason) + '</li>').join('') + '</ul>'
-        +       '</section>'
-        +       '<section class="kbk-top-detail-section">'
-        +         '<h4>?? ??</h4>'
-        +         '<div class="kbk-top-judgement ' + verdictTone + '">' + esc(pick.verdict) + '</div>'
-        +         '<ul>'
-        +           + '<li>?? ??: ' + pick.finalScore + '?</li>'
-        +           + '<li>?? ? ??: ' + pick.baseFinalScore + '?</li>'
-        +           + '<li>?? ??: ' + pick.chaseRisk + '?</li>'
-        +         + '</ul>'
-        +       '</section>'
-        +     '</div>'
-        +   '</div>'
-        + '</article>';
-    }).join('') + '</section>') : '<section class="kbk-top-empty">?? ?? ??? ??? ??? ????. ?? ?? ????.</section>');
+  panel.innerHTML = `
+    <section class="kbk-top-hero">
+      <p>Integrated Top Picks</p>
+      <h2>?? ?? ??</h2>
+      <p>??? ?? ??, ?? ??, ?? ??? ? ?? ?? ?? ??? ???? ??? ? ????? ?????.</p>
+      <button type="button" class="kbk-page-refresh kbk-top-refresh" data-kbk-page-refresh>????</button>
+    </section>
+    <section class="kbk-top-note">
+      ${top ? `?? 1??? ${esc(top.symbol)} ???. ?? ?? ??? ?? ????? ???, ?? ??? ?? ??, ?? ??? ?? ???? ???.` : `?? ?? ??? ??? ???? ?? ??? ????.`}
+      <br>??? ??: ${updatedAt ? new Date(updatedAt).toLocaleTimeString("ko-KR") : new Date().toLocaleTimeString("ko-KR")}
+    </section>
+    ${enrichedPicks.length ? `<section class="kbk-top-grid">
+      ${enrichedPicks.map((pick, index) => {
+        const verdictTone = pick.verdict === "?? ??" ? "buy" : pick.verdict === "??" ? "watch" : "block";
+        return `
+        <article class="kbk-top-card" data-top-pick-card="${esc(pick.symbol)}" tabindex="0" role="button" aria-expanded="false">
+          <div class="kbk-top-head">
+            <div>
+              <h3>${esc(pick.symbol)}</h3>
+              <p>${esc(pick.name)}</p>
+            </div>
+            <div class="kbk-top-score">${pick.finalScore}<span>${index === 0 ? "1?" : esc(pick.verdict)}</span></div>
+          </div>
+          <div class="kbk-top-row">
+            <strong>${pricePairText(pick.price)}</strong>
+            <span>${pct(pick.change)}</span>
+            <span>??? ${compact(pick.volume)}</span>
+            <span>RVOL ${pick.rvol ? pick.rvol.toFixed(1) : "-"}</span>
+            <span>${esc(pick.vwap)}</span>
+          </div>
+          <div class="kbk-top-metrics">
+            <div><span>?? ??</span><b>${pick.scalpScore}?</b></div>
+            <div><span>?? ??</span><b>${pick.surgeScore}?</b></div>
+            <div><span>?? ??</span><b>${pick.setupScore}?</b></div>
+            <div><span>?? ??</span><b>${pick.chaseRisk}?</b></div>
+          </div>
+          <div class="kbk-top-reasons">${pick.reasons.map((reason) => `<span>${esc(reason)}</span>`).join("")}</div>
+          <div class="kbk-top-toggle">??? ???? ?? ??? ?? ??, ?? ??? ? ? ????.</div>
+          <div class="kbk-top-detail" hidden>
+            <div class="kbk-top-detail-grid">
+              <section class="kbk-top-detail-section">
+                <h4>?? ??</h4>
+                <ul>${pick.detailReasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}</ul>
+              </section>
+              <section class="kbk-top-detail-section">
+                <h4>?? ??</h4>
+                <ul>${pick.cautions.map((reason) => `<li>${esc(reason)}</li>`).join("")}</ul>
+              </section>
+              <section class="kbk-top-detail-section">
+                <h4>??/?? ??</h4>
+                <div class="kbk-top-judgement ${pick.newsLabel === "?? ??" ? "block" : pick.newsLabel === "??" ? "watch" : "buy"}">${esc(pick.newsLabel)} ? ${pick.newsScore > 0 ? "+" : ""}${pick.newsScore}</div>
+                <ul>${pick.newsReasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}</ul>
+              </section>
+              <section class="kbk-top-detail-section">
+                <h4>?? ??</h4>
+                <div class="kbk-top-judgement ${verdictTone}">${esc(pick.verdict)}</div>
+                <ul>
+                  <li>?? ??: ${pick.finalScore}?</li>
+                  <li>?? ? ??: ${pick.baseFinalScore}?</li>
+                  <li>??/?? ?? ??: ${pick.newsScore > 0 ? "+" : ""}${pick.newsScore}?</li>
+                </ul>
+              </section>
+            </div>
+          </div>
+        </article>`;
+      }).join("")}
+    </section>` : `<section class="kbk-top-empty">?? ?? ??? ??? ??? ????. ?? ?? ????.</section>`}
+  `;
   bindTopPickCardDetails(panel);
 }
 
 function bindTopPickCardDetails(panel) {
+
   panel.querySelectorAll('[data-top-pick-card]').forEach((card) => {
     const toggle = () => {
       const detail = card.querySelector('.kbk-top-detail');
