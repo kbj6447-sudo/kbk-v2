@@ -59,9 +59,13 @@ function rvolValue(item) {
 
 const KBK_SCANNER_STORAGE_KEY = "kbk:scanner:lastResponse";
 const KBK_SCANNER_STORAGE_MAX_AGE = 30 * 60 * 1000;
+const KBK_RECOMMENDATION_SNAPSHOTS_KEY = "kbk:recommendation:snapshots";
+const KBK_RECOMMENDATION_MIN_INTERVAL = 10 * 60 * 1000;
+const KBK_RECOMMENDATION_MAX_ITEMS = 500;
 let kbkScannerSnapshot = null;
 let kbkScannerSnapshotPromise = null;
 let kbkVwapOrderingTimer = null;
+let kbkRecommendationTimer = null;
 
 function vwapRetentionAdjustment(item, price, volume, change) {
   const setup = topPickSetupProfile(item, price, volume, change);
@@ -93,6 +97,110 @@ function vwapRetentionAdjustment(item, price, volume, change) {
     label = "vwap-below";
   }
   return { adjustment, label, setup };
+}
+
+function recommendationDateKey(date = new Date()) {
+  return date.toLocaleDateString("sv-SE", { timeZone: "Asia/Seoul" });
+}
+
+function normalizeRecommendationCategory(label) {
+  const text = String(label || "").replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  if (text.includes("통합 최종 후보") || text.toLowerCase().includes("top picks")) return "통합 최종 후보";
+  if (text.includes("실시간 단타")) return "실시간 단타";
+  if (text.includes("1달러 미만")) return "1달러 미만 폭등 후보";
+  if (text.includes("1달러 이상")) return "1달러 이상 폭등 후보";
+  if (text.includes("매집")) return "매집 스캐너";
+  return null;
+}
+
+function currentRecommendationCategory() {
+  if (isTopPicksViewActive()) return "통합 최종 후보";
+  const pathname = window.location.pathname || "";
+  if (pathname === "/" || pathname.includes("/scanner/scalp")) return "실시간 단타";
+  if (pathname.includes("/scanner/surge-watch-under-1") || pathname.includes("/surge-watch-under-1")) return "1달러 미만 폭등 후보";
+  if (pathname.includes("/scanner/surge-watch-over-1") || pathname.includes("/surge-watch-over-1")) return "1달러 이상 폭등 후보";
+  if (pathname.includes("/scanner/accumulation") || pathname.includes("/accumulation")) return "매집 스캐너";
+  const raw = normalizeRecommendationCategory(
+    window.__kbkActiveCategoryKey
+    || document.querySelector(".filter-chip.active,.filter-chip[aria-pressed='true'],.menu-link.active")?.textContent
+    || document.querySelector(".page-panel:not(.hidden-panel) .accumulation-hero h2")?.textContent
+  );
+  if (raw) return raw;
+  if (document.querySelector(".candidate-table")) return "실시간 단타";
+  return null;
+}
+
+function safeArray(value) {
+  return Array.isArray(value) ? value.filter(Boolean).slice(0, 5) : [];
+}
+
+function readRecommendationSnapshots() {
+  try {
+    const raw = localStorage.getItem(KBK_RECOMMENDATION_SNAPSHOTS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistRecommendationSnapshots(entries, options = {}) {
+  try {
+    const now = Date.now();
+    const savedAt = new Date(now).toISOString();
+    const dateKey = recommendationDateKey(new Date(now));
+    const categoryOverride = normalizeRecommendationCategory(options.category);
+    const incoming = (Array.isArray(entries) ? entries : [])
+      .map((entry) => ({
+        savedAt,
+        category: categoryOverride || normalizeRecommendationCategory(entry?.category) || currentRecommendationCategory(),
+        symbol: String(entry?.symbol || "").toUpperCase(),
+        name: String(entry?.name || entry?.symbol || "").trim(),
+        price: toNumber(entry?.price),
+        score: toNumber(entry?.score),
+        statusLabel: String(entry?.statusLabel || entry?.decision || "").trim() || null,
+        rvol: toNumber(entry?.rvol),
+        vwapStatus: String(entry?.vwapStatus || entry?.vwap || "").trim() || null,
+        changePercent: toNumber(entry?.changePercent),
+        volume: toNumber(entry?.volume),
+        reasons: safeArray(entry?.reasons),
+        warnings: safeArray(entry?.warnings),
+      }))
+      .filter((entry) => entry.category && entry.symbol);
+    if (!incoming.length) return;
+
+    const existing = readRecommendationSnapshots();
+    const merged = [...existing];
+    for (const entry of incoming) {
+      const duplicate = merged.find((saved) =>
+        saved?.category === entry.category
+        && saved?.symbol === entry.symbol
+        && recommendationDateKey(new Date(saved?.savedAt || now)) === dateKey
+        && Math.abs(now - new Date(saved?.savedAt || now).getTime()) < KBK_RECOMMENDATION_MIN_INTERVAL
+      );
+      if (!duplicate) merged.unshift(entry);
+    }
+    localStorage.setItem(KBK_RECOMMENDATION_SNAPSHOTS_KEY, JSON.stringify(merged.slice(0, KBK_RECOMMENDATION_MAX_ITEMS)));
+  } catch {}
+}
+
+function recommendationEntryFromItem(item, category, overrides = {}) {
+  if (!item?.symbol) return null;
+  return {
+    category,
+    symbol: item.symbol,
+    name: item.name || item.symbol,
+    price: overrides.price ?? livePriceOf(item),
+    score: overrides.score ?? toNumber(item?.scannerScore ?? item?.finalProbabilityScore),
+    statusLabel: overrides.statusLabel ?? item?.entryAction?.action ?? item?.verdict ?? item?.statusLabel ?? null,
+    rvol: overrides.rvol ?? rvolValue(item),
+    vwapStatus: overrides.vwapStatus ?? item?.vwapState ?? item?.technical?.vwapState ?? null,
+    changePercent: overrides.changePercent ?? toNumber(item?.changePercent ?? item?.preMarketChangePercent),
+    volume: overrides.volume ?? toNumber(item?.volume ?? item?.preMarketVolume),
+    reasons: overrides.reasons ?? safeArray(item?.selectionReasons ?? item?.selectionReasonText ? [item.selectionReasonText] : []),
+    warnings: overrides.warnings ?? safeArray(item?.warnings),
+  };
 }
 
 function topPickSetupProfile(item, price, volume, change) {
@@ -512,6 +620,17 @@ async function renderTopPicksOnly() {
       .filter((pick) => pick.baseFinalScore >= 58 || pick.reasoning.priority >= 2)
       .sort((a, b) => b.reasoning.priority - a.reasoning.priority || b.finalScore - a.finalScore)
       .slice(0, 20);
+    persistRecommendationSnapshots(items.map(({ item, price, change, volume, finalScore, reasoning }) =>
+      recommendationEntryFromItem(item, "통합 최종 후보", {
+        price,
+        score: finalScore,
+        statusLabel: reasoning?.decision ?? null,
+        changePercent: change,
+        volume,
+        reasons: reasoning?.reasons,
+        warnings: reasoning?.cautions,
+      })
+    ), { category: "통합 최종 후보" });
     panel.innerHTML = `
       <section class="accumulation-hero">
         <div>
@@ -640,8 +759,16 @@ async function loadScannerSnapshot() {
 }
 
 function symbolFromCardNode(card) {
-  const text = card?.querySelector?.("h3,strong")?.textContent?.trim() || "";
-  return text.match(/\b[A-Z][A-Z0-9.-]{0,10}\b/)?.[0] || null;
+  const headingText = card?.querySelector?.("h3")?.textContent?.trim() || "";
+  const headingMatch = headingText.match(/\b[A-Z][A-Z0-9.-]{0,10}\b/);
+  if (headingMatch?.[0]) return headingMatch[0];
+  const textNodes = Array.from(card?.querySelectorAll?.("strong,b,span") || [])
+    .map((node) => (node.textContent || "").trim());
+  for (const text of textNodes) {
+    const match = text.match(/\b[A-Z][A-Z0-9.-]{0,10}\b/);
+    if (match?.[0]) return match[0];
+  }
+  return null;
 }
 
 function scoreFromCandidateRow(row) {
@@ -685,6 +812,8 @@ function applyVwapRetentionOrdering(snapshot) {
     });
     ranked.sort((a, b) => b.total - a.total || a.index - b.index).forEach(({ row }) => tbody.appendChild(row));
   });
+
+  captureVisibleRecommendations(snapshot);
 }
 
 function scheduleVwapRetentionOrdering() {
@@ -693,6 +822,51 @@ function scheduleVwapRetentionOrdering() {
     const snapshot = await loadScannerSnapshot().catch(() => null);
     if (snapshot) applyVwapRetentionOrdering(snapshot);
   }, 180);
+}
+
+function captureVisibleRecommendations(snapshot) {
+  const category = currentRecommendationCategory();
+  if (!category || !(snapshot instanceof Map) || !snapshot.size) return;
+  const entries = [];
+
+  if (category === "실시간 단타") {
+    document.querySelectorAll(".candidate-table tbody tr[data-symbol]").forEach((row) => {
+      const symbol = String(row.dataset.symbol || "").toUpperCase();
+      const item = snapshot.get(symbol);
+      if (!item) return;
+      const score = scoreFromCandidateRow(row);
+      const statusLabel = row.querySelector("td:nth-child(9) b,td:nth-child(9),td:last-child b")?.textContent?.trim()
+        || item?.entryAction?.action
+        || null;
+      entries.push(recommendationEntryFromItem(item, category, {
+        score,
+        statusLabel,
+        reasons: safeArray(item?.entryAction?.lines ?? item?.selectionReasons),
+      }));
+    });
+  } else {
+    document.querySelectorAll(".stock-grid .stock-card").forEach((card) => {
+      const symbol = symbolFromCardNode(card);
+      const item = symbol ? snapshot.get(symbol) : null;
+      if (!item) return;
+      const score = cardScore(card);
+      const statusLabel = card.querySelector(".signal-box strong,.accent-badge,.type-chip")?.textContent?.trim() || null;
+      entries.push(recommendationEntryFromItem(item, category, {
+        score,
+        statusLabel,
+      }));
+    });
+  }
+
+  persistRecommendationSnapshots(entries, { category });
+}
+
+function scheduleRecommendationSnapshotCapture() {
+  if (kbkRecommendationTimer) window.clearTimeout(kbkRecommendationTimer);
+  kbkRecommendationTimer = window.setTimeout(async () => {
+    const snapshot = await loadScannerSnapshot().catch(() => null);
+    if (snapshot) captureVisibleRecommendations(snapshot);
+  }, 260);
 }
 
 function normalizeBars(payload) {
@@ -1052,6 +1226,8 @@ function boot() {
   clarifyEmptyAccumulation();
   patchFloatingPointText();
   scheduleVwapRetentionOrdering();
+  scheduleRecommendationSnapshotCapture();
+  window.__kbkPersistRecommendationSnapshots = persistRecommendationSnapshots;
 
   const observer = new MutationObserver(() => {
     patchFloatingPointText();
@@ -1059,10 +1235,23 @@ function boot() {
     clarifyEmptyAccumulation();
     enhanceMonitorPanel();
     scheduleVwapRetentionOrdering();
+    scheduleRecommendationSnapshotCapture();
   });
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
   window.addEventListener("popstate", handleRoute);
   window.addEventListener("hashchange", handleRoute);
+  document.addEventListener("click", (event) => {
+    const trigger = event.target.closest(".filter-chip,.menu-link");
+    if (trigger) {
+      const normalized = normalizeRecommendationCategory(trigger.textContent);
+      if (normalized) window.__kbkActiveCategoryKey = normalized;
+    }
+    window.setTimeout(scheduleRecommendationSnapshotCapture, 160);
+  });
+  for (let i = 1; i <= 8; i += 1) {
+    window.setTimeout(scheduleVwapRetentionOrdering, i * 350);
+    window.setTimeout(scheduleRecommendationSnapshotCapture, i * 420);
+  }
 }
 
 ready(() => window.setTimeout(boot, 250));

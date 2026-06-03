@@ -1192,6 +1192,24 @@ function renderTopPicks(picks, updatedAt) {
   const panel = topPickPanel();
   if (!panel) return;
   const enrichedPicks = picks.map(enrichTopPickDecision);
+  try {
+    if (typeof window.__kbkPersistRecommendationSnapshots === "function") {
+      window.__kbkPersistRecommendationSnapshots(enrichedPicks.map((pick) => ({
+        category: "통합 최종 후보",
+        symbol: pick.symbol,
+        name: pick.name,
+        price: pick.price,
+        score: pick.finalScore,
+        statusLabel: pick.verdict,
+        rvol: pick.rvol,
+        vwapStatus: pick.vwap,
+        changePercent: pick.change,
+        volume: pick.volume,
+        reasons: pick.detailReasons,
+        warnings: pick.cautions,
+      })), { category: "통합 최종 후보" });
+    }
+  } catch {}
   const top = enrichedPicks[0];
   panel.dataset.loaded = "true";
   panel.innerHTML = `
@@ -1611,6 +1629,54 @@ function isAccumulationPage() {
   return window.location.pathname.includes("/scanner/accumulation") || window.location.pathname.includes("/accumulation");
 }
 
+function recommendationCategoryForStockGrid() {
+  const pathname = window.location.pathname || "";
+  if (pathname.includes("/scanner/surge-watch-under-1") || pathname.includes("/surge-watch-under-1")) return "1달러 미만 폭등 후보";
+  if (pathname.includes("/scanner/surge-watch-over-1") || pathname.includes("/surge-watch-over-1")) return "1달러 이상 폭등 후보";
+  if (pathname.includes("/scanner/accumulation") || pathname.includes("/accumulation")) return "매집 스캐너";
+  return null;
+}
+
+function stockGridSnapshotItems() {
+  try {
+    const raw = localStorage.getItem("kbk:scanner:lastResponse");
+    const parsed = raw ? JSON.parse(raw) : null;
+    const items = parsed?.data?.items ?? parsed?.items ?? [];
+    return new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
+  } catch {
+    return new Map();
+  }
+}
+
+function captureStockGridRecommendationSnapshots() {
+  try {
+    const category = recommendationCategoryForStockGrid();
+    if (!category || typeof window.__kbkPersistRecommendationSnapshots !== "function") return;
+    const itemMap = stockGridSnapshotItems();
+    if (!itemMap.size) return;
+    const entries = Array.from(document.querySelectorAll(".stock-grid .stock-card")).map((card) => {
+      const symbol = card.querySelector("h3")?.textContent?.trim()?.match(/\b[A-Z][A-Z0-9.-]{0,10}\b/)?.[0];
+      const item = symbol ? itemMap.get(symbol) : null;
+      if (!item) return null;
+      return {
+        category,
+        symbol: item.symbol,
+        name: item.name ?? item.symbol,
+        price: priceUsd(item),
+        score: cardScore(card) ?? num(item?.scannerScore) ?? num(item?.finalProbabilityScore),
+        statusLabel: card.querySelector(".signal-box strong,.accent-badge,.type-chip")?.textContent?.trim() ?? null,
+        rvol: relativeVolumeOf(item),
+        vwapStatus: vwapState(item),
+        changePercent: changePct(item),
+        volume: num(item?.volume) ?? num(item?.preMarketVolume),
+        reasons: Array.isArray(item?.selectionReasons) ? item.selectionReasons.slice(0, 4) : [],
+        warnings: Array.isArray(item?.warnings) ? item.warnings.slice(0, 3) : [],
+      };
+    }).filter(Boolean);
+    if (entries.length) window.__kbkPersistRecommendationSnapshots(entries, { category });
+  } catch {}
+}
+
 function refreshCurrentScannerView() {
   if (window.location.hash === "#top-picks") {
     loadTopPicks();
@@ -1674,8 +1740,14 @@ document.addEventListener("click", (event) => {
 window.addEventListener("DOMContentLoaded", () => {
   for (let i = 1; i <= 10; i += 1) {
     window.setTimeout(ensurePageRefreshButton, i * 250);
+    window.setTimeout(captureStockGridRecommendationSnapshots, i * 350);
   }
 });
 window.addEventListener("hashchange", () => window.setTimeout(ensurePageRefreshButton, 100));
 window.addEventListener("popstate", () => window.setTimeout(ensurePageRefreshButton, 100));
-document.addEventListener("click", () => window.setTimeout(ensurePageRefreshButton, 150));
+window.addEventListener("hashchange", () => window.setTimeout(captureStockGridRecommendationSnapshots, 180));
+window.addEventListener("popstate", () => window.setTimeout(captureStockGridRecommendationSnapshots, 180));
+document.addEventListener("click", () => {
+  window.setTimeout(ensurePageRefreshButton, 150);
+  window.setTimeout(captureStockGridRecommendationSnapshots, 260);
+});
