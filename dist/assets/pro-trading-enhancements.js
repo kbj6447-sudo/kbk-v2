@@ -380,7 +380,6 @@ function ensureStyles() {
     .disclaimer-pill{padding:9px 12px!important;border-radius:14px!important;font-size:.82rem!important}
     .menu-bar{margin:12px 0 14px!important;gap:8px!important}
     .menu-link{padding:9px 13px!important;border-radius:12px!important;font-size:.92rem!important}
-    .menu-link.kbk-pro-top-picks-menu,#kbk-top-picks-menu{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans KR","Apple SD Gothic Neo",sans-serif!important;font-weight:800!important;letter-spacing:-0.02em!important;white-space:nowrap!important;word-break:keep-all!important;text-rendering:geometricPrecision!important;padding:10px 16px!important;min-width:9.5rem!important;line-height:1.2!important;text-align:center!important}
     .accumulation-hero{padding:18px!important;border-radius:18px!important;grid-template-columns:minmax(0,1.3fr) minmax(280px,.7fr)!important}
     .accumulation-hero h2{font-size:clamp(1.35rem,2.2vw,2.1rem)!important;margin:4px 0 8px!important}
     .score-card{border-radius:12px!important;padding:12px 14px!important}
@@ -464,7 +463,6 @@ function ensureStyles() {
       .stock-grid,.weight-guide,.hero-scoreboard,.metric-grid{grid-template-columns:1fr!important}
       .terminal-layout{grid-template-columns:1fr!important}
       .candidate-table,.signal-table,.debug-table{min-width:760px!important}
-      .menu-link.kbk-pro-top-picks-menu,#kbk-top-picks-menu{padding:9px 12px!important;min-width:8.75rem!important;font-size:.88rem!important}
       .kbk-pro-top-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
       .kbk-pro-top-meta{grid-template-columns:1fr}
       .kbk-pro-basis{grid-template-columns:1fr}
@@ -522,7 +520,6 @@ function ensureRouteLinks() {
       node.textContent = config.label;
       menu.appendChild(node);
     }
-    if (config.path === "/top-picks") node.classList.add("kbk-pro-top-picks-menu");
     node.addEventListener("click", (event) => {
       event.preventDefault();
       history.pushState({}, "", config.path);
