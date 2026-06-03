@@ -17,19 +17,6 @@ function money(n) {
   return value >= 10 ? `$${value.toFixed(2)}` : `$${value.toFixed(4)}`;
 }
 
-function wonMoney(n, rate = currentUsdKrw()) {
-  const value = Number(n);
-  if (!Number.isFinite(value) || !Number.isFinite(rate) || rate <= 0) return "-";
-  return `${Math.round(value * rate).toLocaleString("ko-KR")}??;
-}
-
-function pairedMoney(n, rate = currentUsdKrw()) {
-  const usd = money(n);
-  const krw = wonMoney(n, rate);
-  if (usd === "-" || krw === "-") return usd;
-  return `${krw} (${usd})`;
-}
-
 function pct(n) {
   const value = Number(n);
   if (!Number.isFinite(value)) return "-";
@@ -45,304 +32,8 @@ function compact(n) {
   return String(Math.round(value));
 }
 
-function livePriceOf(item) {
-  return toNumber(item?.normalizedLivePriceUsd)
-    ?? toNumber(item?.price)
-    ?? toNumber(item?.preMarketPrice)
-    ?? toNumber(item?.postMarketPrice)
-    ?? toNumber(item?.regularMarketPrice);
-}
-
 function rvolValue(item) {
   return toNumber(item?.volumeRatio ?? item?.relativeVolume);
-}
-
-const KBK_SCANNER_STORAGE_KEY = "kbk:scanner:lastResponse";
-const KBK_SCANNER_STORAGE_MAX_AGE = 30 * 60 * 1000;
-const KBK_RECOMMENDATION_SNAPSHOTS_KEY = "kbk:recommendation:snapshots";
-const KBK_RECOMMENDATION_MIN_INTERVAL = 10 * 60 * 1000;
-const KBK_RECOMMENDATION_MAX_ITEMS = 500;
-let kbkScannerSnapshot = null;
-let kbkScannerSnapshotPromise = null;
-let kbkVwapOrderingTimer = null;
-let kbkRecommendationTimer = null;
-
-function vwapRetentionAdjustment(item, price, volume, change) {
-  const setup = topPickSetupProfile(item, price, volume, change);
-  const priceWeakWithVolume = setup.vwapBelow
-    && change < 0
-    && (setup.volumeAcceleration >= 65 || (setup.rvol !== null && setup.rvol >= 3));
-  const rebreakdown = setup.vwapBelow && (setup.reclaim >= 60 || setup.vwapHold >= 58);
-  const reclaiming = !setup.vwapAbove && (setup.vwapNear || setup.reclaim >= 60);
-  const aboveHigherLow = setup.vwapAbove && setup.higherLow >= 65;
-  let adjustment = 0;
-  let label = "neutral";
-  if (aboveHigherLow) {
-    adjustment = 10;
-    label = "vwap-above-higher-low";
-  } else if (reclaiming) {
-    adjustment = 7;
-    label = "vwap-reclaim";
-  } else if (setup.vwapAbove) {
-    adjustment = 5;
-    label = "vwap-above";
-  } else if (priceWeakWithVolume) {
-    adjustment = -15;
-    label = "vwap-below-volume-weak";
-  } else if (rebreakdown) {
-    adjustment = -10;
-    label = "vwap-rebreakdown";
-  } else if (setup.vwapBelow) {
-    adjustment = -8;
-    label = "vwap-below";
-  }
-  return { adjustment, label, setup };
-}
-
-function recommendationDateKey(date = new Date()) {
-  return date.toLocaleDateString("sv-SE", { timeZone: "Asia/Seoul" });
-}
-
-function normalizeRecommendationCategory(label) {
-  const text = String(label || "").replace(/\s+/g, " ").trim();
-  if (!text) return null;
-  if (text.includes("?�합 최종 ?�보") || text.toLowerCase().includes("top picks")) return "?�합 최종 ?�보";
-  if (text.includes("?�시�??��?")) return "?�시�??��?";
-  if (text.includes("1?�러 미만")) return "1?�러 미만 ??�� ?�보";
-  if (text.includes("1?�러 ?�상")) return "1?�러 ?�상 ??�� ?�보";
-  if (text.includes("매집")) return "매집 ?�캐??;
-  return null;
-}
-
-function currentRecommendationCategory() {
-  if (isTopPicksViewActive()) return "?�합 최종 ?�보";
-  const pathname = window.location.pathname || "";
-  if (pathname === "/" || pathname.includes("/scanner/scalp")) return "?�시�??��?";
-  if (pathname.includes("/scanner/surge-watch-under-1") || pathname.includes("/surge-watch-under-1")) return "1?�러 미만 ??�� ?�보";
-  if (pathname.includes("/scanner/surge-watch-over-1") || pathname.includes("/surge-watch-over-1")) return "1?�러 ?�상 ??�� ?�보";
-  if (pathname.includes("/scanner/accumulation") || pathname.includes("/accumulation")) return "매집 ?�캐??;
-  const raw = normalizeRecommendationCategory(
-    window.__kbkActiveCategoryKey
-    || document.querySelector(".filter-chip.active,.filter-chip[aria-pressed='true'],.menu-link.active")?.textContent
-    || document.querySelector(".page-panel:not(.hidden-panel) .accumulation-hero h2")?.textContent
-  );
-  if (raw) return raw;
-  if (document.querySelector(".candidate-table")) return "?�시�??��?";
-  return null;
-}
-
-function safeArray(value) {
-  return Array.isArray(value) ? value.filter(Boolean).slice(0, 5) : [];
-}
-
-function readRecommendationSnapshots() {
-  try {
-    const raw = localStorage.getItem(KBK_RECOMMENDATION_SNAPSHOTS_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function persistRecommendationSnapshots(entries, options = {}) {
-  try {
-    const now = Date.now();
-    const savedAt = new Date(now).toISOString();
-    const dateKey = recommendationDateKey(new Date(now));
-    const categoryOverride = normalizeRecommendationCategory(options.category);
-    const incoming = (Array.isArray(entries) ? entries : [])
-      .map((entry) => ({
-        savedAt,
-        category: categoryOverride || normalizeRecommendationCategory(entry?.category) || currentRecommendationCategory(),
-        symbol: String(entry?.symbol || "").toUpperCase(),
-        name: String(entry?.name || entry?.symbol || "").trim(),
-        price: toNumber(entry?.price),
-        score: toNumber(entry?.score),
-        statusLabel: String(entry?.statusLabel || entry?.decision || "").trim() || null,
-        rvol: toNumber(entry?.rvol),
-        vwapStatus: String(entry?.vwapStatus || entry?.vwap || "").trim() || null,
-        changePercent: toNumber(entry?.changePercent),
-        volume: toNumber(entry?.volume),
-        reasons: safeArray(entry?.reasons),
-        warnings: safeArray(entry?.warnings),
-      }))
-      .filter((entry) => entry.category && entry.symbol);
-    if (!incoming.length) return;
-
-    const existing = readRecommendationSnapshots();
-    const merged = [...existing];
-    for (const entry of incoming) {
-      const duplicate = merged.find((saved) =>
-        saved?.category === entry.category
-        && saved?.symbol === entry.symbol
-        && recommendationDateKey(new Date(saved?.savedAt || now)) === dateKey
-        && Math.abs(now - new Date(saved?.savedAt || now).getTime()) < KBK_RECOMMENDATION_MIN_INTERVAL
-      );
-      if (!duplicate) merged.unshift(entry);
-    }
-    localStorage.setItem(KBK_RECOMMENDATION_SNAPSHOTS_KEY, JSON.stringify(merged.slice(0, KBK_RECOMMENDATION_MAX_ITEMS)));
-  } catch {}
-}
-
-function recommendationEntryFromItem(item, category, overrides = {}) {
-  if (!item?.symbol) return null;
-  return {
-    category,
-    symbol: item.symbol,
-    name: item.name || item.symbol,
-    price: overrides.price ?? livePriceOf(item),
-    score: overrides.score ?? toNumber(item?.scannerScore ?? item?.finalProbabilityScore),
-    statusLabel: overrides.statusLabel ?? item?.entryAction?.action ?? item?.verdict ?? item?.statusLabel ?? null,
-    rvol: overrides.rvol ?? rvolValue(item),
-    vwapStatus: overrides.vwapStatus ?? item?.vwapState ?? item?.technical?.vwapState ?? null,
-    changePercent: overrides.changePercent ?? toNumber(item?.changePercent ?? item?.preMarketChangePercent),
-    volume: overrides.volume ?? toNumber(item?.volume ?? item?.preMarketVolume),
-    reasons: overrides.reasons ?? safeArray(item?.selectionReasons ?? item?.selectionReasonText ? [item.selectionReasonText] : []),
-    warnings: overrides.warnings ?? safeArray(item?.warnings),
-  };
-}
-
-function topPickSetupProfile(item, price, volume, change) {
-  const rvol = rvolValue(item);
-  const rsi = toNumber(item?.rsi ?? item?.technical?.rsi);
-  const dayHigh = toNumber(item?.dayHigh ?? item?.regularMarketDayHigh);
-  const dayLow = toNumber(item?.dayLow ?? item?.regularMarketDayLow);
-  const vwap = toNumber(item?.technical?.vwap ?? item?.vwap);
-  const vwapState = String(item?.technical?.vwapState ?? item?.vwapState ?? "").toLowerCase();
-  const highPullbackPct = price > 0 && dayHigh > 0 ? ((dayHigh - price) / dayHigh) * 100 : null;
-  const highPosition = price > 0 && dayHigh > 0 && dayLow > 0 && dayHigh > dayLow
-    ? ((price - dayLow) / (dayHigh - dayLow)) * 100
-    : null;
-  const vwapAbove = item?.aboveVwap === true || vwapState === "above" || (price > 0 && vwap > 0 && price >= vwap);
-  const vwapNear = !vwapAbove && price > 0 && vwap > 0 && price >= vwap * 0.985;
-  const vwapBelow = item?.aboveVwap === false || vwapState === "below" || (price > 0 && vwap > 0 && price < vwap * 0.985);
-  const volumeAcceleration = toNumber(item?.volumeAccelerationScore) ?? 50;
-  const higherLow = toNumber(item?.higherLowScore) ?? 50;
-  const vwapHold = toNumber(item?.vwapHoldScore) ?? 50;
-  const compression = toNumber(item?.compressionScore) ?? 50;
-  const resurge = toNumber(item?.reSurgeSetupScore) ?? 50;
-  const reclaim = toNumber(item?.vwapReclaimScore) ?? 50;
-
-  const overheated = change >= 80 || rsi >= 80;
-  const veryExtended = change >= 120 || (highPosition !== null && highPosition >= 88 && change >= 60);
-  const highFailed = highPullbackPct !== null && highPullbackPct >= 18 && change >= 25;
-  const extremeRvolWeak = rvol !== null && rvol >= 8 && highPullbackPct !== null && highPullbackPct >= 22 && !vwapAbove;
-  const lowRecovery = highPosition !== null && highPosition >= 15 && highPosition <= 70;
-  const notOverChased = change >= 1 && change <= 45;
-  const volumeStarting = rvol !== null && rvol >= 3;
-  const vwapRecovering = vwapAbove || vwapNear || reclaim >= 60;
-
-  const earlyBonus = Math.max(0, Math.min(14, Math.round(
-    (volumeStarting ? 3 : 0)
-    + (volumeAcceleration >= 65 ? 2 : 0)
-    + (notOverChased ? 3 : change <= 70 ? 1 : 0)
-    + (vwapRecovering ? 3 : 0)
-    + (higherLow >= 65 ? 2 : 0)
-    + (resurge >= 65 ? 2 : 0)
-    + (lowRecovery ? 2 : 0)
-  )));
-  const riskPenalty = Math.max(0, Math.min(32, Math.round(
-    (overheated ? 12 : 0)
-    + (veryExtended ? 10 : 0)
-    + (highFailed ? 8 : 0)
-    + (extremeRvolWeak ? 10 : 0)
-    + (vwapBelow && change < 0 ? 8 : 0)
-  )));
-
-  return {
-    rvol,
-    rsi,
-    highPullbackPct,
-    highPosition,
-    vwapAbove,
-    vwapNear,
-    vwapBelow,
-    volumeAcceleration,
-    higherLow,
-    vwapHold,
-    compression,
-    resurge,
-    reclaim,
-    earlyBonus,
-    riskPenalty,
-    overheated,
-    highFailed,
-    extremeRvolWeak,
-    volumeStarting,
-    lowRecovery,
-    vwapRecovering,
-    notOverChased,
-  };
-}
-
-function topPickSignalScore(item, price, volume, change) {
-  const setup = topPickSetupProfile(item, price, volume, change);
-  const vwapRetention = vwapRetentionAdjustment(item, price, volume, change);
-  const volumeAcceleration = toNumber(item?.volumeAccelerationScore) ?? 50;
-  const higherLow = toNumber(item?.higherLowScore) ?? 50;
-  const vwapHold = toNumber(item?.vwapHoldScore) ?? 50;
-  const compression = toNumber(item?.compressionScore) ?? 50;
-  const resurge = toNumber(item?.reSurgeSetupScore) ?? 50;
-  const reclaim = toNumber(item?.vwapReclaimScore) ?? 50;
-  const volumeBonus = volume >= 5_000_000 ? 14 : volume >= 1_000_000 ? 8 : 0;
-  const changeBonus = change >= 4 && change <= 35 ? 8 : change > 35 && change <= 60 ? 3 : change >= 80 ? -8 : 0;
-  const rawSignalBonus =
-    (volumeAcceleration - 50) * 0.03
-    + (higherLow - 50) * 0.025
-    + (vwapHold - 50) * 0.025
-    + (compression - 50) * 0.03
-    + (resurge - 50) * 0.04
-    + (reclaim - 50) * 0.025
-    + (setup.rvol !== null && setup.rvol >= 3 ? 1 : 0)
-    + setup.earlyBonus
-    - setup.riskPenalty;
-  const signalBonus = Math.max(-32, Math.min(14, Math.round(rawSignalBonus)));
-  return { signalBonus, volumeBonus, changeBonus, rvol: setup.rvol, setup, vwapRetention };
-}
-
-function topPickReasoning(item, metrics) {
-  const value = (key) => toNumber(item?.[key]);
-  const reasons = [];
-  const cautions = [];
-  const setup = metrics.setup ?? {};
-  const resurge = value("reSurgeSetupScore");
-  const compression = value("compressionScore");
-  const reclaim = value("vwapReclaimScore");
-  const higherLow = value("higherLowScore");
-  const vwapHold = value("vwapHoldScore");
-  const volumeAccel = value("volumeAccelerationScore");
-
-  if (setup.volumeStarting) reasons.push("거래?�이 증�??�기 ?�작?�습?�다");
-  if (metrics.rvol !== null && metrics.rvol >= 3) reasons.push(`RVOL ${metrics.rvol.toFixed(1)}배로 기�? ?�상?�니??);
-  if (volumeAccel !== null && volumeAccel >= 65) reasons.push("거래??가?�도가 ?�호?�니??);
-  if (setup.vwapRecovering) reasons.push(setup.vwapAbove ? "VWAP ?�에???�복 ?�름?�니?? : "VWAP ?�돌?��? ?�도 중입?�다");
-  if (higherLow !== null && higherLow >= 65) reasons.push("Higher Low 구조가 감�??�니??);
-  if (resurge !== null && resurge >= 65) reasons.push("?�림 ???�상??가?�성???�습?�다");
-  if (setup.lowRecovery) reasons.push("가격이 ?�단부?�서 ?�복 중입?�다");
-  if (compression !== null && compression >= 70) reasons.push("박스�??�축???�인?�니??);
-
-  if (setup.highFailed) cautions.push("?��? ?�게 ?�른 ??고점?�서 밀?�습?�다");
-  if (setup.rsi !== null && setup.rsi >= 80) cautions.push("RSI 과열 구간?�니??);
-  if (setup.extremeRvolWeak) cautions.push("RVOL?� ?��?�?가�??�름???�합?�다");
-  if (setup.vwapBelow) cautions.push("VWAP ?�래??바로 진입?� ?�험?�니??);
-  if (metrics.risk >= 70) cautions.push("추격 ?�험 ?�수가 ?�습?�다");
-  if (metrics.change >= 80) cautions.push("?�기 ?�승률이 과합?�다");
-  if (metrics.rvol !== null && metrics.rvol < 3) cautions.push("RVOL 기�????�직 부족합?�다");
-
-  let decision = "관�?;
-  if (setup.overheated || setup.highFailed || setup.extremeRvolWeak || metrics.risk >= 78 || metrics.finalScore < 58) {
-    decision = "진입 금�?";
-  } else if (metrics.finalScore >= 74 && setup.volumeStarting && setup.vwapRecovering && !setup.vwapBelow && metrics.risk < 70) {
-    decision = "매수 가??;
-  }
-
-  return {
-    reasons: reasons.length ? reasons.slice(0, 4) : ["초입 ?�복 조건??관�?중입?�다"],
-    cautions: cautions.length ? cautions.slice(0, 3) : ["?�제 진입 ??VWAP/체결 반응 ?�확??],
-    decision,
-    priority: decision === "매수 가?? ? 3 : decision === "관�? ? 2 : 0,
-  };
 }
 
 function textEscape(value) {
@@ -361,10 +52,10 @@ function patchFloatingPointText(root = document.body) {
   while (walker.nextNode()) nodes.push(walker.currentNode);
   for (const node of nodes) {
     const before = node.nodeValue;
-    if (!before || !/\d+\.\d{3,}??.test(before)) continue;
-    node.nodeValue = before.replace(/(\d+\.\d{3,})??g, (_, raw) => {
+    if (!before || !/\d+\.\d{3,}점/.test(before)) continue;
+    node.nodeValue = before.replace(/(\d+\.\d{3,})점/g, (_, raw) => {
       const value = Number(raw);
-      return Number.isFinite(value) ? `${Math.round(value)}?? : `${raw}??;
+      return Number.isFinite(value) ? `${Math.round(value)}점` : `${raw}점`;
     });
   }
 }
@@ -393,9 +84,7 @@ function ensureStyles() {
     .stock-card{border-radius:14px!important;padding:14px!important;box-shadow:0 10px 28px rgba(15,23,42,.08)!important}
     .ticker-row h3{font-size:1.28rem!important}
     .company-name,.stock-note{font-size:.86rem!important;margin-top:7px!important}
-    .price-row{gap:8px!important;margin-top:10px!important;font-size:.86rem!important;color:#1e293b!important}
-.price-row strong{color:#111827!important;font-weight:800!important}
-.price-row span{color:#334155!important}
+    .price-row{gap:8px!important;margin-top:10px!important;font-size:.86rem!important}
     .score-number{font-size:2.1rem!important}
     .signal-box{min-width:86px!important}
     .metric-grid,.score-copy-grid,.forecast-grid{gap:8px!important;margin-top:12px!important}
@@ -444,12 +133,6 @@ function ensureStyles() {
     .kbk-pro-top-grid div{background:#f8fafc;border-radius:10px;padding:9px}
     .kbk-pro-top-grid span{display:block;color:#64748b;font-size:.76rem}
     .kbk-pro-top-grid b{display:block;margin-top:4px;color:#0f172a}
-    .kbk-pro-top-meta{display:grid;grid-template-columns:1fr 1fr 150px;gap:8px}
-    .kbk-pro-top-meta div{background:#f8fafc;border:1px solid rgba(15,23,42,.08);border-radius:10px;padding:9px}
-    .kbk-pro-top-meta span{display:block;color:#64748b;font-size:.74rem;font-weight:900;margin-bottom:5px}
-    .kbk-pro-top-meta p{margin:0;color:#0f172a;font-size:.82rem;font-weight:800;line-height:1.45}
-    .kbk-pro-top-decision{background:#eff6ff!important;border-color:rgba(37,99,235,.18)!important}
-    .kbk-pro-top-decision b{display:block;color:#1d4ed8;font-size:.95rem}
     @media (max-width:1100px){
       .accumulation-hero{grid-template-columns:1fr!important}
       .stock-grid{grid-template-columns:repeat(2,minmax(240px,1fr))!important}
@@ -464,7 +147,6 @@ function ensureStyles() {
       .terminal-layout{grid-template-columns:1fr!important}
       .candidate-table,.signal-table,.debug-table{min-width:760px!important}
       .kbk-pro-top-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
-      .kbk-pro-top-meta{grid-template-columns:1fr}
       .kbk-pro-basis{grid-template-columns:1fr}
     }
   `;
@@ -477,7 +159,7 @@ function addRefreshShortcut() {
     button.id = "kbk-pro-refresh";
     button.className = "kbk-pro-refresh";
     button.type = "button";
-    button.textContent = "?�로고침 R";
+    button.textContent = "새로고침 R";
     button.addEventListener("click", () => refreshCurrentView());
     document.body.appendChild(button);
   }
@@ -492,7 +174,7 @@ function addRefreshShortcut() {
 
 function refreshCurrentView() {
   const visibleRefresh = Array.from(document.querySelectorAll("button"))
-    .find((button) => /?�로고침|감시 갱신|?�체 분석/.test(button.textContent || "") && button.offsetParent);
+    .find((button) => /새로고침|감시 갱신|전체 분석/.test(button.textContent || "") && button.offsetParent);
   if (visibleRefresh) {
     visibleRefresh.click();
     return;
@@ -505,9 +187,9 @@ function ensureRouteLinks() {
   if (!menu) return;
 
   const configs = [
-    { label: "백테?�트", path: "/backtest", target: "backtest-panel" },
+    { label: "백테스트", path: "/backtest", target: "backtest-panel" },
     { label: "AI 분석", path: "/ai-analysis", target: "debug-panel" },
-    { label: "?�합 최종 ?�보", path: "/top-picks", target: "kbk-pro-top-picks" },
+    { label: "통합 최종 후보", path: "/top-picks", target: "kbk-pro-top-picks" },
   ];
 
   for (const config of configs) {
@@ -528,41 +210,7 @@ function ensureRouteLinks() {
   }
 }
 
-function isTopPicksViewActive() {
-  return window.location.pathname === "/top-picks" || window.location.hash === "#top-picks";
-}
-
-function hideNonTopPicksPanels() {
-  document.querySelectorAll(".page-stack > .page-panel").forEach((panel) => {
-    panel.style.display = "none";
-  });
-  const legacyTopPicks = document.getElementById("kbk-top-picks-panel");
-  if (legacyTopPicks) {
-    legacyTopPicks.hidden = true;
-    legacyTopPicks.style.display = "none";
-  }
-}
-
-function topPicksOnlyPanel() {
-  let panel = document.getElementById("kbk-pro-top-picks");
-  const stack = document.querySelector(".page-stack");
-  if (!panel && stack) {
-    panel = document.createElement("section");
-    panel.id = "kbk-pro-top-picks";
-    stack.prepend(panel);
-  }
-  if (panel) {
-    panel.hidden = false;
-    panel.style.display = "grid";
-  }
-  return panel;
-}
-
 function showAllPanels() {
-  if (isTopPicksViewActive()) {
-    hideNonTopPicksPanels();
-    return;
-  }
   document.querySelectorAll(".page-stack > .page-panel").forEach((panel) => {
     panel.style.display = "";
   });
@@ -584,115 +232,97 @@ function routeScroll(targetId, message) {
   if (targetId === "backtest-panel") window.setTimeout(renderBacktestExpectation, 300);
 }
 
-let topPicksRouteBusyUntil = 0;
-
-async function renderTopPicksOnly() {
-  const now = Date.now();
-  if (topPicksRouteBusyUntil > now) return;
-  topPicksRouteBusyUntil = now + 800;
-  hideNonTopPicksPanels();
+async function renderTopPicks() {
+  document.getElementById("kbk-pro-top-picks")?.remove();
+  const legacyButton = document.getElementById("kbk-top-picks-menu");
+  if (legacyButton) {
+    legacyButton.click();
+    return;
+  }
   if (window.location.hash !== "#top-picks") {
     window.location.hash = "top-picks";
+  } else {
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
   }
-  history.replaceState({}, "", "/top-picks");
-  window.setTimeout(() => {
-    topPicksRouteBusyUntil = 0;
-  }, 250);
-  const panel = topPicksOnlyPanel();
-  if (!panel) return;
-  panel.innerHTML = `<section class="kbk-route-note">?�합 최종 ?�보�?계산?�는 중입?�다.</section>`;
+  return;
+  const stack = document.querySelector(".page-stack");
+  if (!stack) return;
+  document.querySelectorAll(".page-stack > .page-panel").forEach((panel) => {
+    panel.style.display = "none";
+  });
+  let panel = document.getElementById("kbk-pro-top-picks");
+  if (!panel) {
+    panel = document.createElement("section");
+    panel.id = "kbk-pro-top-picks";
+    stack.prepend(panel);
+  }
+  panel.innerHTML = `<section class="kbk-route-note">통합 최종 후보를 계산하는 중입니다.</section>`;
   try {
     const payload = await fetch("/api/scanner", { cache: "no-store" }).then((res) => res.json());
     const items = (payload?.data?.items || [])
       .filter((item) => item?.symbol && item.included !== false)
       .map((item) => {
-        const price = livePriceOf(item) ?? 0;
+        const price = Number(item.price ?? item.preMarketPrice ?? 0);
         const change = Number(item.changePercent ?? item.preMarketChangePercent ?? 0);
         const volume = Number(item.volume ?? item.preMarketVolume ?? 0);
         const surge = Math.round(Number(item.finalProbabilityScore ?? item.scannerScore ?? 0));
         const risk = Math.round(Number(item.riskScore ?? 50));
         const pattern = Math.round(Number(item.patternSimilarityScore ?? 50));
-        const signal = topPickSignalScore(item, price, volume, change);
-        const baseScore = surge * .55 + pattern * .2 + signal.volumeBonus + signal.changeBonus - risk * .12;
-        const baseFinalScore = Math.round(Math.max(0, Math.min(100, baseScore + signal.signalBonus)));
-        const finalScore = Math.round(Math.max(0, Math.min(100, baseFinalScore + signal.vwapRetention.adjustment)));
-        const reasoning = topPickReasoning(item, { change, volume, surge, risk, pattern, finalScore, rvol: signal.rvol, setup: signal.setup });
-        return { item, price, change, volume, surge, risk, pattern, baseFinalScore, finalScore, signalBonus: signal.signalBonus, reasoning };
+        const finalScore = Math.round(Math.max(0, Math.min(100, surge * .55 + pattern * .2 + (volume >= 5_000_000 ? 14 : volume >= 1_000_000 ? 8 : 0) + (change >= 20 ? 8 : 0) - risk * .12)));
+        return { item, price, change, volume, surge, risk, pattern, finalScore };
       })
-      .filter((pick) => pick.baseFinalScore >= 58 || pick.reasoning.priority >= 2)
-      .sort((a, b) => b.reasoning.priority - a.reasoning.priority || b.finalScore - a.finalScore)
-      .slice(0, 20);
-    persistRecommendationSnapshots(items.map(({ item, price, change, volume, finalScore, reasoning }) =>
-      recommendationEntryFromItem(item, "?�합 최종 ?�보", {
-        price,
-        score: finalScore,
-        statusLabel: reasoning?.decision ?? null,
-        changePercent: change,
-        volume,
-        reasons: reasoning?.reasons,
-        warnings: reasoning?.cautions,
-      })
-    ), { category: "?�합 최종 ?�보" });
+      .filter((pick) => pick.finalScore >= 62)
+      .sort((a, b) => b.finalScore - a.finalScore)
+      .slice(0, 10);
     panel.innerHTML = `
       <section class="accumulation-hero">
         <div>
           <p class="section-kicker">Integrated Picks</p>
-          <h2>?�합 최종 ?�보</h2>
-          <p class="section-copy">?�시�??��? ?�보, ??�� 감시, 매집/?�턴 ?�수�??�께 보고 과열 ?�험??감점???�전???�선?�위?�니??</p>
+          <h2>통합 최종 후보</h2>
+          <p class="section-copy">실시간 단타 후보, 폭등 감시, 매집/패턴 점수를 함께 보고 과열 위험을 감점한 실전용 우선순위입니다.</p>
         </div>
         <div class="hero-scoreboard">
-          <div class="score-card"><span>?�보</span><strong>${items.length}</strong></div>
-          <div class="score-card"><span>기�?</span><strong>초입 ?�선</strong></div>
+          <div class="score-card"><span>후보</span><strong>${items.length}</strong></div>
+          <div class="score-card"><span>기준</span><strong>62점 이상</strong></div>
         </div>
       </section>
-      ${items.length ? items.map(({ item, price, change, volume, surge, risk, pattern, finalScore, signalBonus, reasoning }) => `
+      ${items.length ? items.map(({ item, price, change, volume, surge, risk, pattern, finalScore }) => `
         <article class="kbk-pro-top-card">
           <div class="kbk-pro-top-head">
             <div><h3>${textEscape(item.symbol)}</h3><p>${textEscape(item.name || item.symbol)}</p></div>
             <div class="kbk-pro-top-score">${finalScore}</div>
           </div>
           <div class="price-row">
-            <strong>${pairedMoney(price)}</strong>
+            <strong>${money(price)}</strong>
             <span>${pct(change)}</span>
-            <span>거래??${compact(volume)}</span>
+            <span>거래량 ${compact(volume)}</span>
           </div>
           <div class="kbk-pro-top-grid">
-            <div><span>??�� 감시</span><b>${surge}??/b></div>
-            <div><span>?�턴</span><b>${pattern}??/b></div>
-            <div><span>?�험</span><b>${risk}??/b></div>
-            <div><span>?�합</span><b>${finalScore}??{signalBonus ? ` (${signalBonus > 0 ? "+" : ""}${signalBonus})` : ""}</b></div>
-          </div>
-          <div class="kbk-pro-top-meta">
-            <div><span>?�정 ?�유</span><p>${reasoning.reasons.map(textEscape).join(" · ")}</p></div>
-            <div><span>주의 ?�인</span><p>${reasoning.cautions.map(textEscape).join(" · ")}</p></div>
-            <div class="kbk-pro-top-decision"><span>최종 ?�단</span><b>${textEscape(reasoning.decision)}</b></div>
+            <div><span>폭등 감시</span><b>${surge}점</b></div>
+            <div><span>패턴</span><b>${pattern}점</b></div>
+            <div><span>위험</span><b>${risk}점</b></div>
+            <div><span>통합</span><b>${finalScore}점</b></div>
           </div>
         </article>
-      `).join("") : `<section class="kbk-empty-note">?�재 ?�합 기�????�과???�보가 ?�습?�다. ?�로고침?�로 ?�시 ?�인??주세??</section>`}
+      `).join("") : `<section class="kbk-empty-note">현재 통합 기준을 통과한 후보가 없습니다. 새로고침으로 다시 확인해 주세요.</section>`}
     `;
   } catch (error) {
-    panel.innerHTML = `<section class="kbk-empty-note">?�합 ?�보 계산???�패?�습?�다: ${textEscape(error.message)}</section>`;
+    panel.innerHTML = `<section class="kbk-empty-note">통합 후보 계산에 실패했습니다: ${textEscape(error.message)}</section>`;
   }
 }
-
-async function renderTopPicks() {
-  return renderTopPicksOnly();
-}
-
-window.__kbkRenderTopPicksOnly = renderTopPicksOnly;
 
 function handleRoute() {
   const path = window.location.pathname;
-  if (path === "/top-picks" || window.location.hash === "#top-picks") {
-    renderTopPicksOnly();
+  if (path === "/top-picks") {
+    renderTopPicks();
     return;
   }
   if (path === "/backtest") {
-    routeScroll("backtest-panel", "백테?�트 ?�면?�니?? ?�택 종목 ?�는 ?�체 분석 버튼?�로 ?�그???�후 ?�직임???�인?�니??");
+    routeScroll("backtest-panel", "백테스트 화면입니다. 선택 종목 또는 전체 분석 버튼으로 시그널 이후 움직임을 확인합니다.");
     return;
   }
   if (path === "/ai-analysis") {
-    routeScroll("debug-panel", "AI 분석 ?�면?�니?? ?�보 ?�정 근거?� 계산 ?�이?��? ?�인?�니??");
+    routeScroll("debug-panel", "AI 분석 화면입니다. 후보 선정 근거와 계산 데이터를 확인합니다.");
     return;
   }
   if (!PRO_ROUTES[path]) showAllPanels();
@@ -707,7 +337,7 @@ function clarifyEmptyAccumulation() {
   const note = document.createElement("section");
   note.id = "kbk-accumulation-empty-note";
   note.className = "kbk-empty-note";
-  note.textContent = "?�재 조건???�과??매집/급등 직전/?�보 ?�파 ?�보가 ?�습?�다. ?�이??로딩 ?�류가 ?�니?? 지�??�점???�터�?만족??종목???�다???�입?�다.";
+  note.textContent = "현재 조건을 통과한 매집/급등 직전/횡보 돌파 후보가 없습니다. 데이터 로딩 오류가 아니라, 지금 시점의 필터를 만족한 종목이 없다는 뜻입니다.";
   hero.insertAdjacentElement("afterend", note);
 }
 
@@ -722,153 +352,6 @@ async function fetchJson(url) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload?.ok === false) throw new Error(payload?.message || `API ${response.status}`);
   return payload.data || payload;
-}
-
-function readStoredScannerSnapshot() {
-  try {
-    const raw = localStorage.getItem(KBK_SCANNER_STORAGE_KEY);
-    const updatedAt = Number(localStorage.getItem("kbk:scanner:lastUpdatedAt"));
-    if (!raw || !Number.isFinite(updatedAt) || Date.now() - updatedAt > KBK_SCANNER_STORAGE_MAX_AGE) return null;
-    const payload = JSON.parse(raw);
-    const items = payload?.data?.items || payload?.items || [];
-    if (!Array.isArray(items) || !items.length) return null;
-    return new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
-  } catch {
-    return null;
-  }
-}
-
-async function loadScannerSnapshot() {
-  if (kbkScannerSnapshot) return kbkScannerSnapshot;
-  const stored = readStoredScannerSnapshot();
-  if (stored) {
-    kbkScannerSnapshot = stored;
-    return stored;
-  }
-  if (!kbkScannerSnapshotPromise) {
-    kbkScannerSnapshotPromise = fetchJson("/api/scanner")
-      .then((payload) => {
-        const items = payload?.data?.items || payload?.items || [];
-        kbkScannerSnapshot = new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
-        return kbkScannerSnapshot;
-      })
-      .catch(() => new Map())
-      .finally(() => {
-        kbkScannerSnapshotPromise = null;
-      });
-  }
-  return kbkScannerSnapshotPromise;
-}
-
-function symbolFromCardNode(card) {
-  const headingText = card?.querySelector?.("h3")?.textContent?.trim() || "";
-  const headingMatch = headingText.match(/\b[A-Z][A-Z0-9.-]{0,10}\b/);
-  if (headingMatch?.[0]) return headingMatch[0];
-  const textNodes = Array.from(card?.querySelectorAll?.("strong,b,span") || [])
-    .map((node) => (node.textContent || "").trim());
-  for (const text of textNodes) {
-    const match = text.match(/\b[A-Z][A-Z0-9.-]{0,10}\b/);
-    if (match?.[0]) return match[0];
-  }
-  return null;
-}
-
-function scoreFromCandidateRow(row) {
-  const scoreNode = row.querySelector("b.hot,b.warm,b.mid,b.cold");
-  return toNumber(scoreNode?.textContent?.trim()) ?? 0;
-}
-
-function applyVwapRetentionOrdering(snapshot) {
-  if (!(snapshot instanceof Map) || !snapshot.size || isTopPicksViewActive()) return;
-
-  document.querySelectorAll(".stock-grid").forEach((grid) => {
-    const cards = Array.from(grid.querySelectorAll(":scope > .stock-card"));
-    if (cards.length < 2) return;
-    const ranked = cards.map((card, index) => {
-      const symbol = symbolFromCardNode(card);
-      const item = symbol ? snapshot.get(symbol) : null;
-      const baseScore = cardScore(card) ?? 0;
-      const price = item ? (livePriceOf(item) ?? 0) : 0;
-      const change = item ? Number(item.changePercent ?? item.preMarketChangePercent ?? 0) : 0;
-      const volume = item ? Number(item.volume ?? item.preMarketVolume ?? 0) : 0;
-      const adjustment = item ? vwapRetentionAdjustment(item, price, volume, change).adjustment : 0;
-      card.dataset.kbkVwapAdjustment = String(adjustment);
-      return { card, index, total: baseScore + adjustment };
-    });
-    ranked.sort((a, b) => b.total - a.total || a.index - b.index).forEach(({ card }) => grid.appendChild(card));
-  });
-
-  document.querySelectorAll(".candidate-table tbody").forEach((tbody) => {
-    const rows = Array.from(tbody.querySelectorAll("tr[data-symbol]"));
-    if (rows.length < 2) return;
-    const ranked = rows.map((row, index) => {
-      const symbol = String(row.dataset.symbol || "").toUpperCase();
-      const item = symbol ? snapshot.get(symbol) : null;
-      const baseScore = scoreFromCandidateRow(row);
-      const price = item ? (livePriceOf(item) ?? 0) : 0;
-      const change = item ? Number(item.changePercent ?? item.preMarketChangePercent ?? 0) : 0;
-      const volume = item ? Number(item.volume ?? item.preMarketVolume ?? 0) : 0;
-      const adjustment = item ? vwapRetentionAdjustment(item, price, volume, change).adjustment : 0;
-      row.dataset.kbkVwapAdjustment = String(adjustment);
-      return { row, index, total: baseScore + adjustment };
-    });
-    ranked.sort((a, b) => b.total - a.total || a.index - b.index).forEach(({ row }) => tbody.appendChild(row));
-  });
-
-  captureVisibleRecommendations(snapshot);
-}
-
-function scheduleVwapRetentionOrdering() {
-  if (kbkVwapOrderingTimer) window.clearTimeout(kbkVwapOrderingTimer);
-  kbkVwapOrderingTimer = window.setTimeout(async () => {
-    const snapshot = await loadScannerSnapshot().catch(() => null);
-    if (snapshot) applyVwapRetentionOrdering(snapshot);
-  }, 180);
-}
-
-function captureVisibleRecommendations(snapshot) {
-  const category = currentRecommendationCategory();
-  if (!category || !(snapshot instanceof Map) || !snapshot.size) return;
-  const entries = [];
-
-  if (category === "?�시�??��?") {
-    document.querySelectorAll(".candidate-table tbody tr[data-symbol]").forEach((row) => {
-      const symbol = String(row.dataset.symbol || "").toUpperCase();
-      const item = snapshot.get(symbol);
-      if (!item) return;
-      const score = scoreFromCandidateRow(row);
-      const statusLabel = row.querySelector("td:nth-child(9) b,td:nth-child(9),td:last-child b")?.textContent?.trim()
-        || item?.entryAction?.action
-        || null;
-      entries.push(recommendationEntryFromItem(item, category, {
-        score,
-        statusLabel,
-        reasons: safeArray(item?.entryAction?.lines ?? item?.selectionReasons),
-      }));
-    });
-  } else {
-    document.querySelectorAll(".stock-grid .stock-card").forEach((card) => {
-      const symbol = symbolFromCardNode(card);
-      const item = symbol ? snapshot.get(symbol) : null;
-      if (!item) return;
-      const score = cardScore(card);
-      const statusLabel = card.querySelector(".signal-box strong,.accent-badge,.type-chip")?.textContent?.trim() || null;
-      entries.push(recommendationEntryFromItem(item, category, {
-        score,
-        statusLabel,
-      }));
-    });
-  }
-
-  persistRecommendationSnapshots(entries, { category });
-}
-
-function scheduleRecommendationSnapshotCapture() {
-  if (kbkRecommendationTimer) window.clearTimeout(kbkRecommendationTimer);
-  kbkRecommendationTimer = window.setTimeout(async () => {
-    const snapshot = await loadScannerSnapshot().catch(() => null);
-    if (snapshot) captureVisibleRecommendations(snapshot);
-  }, 260);
 }
 
 function normalizeBars(payload) {
@@ -921,23 +404,23 @@ function selectedSymbolFromMonitor() {
 function currentUsdKrw() {
   const match = document.body.textContent.match(/USD\/KRW\s*([\d,]+)/);
   const parsed = match ? Number(match[1].replace(/,/g, "")) : null;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1500;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 function krwMoneyFromUsd(usd) {
   const rate = currentUsdKrw();
   const value = Number(usd);
   if (!Number.isFinite(value) || !rate) return "-";
-  return `${Math.round(value * rate).toLocaleString("ko-KR")}??;
+  return `${Math.round(value * rate).toLocaleString("ko-KR")}원`;
 }
 
 function syncMonitorPriceBadge(symbol, price) {
   const summary = document.getElementById("monitor-summary");
   const value = Number(price);
   if (!summary || !symbol || !Number.isFinite(value)) return;
-  const label = `?�시�?분봉 ${money(value)} / ${krwMoneyFromUsd(value)} · ${new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
+  const label = `실시간 분봉 ${money(value)} / ${krwMoneyFromUsd(value)} · ${new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
   const candidates = Array.from(summary.querySelectorAll("*")).filter((node) =>
-    node.children.length === 0 && (/?�시�?분봉/.test(node.textContent || "") || /^\$[\d.]+\s*\/\s*[\d,]+??.test((node.textContent || "").trim()))
+    node.children.length === 0 && (/실시간|분봉/.test(node.textContent || "") || /^\$[\d.]+\s*\/\s*[\d,]+원/.test((node.textContent || "").trim()))
   );
   for (const node of candidates) node.textContent = label;
   if (!candidates.length) {
@@ -958,15 +441,15 @@ function syncRvolCopy(panel, quote) {
   const rvol = rvolValue(quote);
   const volume = toNumber(quote?.volume ?? quote?.preMarketVolume);
   const replacement = rvol === null
-    ? `RVOL?� ?�균 거래???�이?��? ?�어 계산 불�??�니?? ?�재 ?�적 거래?��? ${compact(volume)}?�니??`
-    : `RVOL?� ${rvol.toFixed(1)}배입?�다.`;
+    ? `RVOL은 평균 거래량 데이터가 없어 계산 불가입니다. 현재 누적 거래량은 ${compact(volume)}입니다.`
+    : `RVOL은 ${rvol.toFixed(1)}배입니다.`;
   const walker = document.createTreeWalker(panel, NodeFilter.SHOW_TEXT);
   const nodes = [];
   while (walker.nextNode()) nodes.push(walker.currentNode);
   for (const node of nodes) {
     const text = node.nodeValue || "";
-    if (/RVOL[?��?]?\s*1\.0�?.test(text)) {
-      node.nodeValue = text.replace(/RVOL[?��?]?\s*1\.0�?^.??*(\.|?�니??.)?/g, replacement);
+    if (/RVOL[이은]?\s*1\.0배/.test(text)) {
+      node.nodeValue = text.replace(/RVOL[이은]?\s*1\.0배[^.。]*(\.|입니다\.)?/g, replacement);
     }
   }
 }
@@ -979,7 +462,7 @@ function pctFrom(a, b) {
 }
 
 function latestUsablePrice(quote, bars) {
-  const quotePrice = livePriceOf(quote);
+  const quotePrice = toNumber(quote?.price ?? quote?.preMarketPrice);
   const barPrice = bars.at(-1)?.close ?? null;
   if (barPrice !== null && quotePrice !== null) {
     const drift = Math.abs((barPrice - quotePrice) / quotePrice) * 100;
@@ -1005,62 +488,62 @@ function fastSignalDecision({ quote, bars, price, vwap, entryLow, entryHigh, rec
 
   if (!aboveVwap) {
     return {
-      action: "기다리세??,
+      action: "기다리세요",
       tone: "hold",
-      headline: "VWAP ?�복 ?�입?�다.",
-      reason: "거래?�이 ?�어??VWAP ?�래?�서???��? 진입 ?�뢰?��? ?�어집니??",
+      headline: "VWAP 회복 전입니다.",
+      reason: "거래량이 있어도 VWAP 아래에서는 단타 진입 신뢰도가 떨어집니다.",
     };
   }
   if (tooExtended) {
     return {
-      action: "추격 금�?",
+      action: "추격 금지",
       tone: "profit",
-      headline: "?��? 기�??�에??많이 벌어졌습?�다.",
-      reason: "?�승?� 강하지�?지금�? ?�림 ?�는 ?�돌???�인?????�리?�니??",
+      headline: "이미 기준선에서 많이 벌어졌습니다.",
+      reason: "상승은 강하지만 지금은 눌림 또는 재돌파 확인이 더 유리합니다.",
     };
   }
   if (strongVolume && inEntryZone && trendUp) {
     return {
-      action: "진입 가??,
+      action: "진입 가능",
       tone: "buy",
-      headline: "거래?�과 분봉 추세가 진입 구간?�서 같이 붙었?�니??",
-      reason: `RVOL ${rvol !== null ? rvol.toFixed(1) + "�? : "-"} / ?�일?��?${previousDayRatio !== null ? previousDayRatio.toFixed(1) + "�? : "-"} / 3�?변??${pct(shortReturn)}`,
+      headline: "거래량과 분봉 추세가 진입 구간에서 같이 붙었습니다.",
+      reason: `RVOL ${rvol !== null ? rvol.toFixed(1) + "배" : "-"} / 전일대비 ${previousDayRatio !== null ? previousDayRatio.toFixed(1) + "배" : "-"} / 3봉 변화 ${pct(shortReturn)}`,
     };
   }
   if (strongVolume && breakout && trendUp) {
     return {
-      action: "?�파 ?�인",
+      action: "돌파 확인",
       tone: "buy",
-      headline: "직전 분봉 고점 ?�파?� 거래??조건??같이 ?�혔?�니??",
-      reason: `?�재가가 최근 ?�기 고점권을 ?�어?�고 거래??배수가 강합?�다. ?�절?� ATR/VWAP 기�??�로 짧게 봐야 ?�니??`,
+      headline: "직전 분봉 고점 돌파와 거래량 조건이 같이 잡혔습니다.",
+      reason: `현재가가 최근 단기 고점권을 넘어섰고 거래량 배수가 강합니다. 손절은 ATR/VWAP 기준으로 짧게 봐야 합니다.`,
     };
   }
   if (strongVolume && trendUp) {
     return {
-      action: "관???��?",
+      action: "관심 유지",
       tone: "watch",
-      headline: "거래?��? 강하지�?진입 기�????�확?�이 ?�요?�니??",
-      reason: "가격이 진입 구간???�거???�기 고점???�시 ?�는지 ?�인?�세??",
+      headline: "거래량은 강하지만 진입 기준선 재확인이 필요합니다.",
+      reason: "가격이 진입 구간에 닿거나 단기 고점을 다시 넘는지 확인하세요.",
     };
   }
   return {
-    action: "기다리세??,
+    action: "기다리세요",
     tone: "hold",
-    headline: "거래???�는 ?�기 추세 ?�인???�직 부족합?�다.",
-    reason: "RVOL, ?�일 ?��?거래?? VWAP, ?�기 고점 ?�파가 ?�시??붙어??빠른 진입 ?�호�?바뀝니??",
+    headline: "거래량 또는 단기 추세 확인이 아직 부족합니다.",
+    reason: "RVOL, 전일 대비 거래량, VWAP, 단기 고점 돌파가 동시에 붙어야 빠른 진입 신호로 바뀝니다.",
   };
 }
 
 function updateFastSignalCard(panel, decision) {
   const className = decision.tone === "buy" ? "buy" : decision.tone === "profit" ? "profit" : "hold";
   const html = `
-    <span>?��? 기�? ?�호</span>
+    <span>단타 기준 신호</span>
     <strong>${textEscape(decision.action)}</strong>
     <small>${textEscape(decision.headline)}</small>
     <p>${textEscape(decision.reason)}</p>
   `;
   const card = Array.from(panel.querySelectorAll("section, article, div"))
-    .filter((node) => /?��? 기�? ?�호/.test(node.textContent || ""))
+    .filter((node) => /단타 기준 신호/.test(node.textContent || ""))
     .sort((a, b) => (a.textContent || "").length - (b.textContent || "").length)[0];
   if (card) {
     card.classList.add("kbk-pro-fast-signal", `kbk-pro-fast-${className}`);
@@ -1087,11 +570,11 @@ function setMetricByLabel(panel, label, value) {
 }
 
 function syncLegacyPriceMetrics(panel, levels) {
-  setMetricByLabel(panel, "?�재가", krwMoneyFromUsd(levels.price));
-  setMetricByLabel(panel, "진입 검??구간", `${krwMoneyFromUsd(levels.entryLow)} ~ ${krwMoneyFromUsd(levels.entryHigh)}`);
-  setMetricByLabel(panel, "?�절 기�?", krwMoneyFromUsd(levels.atrStop));
-  setMetricByLabel(panel, "1�??�파 ?�인가", krwMoneyFromUsd(levels.entryHigh));
-  setMetricByLabel(panel, "2�??�파 ?�인가", krwMoneyFromUsd(levels.recentHigh * 1.035));
+  setMetricByLabel(panel, "현재가", krwMoneyFromUsd(levels.price));
+  setMetricByLabel(panel, "진입 검토 구간", `${krwMoneyFromUsd(levels.entryLow)} ~ ${krwMoneyFromUsd(levels.entryHigh)}`);
+  setMetricByLabel(panel, "손절 기준", krwMoneyFromUsd(levels.atrStop));
+  setMetricByLabel(panel, "1차 돌파 확인가", krwMoneyFromUsd(levels.entryHigh));
+  setMetricByLabel(panel, "2차 돌파 확인가", krwMoneyFromUsd(levels.recentHigh * 1.035));
   setMetricByLabel(panel, "목표가", krwMoneyFromUsd(levels.entryHigh));
 }
 
@@ -1126,13 +609,13 @@ function candleChartSvg(bars, currentPrice, levels) {
     return `<line class="level" x1="${pad}" x2="${width - pad}" y1="${yy.toFixed(1)}" y2="${yy.toFixed(1)}"></line><text class="label" x="${pad + 4}" y="${(yy - 4 - index % 2 * 10).toFixed(1)}">${label} ${money(value)}</text>`;
   }).join("");
   const last = bars.at(-1)?.close ?? currentPrice;
-  return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="?�체 캔들차트">
+  return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="자체 캔들차트">
     <line class="axis" x1="${pad}" x2="${width - pad}" y1="${height - pad}" y2="${height - pad}"></line>
     <line class="axis" x1="${pad}" x2="${pad}" y1="${pad}" y2="${height - pad}"></line>
     ${levelLines}
     ${vwapPath.trim() ? `<path class="vwap" d="${vwapPath}"></path>` : ""}
     ${candles}
-    <text class="label" x="${width - pad - 120}" y="${pad + 12}">?�재 ${money(last)}</text>
+    <text class="label" x="${width - pad - 120}" y="${pad + 12}">현재 ${money(last)}</text>
   </svg>`;
 }
 
@@ -1171,17 +654,17 @@ async function enhanceMonitorPanel() {
     chart.className = "kbk-pro-chart";
     chart.innerHTML = `
       <div class="kbk-pro-chart-head">
-        <div><strong>${textEscape(symbol)} ?�체 캔들차트</strong><span>최근 분봉 기�?, VWAP ?��? ?�선 / 진입·?�절 기�????�시</span></div>
+        <div><strong>${textEscape(symbol)} 자체 캔들차트</strong><span>최근 분봉 기준, VWAP 파란 점선 / 진입·손절 기준선 표시</span></div>
         <span>${new Date().toLocaleTimeString("ko-KR")}</span>
       </div>
-      ${candleChartSvg(bars, price, { VWAP: vwap, 진입: entryLow, ?�절: atrStop })}
+      ${candleChartSvg(bars, price, { VWAP: vwap, 진입: entryLow, 손절: atrStop })}
     `;
     const basis = document.createElement("section");
     basis.className = "kbk-pro-basis";
     basis.innerHTML = `
-      <div><span>진입가 계산 근거</span><b>${money(entryLow)} ~ ${money(entryHigh)}</b><small>VWAP ???��? + 최근 20�?분봉 고점 ?�파권을 기�??�로 계산?�습?�다.</small></div>
-      <div><span>ATR 기반 ?�절</span><b>${money(atrStop)} ${stopPct !== null ? `(${pct(stopPct)})` : ""}</b><small>최근 14�?분봉 ATR ${atr ? money(atr) : "-"}?� 직전 지지?�을 ?�께 반영?�습?�다.</small></div>
-      <div><span>검�??�인??/span><b>VWAP / 거래??/ 고점 ?�파</b><small>?�재가가 VWAP ?�래�??�려가거나 ?�파 거래?�이 ?�하�??�규 진입??보류?�니??</small></div>
+      <div><span>진입가 계산 근거</span><b>${money(entryLow)} ~ ${money(entryHigh)}</b><small>VWAP 위 유지 + 최근 20개 분봉 고점 돌파권을 기준으로 계산했습니다.</small></div>
+      <div><span>ATR 기반 손절</span><b>${money(atrStop)} ${stopPct !== null ? `(${pct(stopPct)})` : ""}</b><small>최근 14개 분봉 ATR ${atr ? money(atr) : "-"}와 직전 지지선을 함께 반영했습니다.</small></div>
+      <div><span>검증 포인트</span><b>VWAP / 거래량 / 고점 돌파</b><small>현재가가 VWAP 아래로 내려가거나 돌파 거래량이 약하면 신규 진입을 보류합니다.</small></div>
     `;
     panel.querySelector(".kbk-pro-chart")?.remove();
     panel.querySelector(".kbk-pro-basis")?.remove();
@@ -1200,7 +683,7 @@ async function renderBacktestExpectation() {
   const box = document.createElement("section");
   box.id = "kbk-pro-expectancy";
   box.className = "kbk-pro-alert-box";
-  box.textContent = "?�률/기�?�??�계�?계산?�는 중입?�다.";
+  box.textContent = "승률/기대값 통계를 계산하는 중입니다.";
   target.prepend(box);
   try {
     const payload = await fetchJson("/api/scanner");
@@ -1211,12 +694,12 @@ async function renderBacktestExpectation() {
     const avgMove = sample.reduce((sum, item) => sum + Number(item.changePercent ?? item.preMarketChangePercent ?? 0), 0) / Math.max(sample.length, 1);
     const risk = sample.reduce((sum, item) => sum + Number(item.riskScore ?? 50), 0) / Math.max(sample.length, 1);
     box.innerHTML = `
-      <strong>?�재 ?�보�?기�?�??�약</strong><br>
-      ?�본 ${sample.length}�?· 75???�상 ${high.length}�?· ?�균 ?�수 ${Math.round(avgScore)}??· ?�균 ?�승�?${pct(avgMove)} · ?�균 ?�험 ${Math.round(risk)}??br>
-      ?�제 ?�률?� ?�래 ?�그??기록???�일?�록 백테?�트 ?�이블에??검증됩?�다. 지�??�시???�재 ?�보군의 조건 강도 ?�약?�니??
+      <strong>현재 후보군 기대값 요약</strong><br>
+      표본 ${sample.length}개 · 75점 이상 ${high.length}개 · 평균 점수 ${Math.round(avgScore)}점 · 평균 상승률 ${pct(avgMove)} · 평균 위험 ${Math.round(risk)}점<br>
+      실제 승률은 아래 시그널 기록이 쌓일수록 백테스트 테이블에서 검증됩니다. 지금 표시는 현재 후보군의 조건 강도 요약입니다.
     `;
   } catch (error) {
-    box.textContent = `?�률/기�?�??�계 계산 ?�패: ${error.message}`;
+    box.textContent = `승률/기대값 통계 계산 실패: ${error.message}`;
   }
 }
 
@@ -1227,34 +710,15 @@ function boot() {
   handleRoute();
   clarifyEmptyAccumulation();
   patchFloatingPointText();
-  scheduleVwapRetentionOrdering();
-  scheduleRecommendationSnapshotCapture();
-  window.__kbkPersistRecommendationSnapshots = persistRecommendationSnapshots;
 
   const observer = new MutationObserver(() => {
     patchFloatingPointText();
     ensureRouteLinks();
     clarifyEmptyAccumulation();
     enhanceMonitorPanel();
-    scheduleVwapRetentionOrdering();
-    scheduleRecommendationSnapshotCapture();
   });
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
   window.addEventListener("popstate", handleRoute);
-  window.addEventListener("hashchange", handleRoute);
-  document.addEventListener("click", (event) => {
-    const trigger = event.target.closest(".filter-chip,.menu-link");
-    if (trigger) {
-      const normalized = normalizeRecommendationCategory(trigger.textContent);
-      if (normalized) window.__kbkActiveCategoryKey = normalized;
-    }
-    window.setTimeout(scheduleRecommendationSnapshotCapture, 160);
-  });
-  for (let i = 1; i <= 8; i += 1) {
-    window.setTimeout(scheduleVwapRetentionOrdering, i * 350);
-    window.setTimeout(scheduleRecommendationSnapshotCapture, i * 420);
-  }
 }
 
 ready(() => window.setTimeout(boot, 250));
-
