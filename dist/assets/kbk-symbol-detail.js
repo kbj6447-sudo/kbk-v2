@@ -801,6 +801,26 @@ function trendOf(item) {
   return trendLabel(item);
 }
 
+function topPickVwapRetentionAdjustment(item, price, change, volume, setupBias) {
+  const vwap = String(vwapState(item));
+  const vwapAbove = vwap.includes("위") || vwap.toLowerCase().includes("above");
+  const vwapNear = vwap.includes("근처") || vwap.toLowerCase().includes("near");
+  const vwapBelow = vwap.includes("아래") || vwap.toLowerCase().includes("below");
+  const higherLow = num(item?.higherLowScore) ?? setupBias?.higherLow ?? 50;
+  const vwapHold = num(item?.vwapHoldScore) ?? setupBias?.vwapHold ?? 50;
+  const reclaim = num(item?.vwapReclaimScore) ?? setupBias?.reclaim ?? 50;
+  const volumeAcceleration = num(item?.volumeAccelerationScore) ?? setupBias?.volumeAcceleration ?? 50;
+  const heavyVolumeWeakness = vwapBelow && change < 0 && (volumeAcceleration >= 65 || volume >= 1_000_000 || (setupBias?.rvol ?? 0) >= 3);
+  const suspiciousBreakdown = vwapBelow && (reclaim >= 60 || vwapHold >= 58);
+  if (vwapAbove && higherLow >= 65) return 10;
+  if (!vwapAbove && (vwapNear || reclaim >= 60)) return 7;
+  if (vwapAbove) return 5;
+  if (heavyVolumeWeakness) return -15;
+  if (suspiciousBreakdown) return -10;
+  if (vwapBelow) return -8;
+  return 0;
+}
+
 function scoreTopPick(item) {
   const price = priceUsd(item) ?? 0;
   const change = changePct(item);
@@ -817,6 +837,7 @@ function scoreTopPick(item) {
   const vwapGood = vwap.includes("위") || vwap.includes("near") || vwap.includes("근처");
   const trendGood = trend === "상승";
   const setupBias = setupBiasOf(item, price, change, rvol, vwapGood, trendGood);
+  const vwapRetentionAdjustment = topPickVwapRetentionAdjustment(item, price, change, volume, setupBias);
   const volumeGood = volume >= 1_000_000 || rvol >= 3;
   const lowPriceBonus = price > 0 && price <= 8 ? 6 : 0;
   const sweetChange = change >= 4 && change <= 35 ? 20 : change > 35 && change <= 60 ? 6 : change > 60 ? -18 : change >= 1 ? 10 : 0;
@@ -863,7 +884,8 @@ function scoreTopPick(item) {
       + setupBias.riskPenalty * 0.8
   );
   const safetyScore = clampScore(100 - chaseRisk);
-  const finalScore = Math.round(clampScore(scalpScore * 0.38 + surgeScore * 0.27 + setupScore * 0.25 + safetyScore * 0.10 + setupBias.earlyBonus * 0.2 - setupBias.riskPenalty * 0.25));
+  const baseFinalScore = Math.round(clampScore(scalpScore * 0.38 + surgeScore * 0.27 + setupScore * 0.25 + safetyScore * 0.10 + setupBias.earlyBonus * 0.2 - setupBias.riskPenalty * 0.25));
+  const finalScore = Math.round(clampScore(baseFinalScore + vwapRetentionAdjustment));
 
   let verdict = "관찰 후보";
   if (finalScore >= 78 && chaseRisk < 62) verdict = "최우선 단타 후보";
@@ -900,7 +922,9 @@ function scoreTopPick(item) {
     surgeScore: Math.round(surgeScore),
     setupScore: Math.round(setupScore),
     chaseRisk: Math.round(chaseRisk),
+    baseFinalScore,
     finalScore,
+    vwapRetentionAdjustment,
     verdict,
     setupBias,
     reasons: reasons.length ? reasons : ["가격/거래량 구조 감시"],
@@ -1309,7 +1333,7 @@ async function loadTopPicks() {
       .filter((pick) => pick.volume >= 500_000 || pick.rvol >= 3)
       .filter((pick) => !pick.setupBias?.underDollarLowRvol || pick.setupBias?.strongEarlySignal)
       .filter((pick) => pick.chaseRisk < 85)
-      .filter((pick) => pick.finalScore >= 62 || pick.scalpScore >= 72 || pick.surgeScore >= 72)
+      .filter((pick) => pick.baseFinalScore >= 62 || pick.scalpScore >= 72 || pick.surgeScore >= 72)
       .sort((a, b) => (b.setupBias?.strongEarlySignal ? 1 : 0) - (a.setupBias?.strongEarlySignal ? 1 : 0) || b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk)
       .slice(0, 20);
     if (scored.length < 20) {

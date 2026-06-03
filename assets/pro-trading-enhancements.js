@@ -57,6 +57,44 @@ function rvolValue(item) {
   return toNumber(item?.volumeRatio ?? item?.relativeVolume);
 }
 
+const KBK_SCANNER_STORAGE_KEY = "kbk:scanner:lastResponse";
+const KBK_SCANNER_STORAGE_MAX_AGE = 30 * 60 * 1000;
+let kbkScannerSnapshot = null;
+let kbkScannerSnapshotPromise = null;
+let kbkVwapOrderingTimer = null;
+
+function vwapRetentionAdjustment(item, price, volume, change) {
+  const setup = topPickSetupProfile(item, price, volume, change);
+  const priceWeakWithVolume = setup.vwapBelow
+    && change < 0
+    && (setup.volumeAcceleration >= 65 || (setup.rvol !== null && setup.rvol >= 3));
+  const rebreakdown = setup.vwapBelow && (setup.reclaim >= 60 || setup.vwapHold >= 58);
+  const reclaiming = !setup.vwapAbove && (setup.vwapNear || setup.reclaim >= 60);
+  const aboveHigherLow = setup.vwapAbove && setup.higherLow >= 65;
+  let adjustment = 0;
+  let label = "neutral";
+  if (aboveHigherLow) {
+    adjustment = 10;
+    label = "vwap-above-higher-low";
+  } else if (reclaiming) {
+    adjustment = 7;
+    label = "vwap-reclaim";
+  } else if (setup.vwapAbove) {
+    adjustment = 5;
+    label = "vwap-above";
+  } else if (priceWeakWithVolume) {
+    adjustment = -15;
+    label = "vwap-below-volume-weak";
+  } else if (rebreakdown) {
+    adjustment = -10;
+    label = "vwap-rebreakdown";
+  } else if (setup.vwapBelow) {
+    adjustment = -8;
+    label = "vwap-below";
+  }
+  return { adjustment, label, setup };
+}
+
 function topPickSetupProfile(item, price, volume, change) {
   const rvol = rvolValue(item);
   const rsi = toNumber(item?.rsi ?? item?.technical?.rsi);
@@ -132,6 +170,7 @@ function topPickSetupProfile(item, price, volume, change) {
 
 function topPickSignalScore(item, price, volume, change) {
   const setup = topPickSetupProfile(item, price, volume, change);
+  const vwapRetention = vwapRetentionAdjustment(item, price, volume, change);
   const volumeAcceleration = toNumber(item?.volumeAccelerationScore) ?? 50;
   const higherLow = toNumber(item?.higherLowScore) ?? 50;
   const vwapHold = toNumber(item?.vwapHoldScore) ?? 50;
@@ -151,7 +190,7 @@ function topPickSignalScore(item, price, volume, change) {
     + setup.earlyBonus
     - setup.riskPenalty;
   const signalBonus = Math.max(-32, Math.min(14, Math.round(rawSignalBonus)));
-  return { signalBonus, volumeBonus, changeBonus, rvol: setup.rvol, setup };
+  return { signalBonus, volumeBonus, changeBonus, rvol: setup.rvol, setup, vwapRetention };
 }
 
 function topPickReasoning(item, metrics) {
@@ -465,11 +504,12 @@ async function renderTopPicksOnly() {
         const pattern = Math.round(Number(item.patternSimilarityScore ?? 50));
         const signal = topPickSignalScore(item, price, volume, change);
         const baseScore = surge * .55 + pattern * .2 + signal.volumeBonus + signal.changeBonus - risk * .12;
-        const finalScore = Math.round(Math.max(0, Math.min(100, baseScore + signal.signalBonus)));
+        const baseFinalScore = Math.round(Math.max(0, Math.min(100, baseScore + signal.signalBonus)));
+        const finalScore = Math.round(Math.max(0, Math.min(100, baseFinalScore + signal.vwapRetention.adjustment)));
         const reasoning = topPickReasoning(item, { change, volume, surge, risk, pattern, finalScore, rvol: signal.rvol, setup: signal.setup });
-        return { item, price, change, volume, surge, risk, pattern, finalScore, signalBonus: signal.signalBonus, reasoning };
+        return { item, price, change, volume, surge, risk, pattern, baseFinalScore, finalScore, signalBonus: signal.signalBonus, reasoning };
       })
-      .filter((pick) => pick.finalScore >= 58 || pick.reasoning.priority >= 2)
+      .filter((pick) => pick.baseFinalScore >= 58 || pick.reasoning.priority >= 2)
       .sort((a, b) => b.reasoning.priority - a.reasoning.priority || b.finalScore - a.finalScore)
       .slice(0, 20);
     panel.innerHTML = `
@@ -561,6 +601,98 @@ async function fetchJson(url) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload?.ok === false) throw new Error(payload?.message || `API ${response.status}`);
   return payload.data || payload;
+}
+
+function readStoredScannerSnapshot() {
+  try {
+    const raw = localStorage.getItem(KBK_SCANNER_STORAGE_KEY);
+    const updatedAt = Number(localStorage.getItem("kbk:scanner:lastUpdatedAt"));
+    if (!raw || !Number.isFinite(updatedAt) || Date.now() - updatedAt > KBK_SCANNER_STORAGE_MAX_AGE) return null;
+    const payload = JSON.parse(raw);
+    const items = payload?.data?.items || payload?.items || [];
+    if (!Array.isArray(items) || !items.length) return null;
+    return new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
+  } catch {
+    return null;
+  }
+}
+
+async function loadScannerSnapshot() {
+  if (kbkScannerSnapshot) return kbkScannerSnapshot;
+  const stored = readStoredScannerSnapshot();
+  if (stored) {
+    kbkScannerSnapshot = stored;
+    return stored;
+  }
+  if (!kbkScannerSnapshotPromise) {
+    kbkScannerSnapshotPromise = fetchJson("/api/scanner")
+      .then((payload) => {
+        const items = payload?.data?.items || payload?.items || [];
+        kbkScannerSnapshot = new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
+        return kbkScannerSnapshot;
+      })
+      .catch(() => new Map())
+      .finally(() => {
+        kbkScannerSnapshotPromise = null;
+      });
+  }
+  return kbkScannerSnapshotPromise;
+}
+
+function symbolFromCardNode(card) {
+  const text = card?.querySelector?.("h3,strong")?.textContent?.trim() || "";
+  return text.match(/\b[A-Z][A-Z0-9.-]{0,10}\b/)?.[0] || null;
+}
+
+function scoreFromCandidateRow(row) {
+  const scoreNode = row.querySelector("b.hot,b.warm,b.mid,b.cold");
+  return toNumber(scoreNode?.textContent?.trim()) ?? 0;
+}
+
+function applyVwapRetentionOrdering(snapshot) {
+  if (!(snapshot instanceof Map) || !snapshot.size || isTopPicksViewActive()) return;
+
+  document.querySelectorAll(".stock-grid").forEach((grid) => {
+    const cards = Array.from(grid.querySelectorAll(":scope > .stock-card"));
+    if (cards.length < 2) return;
+    const ranked = cards.map((card, index) => {
+      const symbol = symbolFromCardNode(card);
+      const item = symbol ? snapshot.get(symbol) : null;
+      const baseScore = cardScore(card) ?? 0;
+      const price = item ? (livePriceOf(item) ?? 0) : 0;
+      const change = item ? Number(item.changePercent ?? item.preMarketChangePercent ?? 0) : 0;
+      const volume = item ? Number(item.volume ?? item.preMarketVolume ?? 0) : 0;
+      const adjustment = item ? vwapRetentionAdjustment(item, price, volume, change).adjustment : 0;
+      card.dataset.kbkVwapAdjustment = String(adjustment);
+      return { card, index, total: baseScore + adjustment };
+    });
+    ranked.sort((a, b) => b.total - a.total || a.index - b.index).forEach(({ card }) => grid.appendChild(card));
+  });
+
+  document.querySelectorAll(".candidate-table tbody").forEach((tbody) => {
+    const rows = Array.from(tbody.querySelectorAll("tr[data-symbol]"));
+    if (rows.length < 2) return;
+    const ranked = rows.map((row, index) => {
+      const symbol = String(row.dataset.symbol || "").toUpperCase();
+      const item = symbol ? snapshot.get(symbol) : null;
+      const baseScore = scoreFromCandidateRow(row);
+      const price = item ? (livePriceOf(item) ?? 0) : 0;
+      const change = item ? Number(item.changePercent ?? item.preMarketChangePercent ?? 0) : 0;
+      const volume = item ? Number(item.volume ?? item.preMarketVolume ?? 0) : 0;
+      const adjustment = item ? vwapRetentionAdjustment(item, price, volume, change).adjustment : 0;
+      row.dataset.kbkVwapAdjustment = String(adjustment);
+      return { row, index, total: baseScore + adjustment };
+    });
+    ranked.sort((a, b) => b.total - a.total || a.index - b.index).forEach(({ row }) => tbody.appendChild(row));
+  });
+}
+
+function scheduleVwapRetentionOrdering() {
+  if (kbkVwapOrderingTimer) window.clearTimeout(kbkVwapOrderingTimer);
+  kbkVwapOrderingTimer = window.setTimeout(async () => {
+    const snapshot = await loadScannerSnapshot().catch(() => null);
+    if (snapshot) applyVwapRetentionOrdering(snapshot);
+  }, 180);
 }
 
 function normalizeBars(payload) {
@@ -919,12 +1051,14 @@ function boot() {
   handleRoute();
   clarifyEmptyAccumulation();
   patchFloatingPointText();
+  scheduleVwapRetentionOrdering();
 
   const observer = new MutationObserver(() => {
     patchFloatingPointText();
     ensureRouteLinks();
     clarifyEmptyAccumulation();
     enhanceMonitorPanel();
+    scheduleVwapRetentionOrdering();
   });
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
   window.addEventListener("popstate", handleRoute);
