@@ -252,6 +252,70 @@ function calculateVolumeAcceleration(bars, source = null) {
   };
 }
 
+function calculateSurgeAccelerationScore(bars, item = {}, liveQuote = {}, commonSignals = {}) {
+  if (!Array.isArray(bars) || bars.length < 20) {
+    return {
+      surgeAccelerationScore: 0,
+      volumeAcceleration5mWindow: null,
+      tradeValueAcceleration5mWindow: null,
+    };
+  }
+
+  const windowStats = (items) => {
+    const clean = items
+      .map((bar) => ({
+        close: positive(bar.close),
+        volume: positive(bar.volume),
+      }))
+      .filter((bar) => bar.close !== null && bar.volume !== null);
+    if (clean.length < 5) return { volume: null, tradeValue: null };
+    return {
+      volume: sum(clean.map((bar) => bar.volume)),
+      tradeValue: sum(clean.map((bar) => bar.close * bar.volume)),
+    };
+  };
+  const current = windowStats(bars.slice(-5));
+  const prior = windowStats(bars.slice(-20, -15));
+  const minVolumeDenominator = 10_000;
+  const minTradeValueDenominator = 10_000;
+  const volumeAcceleration5mWindow = current.volume !== null && prior.volume !== null && prior.volume >= minVolumeDenominator
+    ? current.volume / prior.volume
+    : null;
+  const tradeValueAcceleration5mWindow = current.tradeValue !== null && prior.tradeValue !== null && prior.tradeValue >= minTradeValueDenominator
+    ? current.tradeValue / prior.tradeValue
+    : null;
+  const accelerationPoints = (value) => {
+    if (value === null) return 0;
+    if (value >= 5) return 35;
+    if (value >= 3) return 25;
+    if (value >= 2) return 15;
+    if (value >= 1.3) return 8;
+    return 0;
+  };
+
+  const relativeVolume = num(liveQuote.relativeVolume) ?? num(liveQuote.volumeRatio) ?? num(item.relativeVolume) ?? num(item.volumeRatio);
+  const aboveVwap = liveQuote.aboveVwap === true || item.aboveVwap === true || (num(commonSignals.vwapHoldMinutes) ?? 0) > 0 || (num(commonSignals.vwapReclaimScore) ?? 0) >= 58;
+  const higherLow = (num(commonSignals.higherLowScore) ?? num(item.higherLowScore) ?? 50) >= 58;
+  const trendText = String(liveQuote.oneMinuteTrend || item.oneMinuteTrend || item.technical?.oneMinuteTrend || "").toLowerCase();
+  const oneMinuteUp = trendText.includes("up") || trendText.includes("상승");
+  const changePercent = num(liveQuote.changePercent) ?? num(item.changePercent) ?? num(item.preMarketChangePercent);
+  const rsi = num(liveQuote.rsi) ?? num(item.rsi) ?? num(item.technical?.rsi);
+
+  let score = accelerationPoints(volumeAcceleration5mWindow) + accelerationPoints(tradeValueAcceleration5mWindow);
+  if (relativeVolume !== null) score += relativeVolume >= 5 ? 15 : relativeVolume >= 3 ? 10 : 0;
+  if (aboveVwap) score += 5;
+  if (higherLow) score += 5;
+  if (oneMinuteUp) score += 5;
+  if ((changePercent ?? 0) >= 80) score -= 20;
+  if ((rsi ?? 0) >= 88) score -= 15;
+
+  return {
+    surgeAccelerationScore: Math.round(clamp(score)),
+    volumeAcceleration5mWindow,
+    tradeValueAcceleration5mWindow,
+  };
+}
+
 function buildVwapEvaluations(bars, lookback = 30) {
   const sample = bars.slice(-lookback);
   let totalNotional = 0;
@@ -1051,7 +1115,12 @@ module.exports = async function handler(req, res) {
         const boostedScannerScore = Math.round(clamp(baseScannerScore + rankAuxiliaryScore));
         const boostedFinalScore = Math.round(clamp(baseFinalScore + rankAuxiliaryScore));
         const quality = volumeQualityScore({ ...normalizedItem, ...compactObject(liveQuote) });
-        const volumeAdjustedFinalScore = Math.round(clamp(boostedFinalScore * 0.85 + quality.score * 0.15));
+        const surgeAcceleration = calculateSurgeAccelerationScore(chartSnapshot.bars || [], normalizedItem, liveQuote, commonSignals);
+        const volumeAdjustedFinalScore = Math.round(clamp(
+          boostedFinalScore * 0.70
+          + quality.score * 0.15
+          + surgeAcceleration.surgeAccelerationScore * 0.15,
+        ));
         const finalProbabilityScore = quality.score < 30
           ? Math.min(volumeAdjustedFinalScore, 69)
           : volumeAdjustedFinalScore;
@@ -1074,11 +1143,12 @@ module.exports = async function handler(req, res) {
           ...compactObject(liveQuote),
           ...commonSignals,
           rankAuxiliaryScore,
+          ...surgeAcceleration,
           volumeQualityScore: quality.score,
           tradeValueKrw: quality.tradeValueKrw,
           scannerScore,
           finalProbabilityScore,
-          volumeQualitySortScore: finalProbabilityScore + (quality.score * 0.03),
+          volumeQualitySortScore: finalProbabilityScore + (quality.score * 0.03) + (surgeAcceleration.surgeAccelerationScore * 0.04),
           sourceTags: [...new Set([
             ...(Array.isArray(normalizedItem.sourceTags) ? normalizedItem.sourceTags : []),
             batchQuoteMap.has(symbolKey) ? "yahoo-v7-batch" : null,
