@@ -1,4 +1,9 @@
-﻿const POLL_MS = 3000;
+﻿import {
+  finalDecision,
+  renderFinalDecisionHeroHtml,
+} from "./final-decision.js";
+
+const POLL_MS = 3000;
 
 let selectedSymbol = null;
 let pollTimer = null;
@@ -1132,11 +1137,43 @@ function enrichTopPickDecision(pick) {
     cautions.push("嫄곕옒???鍮?媛寃??쎌꽭");
   }
 
+  const vwapStateRaw = String(item?.technical?.vwapState ?? item?.vwapState ?? "").toLowerCase();
+  const price = positiveNum(item?.price) ?? positiveNum(item?.preMarketPrice) ?? pick?.price ?? 0;
+  const vwapNum = vwapValue(item);
+  const vwapAbove = item?.aboveVwap === true || vwapStateRaw === "above"
+    || (price > 0 && vwapNum !== null && price >= vwapNum);
+  const vwapNear = !vwapAbove && price > 0 && vwapNum !== null && price >= vwapNum * 0.985;
+  const vwapFarBelow = item?.aboveVwap === false || vwapStateRaw === "below"
+    || (price > 0 && vwapNum !== null && price < vwapNum * 0.985);
+  const setup = pick?.setupBias ?? {};
+  const fd = finalDecision({
+    item,
+    setup: {
+      ...setup,
+      vwapAbove,
+      vwapNear,
+      vwapBelow: vwapFarBelow,
+      vwapRecovering: vwapAbove || vwapNear,
+    },
+    topPickScore: finalScore,
+    volumeQualityScore: explanation.volumeQualityScore,
+    surgeAccelerationScore: explanation.surgeAccelerationScore,
+    chaseRisk: pick?.chaseRisk ?? 0,
+    vwapLabel: vwap,
+    vwapAbove,
+    vwapNear,
+    vwapFarBelow,
+    rsi: setup.rsi,
+    change: pick?.change ?? 0,
+    higherLow: setup.higherLow,
+  });
+
   return {
     ...pick,
     preMarketChange,
     finalScore,
     verdict,
+    finalDecision: fd,
     reasons: reasons.length ? reasons : ["媛寃?嫄곕옒??援ъ“ 媛먯떆"],
     selectionSections: explanation.sections,
     detailReasons: explanation.detailReasons,
@@ -1193,6 +1230,24 @@ function ensureTopPickStyles() {
     .kbk-top-judgement.buy{background:#dcfce7;color:#166534}
     .kbk-top-judgement.watch{background:#fef3c7;color:#92400e}
     .kbk-top-judgement.block{background:#fee2e2;color:#991b1b}
+    .kbk-final-decision-hero{border-radius:16px;padding:16px 18px;margin-bottom:14px;border:2px solid rgba(15,23,42,.1)}
+    .kbk-final-kicker{margin:0 0 6px;font-size:.78rem;font-weight:900;color:#64748b}
+    .kbk-final-label{display:block;font-size:clamp(1.4rem,2.8vw,1.9rem);font-weight:950;line-height:1.15;margin:0 0 8px}
+    .kbk-final-confidence{margin:0 0 12px;font-size:.9rem;font-weight:800;color:#334155}
+    .kbk-final-confidence b{font-size:1.1rem}
+    .kbk-final-reasons-title{margin:0 0 8px;font-size:.82rem;font-weight:900;color:#475569}
+    .kbk-final-reasons ul{margin:0;padding:0;list-style:none;display:grid;gap:6px}
+    .kbk-final-reasons li{font-size:.84rem;font-weight:800;line-height:1.4}
+    .kbk-final-reasons li.ok{color:#166534}
+    .kbk-final-reasons li.warn{color:#b45309}
+    .kbk-final-buy{background:#ecfdf5;border-color:#86efac}
+    .kbk-final-buy .kbk-final-label{color:#047857}
+    .kbk-final-pullback{background:#fffbeb;border-color:#fcd34d}
+    .kbk-final-pullback .kbk-final-label{color:#b45309}
+    .kbk-final-watch{background:#f8fafc;border-color:#cbd5e1}
+    .kbk-final-watch .kbk-final-label{color:#475569}
+    .kbk-final-block{background:#fef2f2;border-color:#fca5a5}
+    .kbk-final-block .kbk-final-label{color:#b91c1c}
     .kbk-top-note{background:#fff7ed;border:1px solid rgba(249,115,22,.22);border-radius:20px;color:#7c2d12;padding:16px 18px;line-height:1.65}
     .kbk-top-loading,.kbk-top-empty{background:#fff;border:1px solid rgba(15,23,42,.12);border-radius:20px;padding:22px;color:#334155}
     @media (max-width:1100px){.kbk-top-grid{grid-template-columns:1fr}.kbk-top-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.kbk-top-detail-grid{grid-template-columns:1fr}}
@@ -1262,6 +1317,7 @@ function renderTopPicks(picks, updatedAt) {
       const verdictTone = pick.verdict === '留ㅼ닔 媛?? || pick.verdict === '理쒖슦???⑦? ?꾨낫' ? 'buy' : pick.verdict === '愿李? || pick.verdict === '?곸쐞 媛먯떆 ?꾨낫' ? 'watch' : 'block';
       return ''
         + '<article class="kbk-top-card" data-top-pick-card="' + esc(pick.symbol) + '" tabindex="0" role="button" aria-expanded="false">'
+        +   renderFinalDecisionHeroHtml(pick.finalDecision, esc)
         +   '<div class="kbk-top-head">'
         +     '<div>'
         +       '<h3>' + esc(pick.symbol) + '</h3>'
@@ -1299,9 +1355,10 @@ function renderTopPicks(picks, updatedAt) {
         +         '<h4>理쒖쥌 ?먮떒</h4>'
         +         '<div class="kbk-top-judgement ' + verdictTone + '">' + esc(pick.verdict) + '</div>'
         +         '<ul>'
-        +           '<li>?듯빀 ?먯닔: ' + pick.finalScore + '??/li>'
-        +           '<li>湲곕낯 ?먯닔: ' + pick.baseFinalScore + '??/li>'
-        +           '<li>異붽꺽 由ъ뒪?? ' + pick.chaseRisk + '??/li>'
+        +           '<li>통합 점수: ' + pick.finalScore + '점</li>'
+        +           '<li>기본 점수: ' + pick.baseFinalScore + '점</li>'
+        +           '<li>추격 위험: ' + pick.chaseRisk + '점</li>'
+        +           '<li>단타 시그널: ' + esc(pick.finalDecision?.scalpAction ?? '-') + '</li>'
         +         '</ul>'
         +       '</section>'
         +     '</div>'

@@ -1,4 +1,10 @@
-﻿const PRO_ROUTES = {
+﻿import {
+  computeChaseRisk,
+  finalDecision,
+  renderFinalDecisionHeroHtml,
+} from "./final-decision.js";
+
+const PRO_ROUTES = {
   "/backtest": "backtest-panel",
   "/ai-analysis": "debug-panel",
 };
@@ -439,6 +445,24 @@ function ensureStyles() {
     .kbk-pro-top-explain-block ul{margin:0;padding:0;list-style:none;display:grid;gap:5px}
     .kbk-pro-top-explain-block li{color:#334155;font-size:.8rem;font-weight:800;line-height:1.4}
     .kbk-pro-top-caution li{color:#b45309}
+    .kbk-final-decision-hero{border-radius:14px;padding:16px 18px;margin-bottom:12px;border:2px solid rgba(15,23,42,.1)}
+    .kbk-final-kicker{margin:0 0 6px;font-size:.78rem;font-weight:900;color:#64748b;letter-spacing:.04em}
+    .kbk-final-label{display:block;font-size:clamp(1.45rem,3vw,2rem);font-weight:950;line-height:1.15;margin:0 0 8px}
+    .kbk-final-confidence{margin:0 0 12px;font-size:.92rem;font-weight:800;color:#334155}
+    .kbk-final-confidence b{font-size:1.15rem;color:inherit}
+    .kbk-final-reasons-title{margin:0 0 8px;font-size:.82rem;font-weight:900;color:#475569}
+    .kbk-final-reasons ul{margin:0;padding:0;list-style:none;display:grid;gap:6px}
+    .kbk-final-reasons li{font-size:.84rem;font-weight:800;line-height:1.4}
+    .kbk-final-reasons li.ok{color:#166534}
+    .kbk-final-reasons li.warn{color:#b45309}
+    .kbk-final-buy{background:#ecfdf5;border-color:#86efac}
+    .kbk-final-buy .kbk-final-label{color:#047857}
+    .kbk-final-pullback{background:#fffbeb;border-color:#fcd34d}
+    .kbk-final-pullback .kbk-final-label{color:#b45309}
+    .kbk-final-watch{background:#f8fafc;border-color:#cbd5e1}
+    .kbk-final-watch .kbk-final-label{color:#475569}
+    .kbk-final-block{background:#fef2f2;border-color:#fca5a5}
+    .kbk-final-block .kbk-final-label{color:#b91c1c}
     @media (max-width:1100px){
       .accumulation-hero{grid-template-columns:1fr!important}
       .stock-grid{grid-template-columns:repeat(2,minmax(240px,1fr))!important}
@@ -615,7 +639,46 @@ async function renderTopPicksOnly() {
           rvol: signal.rvol,
           setup: signal.setup,
         });
-        return { item, price, change, volume, surge, risk, pattern, finalScore, signalBonus: signal.signalBonus, reasoning };
+        const setup = signal.setup ?? {};
+        const trendRaw = String(item?.oneMinuteTrend ?? "").toLowerCase();
+        const trendGood = trendRaw.includes("up") || trendRaw.includes("상승") || item?.technical?.ma5vs20 === "above";
+        const vwapGood = setup.vwapAbove || setup.vwapNear || setup.vwapRecovering;
+        const chaseRisk = computeChaseRisk(item, {
+          change,
+          risk,
+          vwapGood,
+          trendGood,
+          riskPenalty: setup.riskPenalty,
+          setup,
+        });
+        const fd = finalDecision({
+          item,
+          setup,
+          topPickScore: finalScore,
+          volumeQualityScore: reasoning.volumeQualityScore,
+          surgeAccelerationScore: reasoning.surgeAccelerationScore,
+          chaseRisk,
+          vwapAbove: setup.vwapAbove,
+          vwapNear: setup.vwapNear,
+          vwapFarBelow: setup.vwapBelow && !setup.vwapNear,
+          rsi: setup.rsi,
+          change,
+          higherLow: setup.higherLow ?? topPickItemField(item, "higherLowScore"),
+        });
+        return {
+          item,
+          price,
+          change,
+          volume,
+          surge,
+          risk,
+          pattern,
+          finalScore,
+          signalBonus: signal.signalBonus,
+          reasoning,
+          chaseRisk,
+          finalDecision: fd,
+        };
       })
       .filter((pick) => pick.finalScore >= 58 || pick.reasoning.priority >= 2)
       .sort((a, b) => b.reasoning.priority - a.reasoning.priority || b.finalScore - a.finalScore)
@@ -632,8 +695,9 @@ async function renderTopPicksOnly() {
           <div class="score-card"><span>湲곗?</span><strong>珥덉엯 ?곗꽑</strong></div>
         </div>
       </section>
-      ${items.length ? items.map(({ item, price, change, volume, surge, risk, pattern, finalScore, signalBonus, reasoning }) => `
+      ${items.length ? items.map(({ item, price, change, volume, surge, risk, pattern, finalScore, signalBonus, reasoning, chaseRisk, finalDecision: fd }) => `
         <article class="kbk-pro-top-card">
+          ${renderFinalDecisionHeroHtml(fd, textEscape)}
           <div class="kbk-pro-top-head">
             <div><h3>${textEscape(item.symbol)}</h3><p>${textEscape(item.name || item.symbol)}</p></div>
             <div class="kbk-pro-top-score">${finalScore}</div>
@@ -647,14 +711,14 @@ async function renderTopPicksOnly() {
             <div><span>??벑 媛먯떆</span><b>${surge}??/b></div>
             <div><span>嫄곕옒???덉쭏</span><b>${reasoning.volumeQualityScore ?? "-"}??/b></div>
             <div><span>?섍툒 媛??/span><b>${reasoning.surgeAccelerationScore ?? "-"}??/b></div>
-            <div><span>?듯빀</span><b>${finalScore}??{signalBonus ? ` (${signalBonus > 0 ? "+" : ""}${signalBonus})` : ""}</b></div>
+            <div><span>추격 위험</span><b>${chaseRisk}점</b></div>
           </div>
           <div class="kbk-pro-top-meta" style="grid-template-columns:1fr">
             <div><span>?좎젙 ?댁쑀</span><p>${reasoning.reasons.map(textEscape).join(" 쨌 ")}</p>
               <div class="kbk-pro-top-explain">${renderTopPickSectionHtml(reasoning.sections || [])}</div>
             </div>
             <div class="kbk-pro-top-caution"><span>二쇱쓽 ?붿씤</span><p>${reasoning.cautions.map((line) => `??${textEscape(line)}`).join(" 쨌 ")}</p></div>
-            <div class="kbk-pro-top-decision"><span>理쒖쥌 ?먮떒</span><b>${textEscape(reasoning.decision)}</b></div>
+            <div class="kbk-pro-top-decision"><span>레거시 요약</span><b>${textEscape(reasoning.decision)}</b><small> · 단타 ${textEscape(fd.scalpAction)}</small></div>
           </div>
         </article>
       `).join("") : `<section class="kbk-empty-note">?꾩옱 ?듯빀 湲곗????듦낵???꾨낫媛 ?놁뒿?덈떎. ?덈줈怨좎묠?쇰줈 ?ㅼ떆 ?뺤씤??二쇱꽭??</section>`}
