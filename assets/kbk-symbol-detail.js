@@ -5,6 +5,7 @@ let pollTimer = null;
 let lastQuote = null;
 let lastBars = [];
 let usdKrw = 1365;
+let selectedCardScoreData = null;
 
 const fmt = new Intl.NumberFormat("ko-KR");
 
@@ -21,6 +22,32 @@ function esc(value) {
 function num(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+function scoreNum(value) {
+  const direct = num(value);
+  if (direct !== null) return direct;
+  const match = String(value ?? "").replace(/,/g, "").match(/-?\d+(\.\d+)?/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function representativeScoreOf(item) {
+  const candidates = [
+    item?.score,
+    item?.finalScore,
+    item?.totalScore,
+    item?.scannerScore,
+    item?.accumulationScore,
+    item?.accumulation?.score,
+    item?.qualityScore,
+    item?.rankScore,
+    item?.volumeQualityScore,
+  ].map(scoreNum);
+  return candidates.find((value) => value !== null && value > 0)
+    ?? candidates.find((value) => value !== null)
+    ?? 0;
 }
 
 function pct(value) {
@@ -78,7 +105,7 @@ function analyzeSignal(quote, bars) {
   const price = priceUsd(quote);
   const change = changePct(quote);
   const risk = num(quote?.riskScore) ?? 50;
-  const probability = num(quote?.finalProbabilityScore) ?? num(quote?.scannerScore) ?? 0;
+  const probability = representativeScoreOf(quote);
   const pattern = num(quote?.patternSimilarityScore) ?? 0;
   const vwap = vwapState(quote);
   const trend = trendLabel(quote);
@@ -322,7 +349,15 @@ async function refreshDetail(symbol, loading = false) {
       fetchJson(`/api/history?symbol=${encodeURIComponent(symbol)}&from=${from}`).catch(() => null),
       fetchJson(`/api/exchange`).catch(() => null),
     ]);
-    lastQuote = quotePayload.data ?? quotePayload;
+    const quoteData = quotePayload.data ?? quotePayload;
+    lastQuote = {
+      ...(selectedCardScoreData ?? {}),
+      ...quoteData,
+      accumulation: {
+        ...(selectedCardScoreData?.accumulation ?? {}),
+        ...(quoteData?.accumulation ?? {}),
+      },
+    };
     lastBars = historyPayload ? normalizeBars(historyPayload) : fallbackBars(lastQuote);
     usdKrw = num(exchangePayload?.rate) ?? num(exchangePayload?.usdKrw) ?? num(exchangePayload?.data?.rate) ?? usdKrw;
     shell.innerHTML = detailHtml(lastQuote, lastBars, loading);
@@ -341,6 +376,7 @@ function selectSymbol(symbol, card) {
   selectedSymbol = symbol.toUpperCase();
   lastQuote = null;
   lastBars = [];
+  selectedCardScoreData = scoreDataFromCard(card);
   document.querySelectorAll(".stock-card.kbk-selected-card,.setup-card.kbk-selected-card").forEach((el) => el.classList.remove("kbk-selected-card"));
   card?.classList.add("kbk-selected-card");
   refreshDetail(selectedSymbol, true);
@@ -350,6 +386,7 @@ function selectSymbol(symbol, card) {
 
 function closeDetail() {
   selectedSymbol = null;
+  selectedCardScoreData = null;
   window.clearInterval(pollTimer);
   pollTimer = null;
   document.querySelectorAll(".stock-card.kbk-selected-card,.setup-card.kbk-selected-card").forEach((el) => el.classList.remove("kbk-selected-card"));
@@ -365,6 +402,22 @@ document.addEventListener("click", (event) => {
   if (!symbol) return;
   selectSymbol(symbol, card);
 });
+
+function scoreDataFromCard(card) {
+  if (!card) return null;
+  const readScore = (selector) => scoreNum(card.querySelector(selector)?.textContent);
+  const accumulationScore = readScore(".kbk-accumulation-score");
+  const finalScore = readScore(".kbk-top-score");
+  const score = readScore(".score-number");
+  const data = {};
+  if (score !== null) data.score = score;
+  if (finalScore !== null) data.finalScore = finalScore;
+  if (accumulationScore !== null) {
+    data.accumulationScore = accumulationScore;
+    data.accumulation = { score: accumulationScore };
+  }
+  return Object.keys(data).length ? data : null;
+}
 
 function ensureClarifierStyles() {
   if (document.getElementById("kbk-scanner-clarifier-style")) return;
