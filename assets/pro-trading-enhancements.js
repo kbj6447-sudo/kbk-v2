@@ -382,7 +382,7 @@ function renderTopPickSectionHtml(sections) {
   return sections.map((section) => `
     <div class="kbk-pro-top-explain-block">
       <strong>${textEscape(section.title)}</strong>
-      <ul>${section.lines.map((line) => `<li>??${textEscape(line)}</li>`).join("")}</ul>
+      <ul>${section.lines.map((line) => `<li>• ${textEscape(line)}</li>`).join("")}</ul>
     </div>
   `).join("");
 }
@@ -509,9 +509,9 @@ function topPickReasoning(item, metrics) {
 
   if (volumeQuality.contributed) {
     volumeQualityLines.push(`거래량 품질 점수 ${volumeQuality.score}점`);
-    if (volume >= 500_000) volumeQualityLines.push(`嫄곕옒??${compact(volume)}`);
+    if (volume >= 500_000) volumeQualityLines.push(`거래량 ${compact(volume)}`);
     const dollarText = formatKrwFromUsdDollar(volumeQuality.dollarVolume);
-    if (dollarText) volumeQualityLines.push(`嫄곕옒?湲?${dollarText}`);
+    if (dollarText) volumeQualityLines.push(`거래대금 ${dollarText}`);
     if (rvol >= 1.5 && volumeQuality.rvolScore >= 48) {
       volumeQualityLines.push(`RVOL ${rvol.toFixed(1)}배로 평균 대비 거래가 붙었습니다`);
     }
@@ -532,23 +532,23 @@ function topPickReasoning(item, metrics) {
     }
   }
 
-  if (setup.vwapAbove) technicalLines.push("VWAP ???좎?");
-  else if (topPickItemField(item, "vwapReclaimScore") >= 60) technicalLines.push("VWAP ?щ룎???쒕룄");
-  if (topPickItemField(item, "higherLowScore") >= 60) technicalLines.push("Higher Low ?뺤꽦");
-  if (topPickItemField(item, "compressionScore") >= 70) technicalLines.push("?뺤텞援ш컙 ?뚰뙆 ?쒕룄");
-  if (topPickItemField(item, "reSurgeSetupScore") >= 65) technicalLines.push("?뚮┝ ???ъ긽??援ъ“");
+  if (setup.vwapAbove) technicalLines.push("VWAP 위 유지");
+  else if (topPickItemField(item, "vwapReclaimScore") >= 60) technicalLines.push("VWAP 회복 시도");
+  if (topPickItemField(item, "higherLowScore") >= 60) technicalLines.push("Higher Low 형성");
+  if (topPickItemField(item, "compressionScore") >= 70) technicalLines.push("박스권 돌파 시도");
+  if (topPickItemField(item, "reSurgeSetupScore") >= 65) technicalLines.push("눌림 후 재상승 구조");
 
-  if (setup.highFailed) cautions.push("?대? ?ш쾶 ?ㅻⅨ ??怨좎젏?먯꽌 諛?몄뒿?덈떎");
+  if (setup.highFailed) cautions.push("이미 단기 고점 대비 급락 후 반등에 실패했습니다");
   if (setup.rsi !== null && setup.rsi >= 70) cautions.push(`RSI ${Math.round(setup.rsi)}`);
-  if (metrics.change >= 42) cautions.push(`?뱀씪 ${pct(metrics.change)} ?곸듅`);
-  if (setup.extremeRvolWeak) cautions.push("RVOL? ?믪?留?媛寃??먮쫫???쏀빀?덈떎");
-  if (setup.vwapBelow) cautions.push("VWAP ?꾨옒");
-  if (metrics.risk >= 70) cautions.push("異붽꺽 ?꾪뿕 ?먯닔媛 ?믪뒿?덈떎");
+  if (metrics.change >= 42) cautions.push(`당일 ${pct(metrics.change)} 상승`);
+  if (setup.extremeRvolWeak) cautions.push("RVOL은 높지만 가격 추세가 약합니다");
+  if (setup.vwapBelow) cautions.push("VWAP 아래");
+  if (metrics.risk >= 70) cautions.push("추격 위험 점수가 높습니다");
 
   const sections = [];
-  if (volumeQualityLines.length) sections.push({ title: "嫄곕옒???덉쭏", lines: volumeQualityLines });
-  if (surgeAccelerationLines.length) sections.push({ title: "?섍툒 媛?띾룄", lines: surgeAccelerationLines });
-  if (technicalLines.length) sections.push({ title: "湲곗닠???⑦꽩", lines: technicalLines });
+  if (volumeQualityLines.length) sections.push({ title: "거래량 품질", lines: volumeQualityLines });
+  if (surgeAccelerationLines.length) sections.push({ title: "수급 가속도", lines: surgeAccelerationLines });
+  if (technicalLines.length) sections.push({ title: "기술적 패턴", lines: technicalLines });
 
   let decision = "관찰";
   if (setup.overheated || setup.highFailed || setup.extremeRvolWeak || metrics.risk >= 78 || metrics.finalScore < 58) {
@@ -752,8 +752,8 @@ function ensureRouteLinks() {
   if (!menu) return;
 
   const configs = [
-    { label: "諛깊뀒?ㅽ듃", path: "/backtest", target: "backtest-panel" },
-    { label: "AI 遺꾩꽍", path: "/ai-analysis", target: "debug-panel" },
+    { label: "백테스트", path: "/backtest", target: "backtest-panel" },
+    { label: "AI 분석", path: "/ai-analysis", target: "debug-panel" },
     { label: "통합 최종 후보", path: "/top-picks", target: "kbk-pro-top-picks" },
   ];
 
@@ -928,12 +928,12 @@ async function renderTopPicksOnly() {
       <section class="accumulation-hero">
         <div>
           <p class="section-kicker">Integrated Picks</p>
-          <h2>?듯빀 理쒖쥌 ?꾨낫</h2>
-          <p class="section-copy">?ㅼ떆媛??⑦? ?꾨낫, ??벑 媛먯떆, 留ㅼ쭛/?⑦꽩 ?먯닔瑜??④퍡 蹂닿퀬 怨쇱뿴 ?꾪뿕??媛먯젏???ㅼ쟾???곗꽑?쒖쐞?낅땲??</p>
+          <h2>통합 최종 후보</h2>
+          <p class="section-copy">실시간 단타 후보, 급등 감시, 매집/패턴 점수를 함께 보고 과열 위험은 감점해 우선순위를 둡니다.</p>
         </div>
         <div class="hero-scoreboard">
-          <div class="score-card"><span>?꾨낫</span><strong>${items.length}</strong></div>
-          <div class="score-card"><span>湲곗?</span><strong>珥덉엯 ?곗꽑</strong></div>
+          <div class="score-card"><span>후보</span><strong>${items.length}</strong></div>
+          <div class="score-card"><span>기준</span><strong>초입 우선</strong></div>
         </div>
       </section>
       ${items.length ? items.map(({ item, price, change, volume, surge, risk, pattern, finalScore, signalBonus, reasoning, chaseRisk, finalDecision: fd }) => `
@@ -946,26 +946,26 @@ async function renderTopPicksOnly() {
           <div class="price-row">
             <strong>${pairedMoney(price)}</strong>
             <span>${pct(change)}</span>
-            <span>嫄곕옒??${compact(volume)}</span>
+            <span>거래량 ${compact(volume)}</span>
           </div>
           <div class="kbk-pro-top-grid">
-            <div><span>??벑 媛먯떆</span><b>${surge}??/b></div>
-            <div><span>嫄곕옒???덉쭏</span><b>${reasoning.volumeQualityScore ?? "-"}??/b></div>
-            <div><span>?섍툒 媛??/span><b>${reasoning.surgeAccelerationScore ?? "-"}??/b></div>
+            <div><span>급등 감시</span><b>${surge}점</b></div>
+            <div><span>거래량 품질</span><b>${reasoning.volumeQualityScore ?? "-"}점</b></div>
+            <div><span>수급 가속</span><b>${reasoning.surgeAccelerationScore ?? "-"}점</b></div>
             <div><span>추격 위험</span><b>${chaseRisk}점</b></div>
           </div>
           <div class="kbk-pro-top-meta" style="grid-template-columns:1fr">
-            <div><span>?좎젙 ?댁쑀</span><p>${reasoning.reasons.map(textEscape).join(" 쨌 ")}</p>
+            <div><span>선정 사유</span><p>${reasoning.reasons.map(textEscape).join(" · ")}</p>
               <div class="kbk-pro-top-explain">${renderTopPickSectionHtml(reasoning.sections || [])}</div>
             </div>
-            <div class="kbk-pro-top-caution"><span>二쇱쓽 ?붿씤</span><p>${reasoning.cautions.map((line) => `??${textEscape(line)}`).join(" 쨌 ")}</p></div>
+            <div class="kbk-pro-top-caution"><span>주의 포인트</span><p>${reasoning.cautions.map((line) => `• ${textEscape(line)}`).join(" · ")}</p></div>
             <div class="kbk-pro-top-decision"><span>레거시 요약</span><b>${textEscape(reasoning.decision)}</b>${fd ? `<small> · 단타 ${textEscape(fd.scalpAction)}</small>` : ""}</div>
           </div>
         </article>
-      `).join("") : `<section class="kbk-empty-note">?꾩옱 ?듯빀 湲곗????듦낵???꾨낫媛 ?놁뒿?덈떎. ?덈줈怨좎묠?쇰줈 ?ㅼ떆 ?뺤씤??二쇱꽭??</section>`}
+      `).join("") : `<section class="kbk-empty-note">현재 통합 기준을 통과한 후보가 없습니다. 새로고침으로 다시 확인해 주세요.</section>`}
     `;
   } catch (error) {
-    panel.innerHTML = `<section class="kbk-empty-note">?듯빀 ?꾨낫 怨꾩궛???ㅽ뙣?덉뒿?덈떎: ${textEscape(error.message)}</section>`;
+    panel.innerHTML = `<section class="kbk-empty-note">통합 후보 계산에 실패했습니다: ${textEscape(error.message)}</section>`;
   }
 }
 
@@ -982,11 +982,11 @@ function handleRoute() {
     return;
   }
   if (path === "/backtest") {
-    routeScroll("backtest-panel", "諛깊뀒?ㅽ듃 ?붾㈃?낅땲?? ?좏깮 醫낅ぉ ?먮뒗 ?꾩껜 遺꾩꽍 踰꾪듉?쇰줈 ?쒓렇???댄썑 ?吏곸엫???뺤씤?⑸땲??");
+    routeScroll("backtest-panel", "백테스트 화면입니다. 선택 종목 또는 전체 분석 버튼으로 스캔 이후 움직임을 확인합니다.");
     return;
   }
   if (path === "/ai-analysis") {
-    routeScroll("debug-panel", "AI 遺꾩꽍 ?붾㈃?낅땲?? ?꾨낫 ?좎젙 洹쇨굅? 怨꾩궛 ?곗씠?곕? ?뺤씤?⑸땲??");
+    routeScroll("debug-panel", "AI 분석 화면입니다. 후보 선정 근거와 계산 데이터를 확인합니다.");
     return;
   }
   if (!PRO_ROUTES[path]) showAllPanels();
@@ -1001,7 +1001,7 @@ function clarifyEmptyAccumulation() {
   const note = document.createElement("section");
   note.id = "kbk-accumulation-empty-note";
   note.className = "kbk-empty-note";
-  note.textContent = "?꾩옱 議곌굔???듦낵??留ㅼ쭛/湲됰벑 吏곸쟾/?〓낫 ?뚰뙆 ?꾨낫媛 ?놁뒿?덈떎. ?곗씠??濡쒕뵫 ?ㅻ쪟媛 ?꾨땲?? 吏湲??쒖젏???꾪꽣瑜?留뚯”??醫낅ぉ???녿떎???살엯?덈떎.";
+  note.textContent = "현재 조건을 통과한 매집/급등 직전/돌파 후보가 없습니다. 데이터 로딩 오류가 아니라 지금 시점의 필터를 만족할 종목이 없다는 뜻입니다.";
   hero.insertAdjacentElement("afterend", note);
 }
 
@@ -1082,7 +1082,7 @@ function syncMonitorPriceBadge(symbol, price) {
   const summary = document.getElementById("monitor-summary");
   const value = Number(price);
   if (!summary || !symbol || !Number.isFinite(value)) return;
-  const label = `?ㅼ떆媛?遺꾨큺 ${money(value)} / ${krwMoneyFromUsd(value)} 쨌 ${new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
+  const label = `실시간 구간 ${money(value)} / ${krwMoneyFromUsd(value)} · ${new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
   const candidates = Array.from(summary.querySelectorAll("*")).filter((node) =>
     node.children.length === 0 && (/실시간 구간/.test(node.textContent || "") || /^\$[\d.]+\s*\/\s*[\d,]+/.test((node.textContent || "").trim()))
   );
@@ -1201,7 +1201,7 @@ function fastSignalDecision({ quote, bars, price, vwap, entryLow, entryHigh, rec
 function updateFastSignalCard(panel, decision) {
   const className = decision.tone === "buy" ? "buy" : decision.tone === "profit" ? "profit" : "hold";
   const html = `
-    <span>?⑦? 湲곗? ?좏샇</span>
+    <span>단타 기준 신호</span>
     <strong>${textEscape(decision.action)}</strong>
     <small>${textEscape(decision.headline)}</small>
     <p>${textEscape(decision.reason)}</p>
@@ -1234,12 +1234,12 @@ function setMetricByLabel(panel, label, value) {
 }
 
 function syncLegacyPriceMetrics(panel, levels) {
-  setMetricByLabel(panel, "?꾩옱媛", krwMoneyFromUsd(levels.price));
-  setMetricByLabel(panel, "吏꾩엯 寃??援ш컙", `${krwMoneyFromUsd(levels.entryLow)} ~ ${krwMoneyFromUsd(levels.entryHigh)}`);
-  setMetricByLabel(panel, "?먯젅 湲곗?", krwMoneyFromUsd(levels.atrStop));
-  setMetricByLabel(panel, "1李??뚰뙆 ?뺤씤媛", krwMoneyFromUsd(levels.entryHigh));
-  setMetricByLabel(panel, "2李??뚰뙆 ?뺤씤媛", krwMoneyFromUsd(levels.recentHigh * 1.035));
-  setMetricByLabel(panel, "紐⑺몴媛", krwMoneyFromUsd(levels.entryHigh));
+  setMetricByLabel(panel, "현재가", krwMoneyFromUsd(levels.price));
+  setMetricByLabel(panel, "진입 검증 구간", `${krwMoneyFromUsd(levels.entryLow)} ~ ${krwMoneyFromUsd(levels.entryHigh)}`);
+  setMetricByLabel(panel, "손절 기준", krwMoneyFromUsd(levels.atrStop));
+  setMetricByLabel(panel, "1차 돌파 확인가", krwMoneyFromUsd(levels.entryHigh));
+  setMetricByLabel(panel, "2차 돌파 확인가", krwMoneyFromUsd(levels.recentHigh * 1.035));
+  setMetricByLabel(panel, "목표가", krwMoneyFromUsd(levels.entryHigh));
 }
 
 function candleChartSvg(bars, currentPrice, levels) {
@@ -1318,7 +1318,7 @@ async function enhanceMonitorPanel() {
     chart.className = "kbk-pro-chart";
     chart.innerHTML = `
       <div class="kbk-pro-chart-head">
-        <div><strong>${textEscape(symbol)} ?먯껜 罹붾뱾李⑦듃</strong><span>理쒓렐 遺꾨큺 湲곗?, VWAP ?뚮? ?먯꽑 / 吏꾩엯쨌?먯젅 湲곗????쒖떆</span></div>
+        <div><strong>${textEscape(symbol)} 분봉 캔들차트</strong><span>최근 분봉 기준, VWAP 회복 여부 / 진입·손절 기준선 표시</span></div>
         <span>${new Date().toLocaleTimeString("ko-KR")}</span>
       </div>
       ${candleChartSvg(bars, price, { VWAP: vwap, entry: entryLow, stop: atrStop })}
@@ -1326,9 +1326,9 @@ async function enhanceMonitorPanel() {
     const basis = document.createElement("section");
     basis.className = "kbk-pro-basis";
     basis.innerHTML = `
-      <div><span>吏꾩엯媛 怨꾩궛 洹쇨굅</span><b>${money(entryLow)} ~ ${money(entryHigh)}</b><small>VWAP ???좎? + 理쒓렐 20媛?遺꾨큺 怨좎젏 ?뚰뙆沅뚯쓣 湲곗??쇰줈 怨꾩궛?덉뒿?덈떎.</small></div>
-      <div><span>ATR 湲곕컲 ?먯젅</span><b>${money(atrStop)} ${stopPct !== null ? `(${pct(stopPct)})` : ""}</b><small>理쒓렐 14媛?遺꾨큺 ATR ${atr ? money(atr) : "-"}? 吏곸쟾 吏吏?좎쓣 ?④퍡 諛섏쁺?덉뒿?덈떎.</small></div>
-      <div><span>寃利??ъ씤??/span><b>VWAP / 嫄곕옒??/ 怨좎젏 ?뚰뙆</b><small>?꾩옱媛媛 VWAP ?꾨옒濡??대젮媛嫄곕굹 ?뚰뙆 嫄곕옒?됱씠 ?쏀븯硫??좉퇋 吏꾩엯??蹂대쪟?⑸땲??</small></div>
+      <div><span>진입가 계산 근거</span><b>${money(entryLow)} ~ ${money(entryHigh)}</b><small>VWAP 위 유지 + 최근 20개 분봉 고점 돌파선을 기준으로 계산했습니다.</small></div>
+      <div><span>ATR 기반 손절</span><b>${money(atrStop)} ${stopPct !== null ? `(${pct(stopPct)})` : ""}</b><small>최근 14개 분봉 ATR ${atr ? money(atr) : "-"}와 직전 지지선을 함께 반영했습니다.</small></div>
+      <div><span>검증 포인트</span><b>VWAP / 거래량 / 고점 돌파</b><small>현재가가 VWAP 아래로 내려가거나 돌파 거래량이 약하면 신규 진입은 보류합니다.</small></div>
     `;
     panel.querySelector(".kbk-pro-chart")?.remove();
     panel.querySelector(".kbk-pro-basis")?.remove();
@@ -1347,7 +1347,7 @@ async function renderBacktestExpectation() {
   const box = document.createElement("section");
   box.id = "kbk-pro-expectancy";
   box.className = "kbk-pro-alert-box";
-  box.textContent = "?밸쪧/湲곕?媛??듦퀎瑜?怨꾩궛?섎뒗 以묒엯?덈떎.";
+  box.textContent = "백테스트/기대값 통계를 계산하는 중입니다.";
   target.prepend(box);
   try {
     const payload = await fetchJson("/api/scanner");
@@ -1358,12 +1358,12 @@ async function renderBacktestExpectation() {
     const avgMove = sample.reduce((sum, item) => sum + Number(item.changePercent ?? item.preMarketChangePercent ?? 0), 0) / Math.max(sample.length, 1);
     const risk = sample.reduce((sum, item) => sum + Number(item.riskScore ?? 50), 0) / Math.max(sample.length, 1);
     box.innerHTML = `
-      <strong>?꾩옱 ?꾨낫援?湲곕?媛??붿빟</strong><br>
-      ?쒕낯 ${sample.length}媛?쨌 75???댁긽 ${high.length}媛?쨌 ?됯퇏 ?먯닔 ${Math.round(avgScore)}??쨌 ?됯퇏 ?곸듅瑜?${pct(avgMove)} 쨌 ?됯퇏 ?꾪뿕 ${Math.round(risk)}??br>
-      ?ㅼ젣 ?밸쪧? ?꾨옒 ?쒓렇??湲곕줉???볦씪?섎줉 諛깊뀒?ㅽ듃 ?뚯씠釉붿뿉??寃利앸맗?덈떎. 吏湲??쒖떆???꾩옱 ?꾨낫援곗쓽 議곌굔 媛뺣룄 ?붿빟?낅땲??
+      <strong>현재 후보군 기대값 요약</strong><br>
+      샘플 ${sample.length}건 · 75점 이상 ${high.length}건 · 평균 점수 ${Math.round(avgScore)}점 · 평균 상승률 ${pct(avgMove)} · 평균 위험 ${Math.round(risk)}점<br>
+      실제 백테스트는 아래 스캔 기록이 쌓이면 백테스트 테이블에서 검증됩니다. 지금 표시는 현재 후보군의 조건 강도 요약입니다.
     `;
   } catch (error) {
-    box.textContent = `?밸쪧/湲곕?媛??듦퀎 怨꾩궛 ?ㅽ뙣: ${error.message}`;
+    box.textContent = `백테스트/기대값 통계 계산 실패: ${error.message}`;
   }
 }
 
