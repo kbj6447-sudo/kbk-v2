@@ -151,6 +151,7 @@
     const rsi = rsiOf(item);
     const rvol = rvolOf(item);
     const change = changeOf(item);
+    const volumeQuality = num(item?.volumeQualityScore);
     let score = 0;
 
     if (change <= 5) score += 18;
@@ -192,6 +193,11 @@
     if (change >= 120) score -= 18;
     else if (change >= 70) score -= 10;
     if ((rsi ?? 0) >= 78) score -= 10;
+
+    if (volumeQuality !== null) {
+      score += Math.round((volumeQuality - 50) * 0.10);
+      if (volumeQuality < 30) score = Math.min(score, 59);
+    }
 
     return Math.round(clamp(score));
   }

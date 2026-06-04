@@ -41,6 +41,8 @@
     const pullback = item.technical?.pullbackVolumeSignal ?? false;
     const ma5vs20 = item.technical?.ma5vs20 ?? item.ma5vs20;
     const commonSignalBonus = Math.max(0, Math.min(10, Math.round(num(item.rankAuxiliaryScore) ?? 0)));
+    const volumeQuality = num(item.volumeQualityScore);
+    const volumeQualityBonus = volumeQuality === null ? 0 : Math.round((volumeQuality - 50) * 0.12);
 
     // 1. RVOL 점수 (핵심 - 가격 대비 거래량 폭발)
     // 아직 가격은 조용한데 거래량이 먼저 터지는 것이 핵심
@@ -89,10 +91,12 @@
 
     const total = rvolScore + rvolVsPricePremium + priceScore + stageScore +
                   vwapScore + trendScore + rsiScore + preSurgeBonus + pullbackBonus + maScore + commonSignalBonus;
+    const adjustedTotal = total + volumeQualityBonus;
+    const cappedTotal = volumeQuality !== null && volumeQuality < 30 ? Math.min(adjustedTotal, 44) : adjustedTotal;
 
     return {
-      total: Math.max(0, Math.min(100, Math.round(total))),
-      breakdown: { rvolScore, rvolVsPricePremium, priceScore, stageScore, vwapScore, trendScore, rsiScore, preSurgeBonus, pullbackBonus, maScore, commonSignalBonus }
+      total: Math.max(0, Math.min(100, Math.round(cappedTotal))),
+      breakdown: { rvolScore, rvolVsPricePremium, priceScore, stageScore, vwapScore, trendScore, rsiScore, preSurgeBonus, pullbackBonus, maScore, commonSignalBonus, volumeQualityBonus }
     };
   }
 

@@ -57,6 +57,45 @@ function volumeStrength(item) {
   return clamp(Math.max(rvolScore, rawScore));
 }
 
+function volumeQualityScore(item) {
+  const rawVolume = Math.max(num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0);
+  const relativeVolume = num(item.relativeVolume) ?? num(item.volumeRatio);
+  const priceUsd = num(item.price) ?? num(item.preMarketPrice) ?? num(item.regularMarketPrice);
+  const priceKrw = num(item.priceKrw);
+  const usdKrw = num(item.usdKrw) ?? num(item.exchangeRate) ?? 1350;
+  const tradeValueKrw = num(item.tradeValueKrw)
+    ?? num(item.tradingValueKrw)
+    ?? num(item.amountKrw)
+    ?? num(item.dollarVolumeKrw)
+    ?? (priceKrw !== null && rawVolume ? priceKrw * rawVolume : null)
+    ?? (priceUsd !== null && rawVolume ? priceUsd * rawVolume * usdKrw : null);
+
+  let score = 50;
+  if ((relativeVolume ?? 0) >= 3 && rawVolume < 100_000) score -= 25;
+  else if (rawVolume > 0 && rawVolume < 100_000) score -= 12;
+
+  if (tradeValueKrw !== null) {
+    if ((relativeVolume ?? 0) >= 3 && tradeValueKrw < 100_000_000) score -= 25;
+    else if (tradeValueKrw < 100_000_000) score -= 12;
+  }
+
+  if (rawVolume >= 5_000_000) score += 24;
+  else if (rawVolume >= 1_000_000) score += 14;
+  else if (rawVolume >= 500_000) score += 8;
+  else if (rawVolume >= 100_000) score += 4;
+
+  if (tradeValueKrw !== null) {
+    if (tradeValueKrw >= 1_000_000_000) score += 24;
+    else if (tradeValueKrw >= 500_000_000) score += 15;
+    else if (tradeValueKrw >= 100_000_000) score += 8;
+  }
+
+  return {
+    score: Math.round(clamp(score)),
+    tradeValueKrw: tradeValueKrw !== null ? Math.round(tradeValueKrw) : null,
+  };
+}
+
 function average(values) {
   const clean = values.map(num).filter((value) => value !== null && value > 0);
   if (!clean.length) return null;
@@ -869,19 +908,25 @@ async function normalizeItem(item, enrichVolume = true, metrics = null) {
   const merged = { ...item, ...compactObject(volumeProfile) };
   const boosted = boostedScore(merged);
   const correctedVolumeScore = volumeStrength(merged);
+  const quality = volumeQualityScore(merged);
+  const baseScannerScore = Math.max(num(merged.scannerScore) ?? 0, boosted);
+  const baseFinalScore = Math.max(num(merged.finalProbabilityScore) ?? 0, boosted);
 
   return {
     ...merged,
     volumeComputationVersion: "pro-rvol-v2",
     volume: Math.max(num(merged.volume) ?? 0, rawVolume) || item.volume,
     volumeStrengthScore: correctedVolumeScore,
-    scannerScore: Math.max(num(merged.scannerScore) ?? 0, boosted),
-    finalProbabilityScore: Math.max(num(merged.finalProbabilityScore) ?? 0, boosted),
+    volumeQualityScore: quality.score,
+    tradeValueKrw: quality.tradeValueKrw,
+    scannerScore: baseScannerScore,
+    finalProbabilityScore: baseFinalScore,
     selectionReasons: [
       ...(Array.isArray(merged.selectionReasons) ? merged.selectionReasons : []),
       volumeProfile.relativeVolume ? `RVOL ${volumeProfile.relativeVolume.toFixed(1)}x from 20D avg volume` : null,
       volumeProfile.previousDayVolumeRatio ? `Volume ${volumeProfile.previousDayVolumeRatio.toFixed(1)}x vs previous day` : null,
       boosted > (num(merged.finalProbabilityScore) ?? 0) ? "Premarket surge volume boost" : null,
+      quality.score < 30 ? "Volume quality demotion: low absolute volume or KRW trade value" : null,
     ].filter(Boolean),
   };
 }
@@ -1005,6 +1050,14 @@ module.exports = async function handler(req, res) {
         const baseFinalScore = num(normalizedItem.finalProbabilityScore) ?? 0;
         const boostedScannerScore = Math.round(clamp(baseScannerScore + rankAuxiliaryScore));
         const boostedFinalScore = Math.round(clamp(baseFinalScore + rankAuxiliaryScore));
+        const quality = volumeQualityScore({ ...normalizedItem, ...compactObject(liveQuote) });
+        const volumeAdjustedFinalScore = Math.round(clamp(boostedFinalScore * 0.85 + quality.score * 0.15));
+        const finalProbabilityScore = quality.score < 30
+          ? Math.min(volumeAdjustedFinalScore, 69)
+          : volumeAdjustedFinalScore;
+        const scannerScore = quality.score < 30
+          ? Math.min(boostedScannerScore, 69)
+          : Math.max(baseScannerScore, boostedScannerScore);
         const debugQuoteSource = debugQuoteSourceLabel(localQuoteSnapshot, batchQuoteMap.has(symbolKey));
         const debugHistorySource = debugHistorySourceLabel(localHistorySnapshot, chartMap.has(symbolKey));
         const debugFallback = debugFallbackReason({
@@ -1021,8 +1074,11 @@ module.exports = async function handler(req, res) {
           ...compactObject(liveQuote),
           ...commonSignals,
           rankAuxiliaryScore,
-          scannerScore: Math.max(baseScannerScore, boostedScannerScore),
-          finalProbabilityScore: Math.max(baseFinalScore, boostedFinalScore),
+          volumeQualityScore: quality.score,
+          tradeValueKrw: quality.tradeValueKrw,
+          scannerScore,
+          finalProbabilityScore,
+          volumeQualitySortScore: finalProbabilityScore + (quality.score * 0.03),
           sourceTags: [...new Set([
             ...(Array.isArray(normalizedItem.sourceTags) ? normalizedItem.sourceTags : []),
             batchQuoteMap.has(symbolKey) ? "yahoo-v7-batch" : null,
@@ -1037,10 +1093,20 @@ module.exports = async function handler(req, res) {
           selectionReasons: [
             ...(Array.isArray(normalizedItem.selectionReasons) ? normalizedItem.selectionReasons : []),
             rankAuxiliaryScore > 0 ? `Common signal boost +${rankAuxiliaryScore}` : null,
+            quality.score < 30 ? "Volume quality under 30: demoted from top candidates" : null,
           ].filter(Boolean),
         };
       }))
-        .sort((a, b) => (num(b.finalProbabilityScore) ?? 0) - (num(a.finalProbabilityScore) ?? 0));
+        .sort((a, b) => {
+          const aPrice = num(a.price) ?? num(a.preMarketPrice) ?? 0;
+          const bPrice = num(b.price) ?? num(b.preMarketPrice) ?? 0;
+          const sameDollarBucket = (aPrice < 1 && bPrice < 1) || (aPrice >= 1 && bPrice >= 1);
+          const finalDiff = (num(b.finalProbabilityScore) ?? 0) - (num(a.finalProbabilityScore) ?? 0);
+          if (sameDollarBucket && Math.abs(finalDiff) <= 3) {
+            return (num(b.volumeQualitySortScore) ?? 0) - (num(a.volumeQualitySortScore) ?? 0);
+          }
+          return finalDiff;
+        });
       logScannerElapsed("volume profile", metrics.volumeProfileMs, {
         requestId,
         calls: metrics.volumeProfileCount,
