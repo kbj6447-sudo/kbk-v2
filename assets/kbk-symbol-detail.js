@@ -452,10 +452,11 @@ function trendOf(item) {
   return trendLabel(item);
 }
 
-function scoreTopPick(item) {
+function scoreTopPick(item, dataExchangeRate = 1400) {
   const price = priceUsd(item) ?? 0;
   const change = changePct(item);
   const volume = num(item?.volume) ?? num(item?.preMarketVolume) ?? 0;
+  const exchangeRate = num(item?.exchangeRate) ?? num(item?.usdKrw) ?? num(dataExchangeRate) ?? 1400;
   const rvol = relativeVolumeOf(item);
   const vwap = vwapState(item);
   const trend = trendOf(item);
@@ -526,6 +527,7 @@ function scoreTopPick(item) {
     symbol: item.symbol,
     name: item.name ?? item.symbol,
     price,
+    exchangeRate,
     change,
     volume,
     rvol,
@@ -640,7 +642,7 @@ function renderTopPicks(picks, updatedAt) {
             <div class="kbk-top-score">${pick.finalScore}<span>${index === 0 ? "1순위" : esc(pick.verdict)}</span></div>
           </div>
           <div class="kbk-top-row">
-            <strong>${priceUsdText(pick.price)}</strong>
+            <strong>${priceKrwUsdText(pick)}</strong>
             <span>${pct(pick.change)}</span>
             <span>거래량 ${compact(pick.volume)}</span>
             <span>RVOL ${pick.rvol ? pick.rvol.toFixed(1) : "-"}</span>
@@ -665,14 +667,32 @@ function priceUsdText(value) {
   return `$${n.toFixed(n >= 10 ? 2 : 4)}`;
 }
 
+function priceKrwUsdText(pick) {
+  const priceUSD = num(pick?.price);
+  if (priceUSD === null) return "-";
+  const exchangeRate = num(pick?.exchangeRate) ?? 1400;
+  const priceKRW = Math.round(priceUSD * exchangeRate);
+  return `약 ${priceKRW.toLocaleString("ko-KR")}원 ($${priceUSD.toFixed(4)})`;
+}
+
 async function loadTopPicks() {
   renderTopPickLoading();
   try {
-    const payload = await fetchJson("/api/scanner");
+    const [payload, exchangePayload] = await Promise.all([
+      fetchJson("/api/scanner"),
+      fetchJson("/api/exchange").catch(() => null),
+    ]);
     const items = payload?.data?.items ?? payload?.items ?? [];
+    const dataExchangeRate = num(payload?.data?.exchangeRate)
+      ?? num(payload?.exchangeRate)
+      ?? num(exchangePayload?.data?.rate)
+      ?? num(exchangePayload?.data?.usdKrw)
+      ?? num(exchangePayload?.rate)
+      ?? num(exchangePayload?.usdKrw)
+      ?? 1400;
     const scored = items
       .filter((item) => item?.symbol && item.included !== false)
-      .map(scoreTopPick)
+      .map((item) => scoreTopPick(item, dataExchangeRate))
       .filter((pick) => pick.change >= 3)
       .filter((pick) => pick.vwap.includes("위") || pick.vwap.includes("근처"))
       .filter((pick) => pick.trend === "상승")
@@ -685,7 +705,7 @@ async function loadTopPicks() {
       const seen = new Set(scored.map((pick) => pick.symbol));
       const supplemental = items
         .filter((item) => item?.symbol && item.included !== false)
-        .map(scoreTopPick)
+        .map((item) => scoreTopPick(item, dataExchangeRate))
         .filter((pick) => pick.change >= 3)
         .filter((pick) => !seen.has(pick.symbol))
         .filter((pick) => pick.volume >= 300_000 || pick.rvol >= 1.2 || pick.surgeScore >= 58)
