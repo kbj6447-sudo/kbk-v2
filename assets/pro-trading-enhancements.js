@@ -1,10 +1,4 @@
-﻿import {
-  computeChaseRisk,
-  finalDecision,
-  renderFinalDecisionHeroHtml,
-} from "./final-decision.js";
-
-const PRO_ROUTES = {
+﻿const PRO_ROUTES = {
   "/backtest": "backtest-panel",
   "/ai-analysis": "debug-panel",
 };
@@ -26,7 +20,7 @@ function money(n) {
 function wonMoney(n, rate = currentUsdKrw()) {
   const value = Number(n);
   if (!Number.isFinite(value) || !Number.isFinite(rate) || rate <= 0) return "-";
-  return `${Math.round(value * rate).toLocaleString("ko-KR")}??;
+  return `${Math.round(value * rate).toLocaleString("ko-KR")}원`;
 }
 
 function pairedMoney(n, rate = currentUsdKrw()) {
@@ -73,14 +67,254 @@ function clampTopPickScore(value, min = 0, max = 100) {
   return Math.max(min, Math.min(max, n));
 }
 
+const FINAL_DECISION = {
+  BUY_NOW: { key: "buy_now", label: "🟢 즉시 매수", tone: "buy", minConf: 85, maxConf: 100 },
+  PULLBACK: { key: "pullback", label: "🟡 눌림 대기", tone: "pullback", minConf: 70, maxConf: 85 },
+  WATCH: { key: "watch", label: "⚪ 관찰", tone: "watch", minConf: 50, maxConf: 70 },
+  BLOCK: { key: "block", label: "🔴 진입 금지", tone: "block", minConf: 0, maxConf: 50 },
+};
+
+function fdClamp(n, min = 0, max = 100) {
+  return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function fdConfidenceInBand(band, score01) {
+  const span = band.maxConf - band.minConf;
+  return fdClamp(band.minConf + span * Math.max(0, Math.min(1, score01)));
+}
+
+function deriveScalpSignal(item, setup = {}) {
+  const rvol = toNumber(item?.volumeRatio ?? item?.relativeVolume) ?? setup.rvol ?? 0;
+  const volumeAcceleration = topPickItemField(item, "volumeAccelerationScore") ?? setup.volumeAcceleration ?? 50;
+  const higherLow = topPickItemField(item, "higherLowScore") ?? setup.higherLow ?? 50;
+  const reSurge = topPickItemField(item, "reSurgeSetupScore") ?? setup.resurge ?? 50;
+  const change = toNumber(item?.changePercent ?? item?.preMarketChangePercent) ?? 0;
+  const rsi = toNumber(item?.rsi ?? item?.technical?.rsi) ?? setup.rsi ?? null;
+
+  const vwapAbove = setup.vwapAbove === true;
+  const vwapNear = setup.vwapNear === true;
+  const vwapBelow = setup.vwapBelow === true;
+  const vwapGood = vwapAbove || vwapNear || setup.vwapRecovering === true;
+
+  const price = toNumber(item?.price ?? item?.preMarketPrice) ?? 0;
+  const dayHigh = toNumber(item?.dayHigh ?? item?.regularMarketDayHigh);
+  const highPullbackPct = price > 0 && dayHigh > 0 ? ((dayHigh - price) / dayHigh) * 100 : null;
+
+  const overheated = setup.overheated === true || change >= 80 || (rsi !== null && rsi >= 80);
+  const priceWeak = change < 0 || String(item?.oneMinuteTrend ?? "").toLowerCase().includes("down");
+  const vwapWeak = vwapBelow && !vwapNear;
+
+  let risk = 0;
+  if (overheated) risk += 12;
+  if (highPullbackPct !== null && highPullbackPct >= 25) risk += 10;
+  if (vwapWeak && priceWeak) risk += 10;
+  if (setup.highFailed) risk += 8;
+  if (setup.extremeRvolWeak) risk += 10;
+  risk = fdClamp(risk, 0, 50);
+
+  const volumeOk = rvol >= 3 || (rvol >= 1.2 && (volumeAcceleration >= 70 || reSurge >= 70));
+  const caution = risk >= 38 || overheated || (highPullbackPct !== null && highPullbackPct >= 25) || (vwapWeak && priceWeak);
+  const buyReady = vwapGood
+    && !vwapBelow
+    && higherLow >= 58
+    && volumeAcceleration >= 50
+    && volumeOk
+    && risk < 34
+    && !overheated;
+
+  if (buyReady) return { action: "매수 가능", tone: "buy" };
+  if (caution) return { action: "진입 주의", tone: "avoid" };
+  if ((vwapNear || (topPickItemField(item, "vwapReclaimScore") ?? 0) >= 60) && volumeOk && higherLow >= 50 && change >= 1 && change <= 55) {
+    return { action: "관심 유지", tone: "watch" };
+  }
+  return { action: "관찰", tone: "hold" };
+}
+
+function computeChaseRisk(item, ctx = {}) {
+  const risk = toNumber(item?.riskScore) ?? ctx.risk ?? 50;
+  const change = toNumber(item?.changePercent ?? item?.preMarketChangePercent) ?? ctx.change ?? 0;
+  const vwapGood = ctx.vwapGood === true;
+  const trendGood = ctx.trendGood === true;
+  const riskPenalty = toNumber(ctx.riskPenalty) ?? toNumber(ctx.setup?.riskPenalty) ?? 0;
+
+  return fdClamp(
+    risk * 0.55
+      + (change >= 100 ? 30 : change >= 70 ? 20 : change >= 45 ? 12 : 0)
+      + (!vwapGood ? 15 : 0)
+      + (trendGood ? 0 : 10)
+      + riskPenalty * 0.8,
+  );
+}
+
+function fdVwapFlags(setup = {}, vwapLabel = "") {
+  const label = String(vwapLabel ?? "");
+  const above = setup.vwapAbove === true || label.includes("위");
+  const near = setup.vwapNear === true || label.includes("근처") || label.toLowerCase().includes("near");
+  const below = setup.vwapBelow === true || label.includes("아래") || label.toLowerCase().includes("below");
+  return { above, near, below, farBelow: below && !near };
+}
+
+function buildFinalDecisionReasons(input, scalp) {
+  const positive = [];
+  const warning = [];
+
+  if (input.volumeQualityScore >= 60) positive.push("거래량 품질 우수");
+  if (input.surgeAccelerationScore >= 60) positive.push("최근 거래량 가속도 강함");
+  if (input.vwapAbove) positive.push("VWAP 위 유지");
+  else if (input.vwapNear) positive.push("VWAP 근처");
+  if (input.higherLow >= 60) positive.push("Higher Low 형성");
+  if (scalp.action === "매수 가능") positive.push(`실시간 단타 시그널: ${scalp.action}`);
+
+  warning.push(`추격 위험 ${input.chaseRisk}`);
+  if (input.rsi !== null && input.rsi >= 70) warning.push(`RSI ${Math.round(input.rsi)}`);
+  if (input.change >= 42) warning.push(`당일 +${input.change.toFixed(1)}% 상승`);
+  if (input.vwapFarBelow) warning.push("VWAP 크게 이탈");
+  if (input.surgeAccelerationScore < 60) warning.push("수급 가속도 약함");
+  if (scalp.action === "진입 주의") warning.push(`실시간 단타 시그널: ${scalp.action}`);
+  if (scalp.action === "관심 유지") warning.push(`실시간 단타 시그널: ${scalp.action}`);
+
+  return { positive: positive.slice(0, 6), warning: warning.slice(0, 6) };
+}
+
+function finalDecision(input) {
+  const item = input.item ?? {};
+  const setup = input.setup ?? {};
+  const scalp = input.scalpAction
+    ? { action: input.scalpAction, tone: "custom" }
+    : deriveScalpSignal(item, setup);
+
+  const top = toNumber(input.topPickScore) ?? 0;
+  const vq = toNumber(input.volumeQualityScore) ?? 0;
+  const sa = toNumber(input.surgeAccelerationScore) ?? 0;
+  const chaseRisk = toNumber(input.chaseRisk) ?? 0;
+  const rsi = toNumber(input.rsi) ?? setup.rsi ?? null;
+  const change = toNumber(input.change) ?? 0;
+  const higherLow = toNumber(input.higherLow) ?? topPickItemField(item, "higherLowScore") ?? setup.higherLow ?? 0;
+  const vw = fdVwapFlags(setup, input.vwapLabel);
+  const vwapAbove = input.vwapAbove === true || vw.above;
+  const vwapNear = input.vwapNear === true || vw.near;
+  const vwapFarBelow = input.vwapFarBelow === true || vw.farBelow;
+
+  const ctx = {
+    topPickScore: top,
+    volumeQualityScore: vq,
+    surgeAccelerationScore: sa,
+    chaseRisk,
+    vwapAbove,
+    vwapNear,
+    vwapFarBelow,
+    rsi,
+    change,
+    higherLow,
+  };
+  const reasons = buildFinalDecisionReasons(ctx, scalp);
+
+  const blockHit =
+    (rsi !== null && rsi >= 80)
+    || change >= 80
+    || vwapFarBelow
+    || chaseRisk >= 75
+    || sa < 40
+    || setup.overheated
+    || setup.highFailed
+    || setup.extremeRvolWeak
+    || scalp.action === "진입 주의";
+
+  if (blockHit) {
+    const severity =
+      (change >= 80 ? 0.25 : 0)
+      + (vwapFarBelow ? 0.2 : 0)
+      + (chaseRisk >= 75 ? 0.25 : 0)
+      + (sa < 40 ? 0.15 : 0)
+      + (scalp.action === "진입 주의" ? 0.15 : 0);
+    return {
+      ...FINAL_DECISION.BLOCK,
+      confidence: fdConfidenceInBand(FINAL_DECISION.BLOCK, 1 - Math.min(1, severity)),
+      scalpAction: scalp.action,
+      chaseRisk,
+      reasons,
+    };
+  }
+
+  const buyReady =
+    top >= 80
+    && vq >= 60
+    && sa >= 60
+    && vwapAbove
+    && !vwapFarBelow
+    && scalp.action === "매수 가능"
+    && chaseRisk < 35;
+
+  if (buyReady) {
+    const fit =
+      (top >= 80 ? 0.2 : 0)
+      + (vq >= 60 ? 0.2 : 0)
+      + (sa >= 60 ? 0.2 : 0)
+      + (chaseRisk < 25 ? 0.2 : chaseRisk < 35 ? 0.1 : 0)
+      + (scalp.action === "매수 가능" ? 0.2 : 0);
+    return {
+      ...FINAL_DECISION.BUY_NOW,
+      confidence: fdConfidenceInBand(FINAL_DECISION.BUY_NOW, 0.85 + fit * 0.15),
+      scalpAction: scalp.action,
+      chaseRisk,
+      reasons,
+    };
+  }
+
+  const pullbackHit =
+    scalp.action === "관심 유지"
+    || (top >= 75 && (vwapNear || chaseRisk >= 35 || (change >= 45 && change < 80)));
+
+  if (pullbackHit) {
+    const fit =
+      (scalp.action === "관심 유지" ? 0.35 : 0.15)
+      + (top >= 75 ? 0.25 : 0)
+      + (vwapNear ? 0.2 : 0)
+      + (chaseRisk >= 35 && chaseRisk < 75 ? 0.2 : 0);
+    return {
+      ...FINAL_DECISION.PULLBACK,
+      confidence: fdConfidenceInBand(FINAL_DECISION.PULLBACK, 0.55 + fit * 0.45),
+      scalpAction: scalp.action,
+      chaseRisk,
+      reasons,
+    };
+  }
+
+  const watchFit = Math.min(1, (top / 100) * 0.4 + (vq / 100) * 0.3 + (sa / 100) * 0.3);
+  return {
+    ...FINAL_DECISION.WATCH,
+    confidence: fdConfidenceInBand(FINAL_DECISION.WATCH, watchFit),
+    scalpAction: scalp.action,
+    chaseRisk,
+    reasons,
+  };
+}
+
+function renderFinalDecisionHeroHtml(decision, escapeHtml = (v) => String(v ?? "")) {
+  const tone = decision.tone || "watch";
+  const pos = (decision.reasons?.positive ?? []).map((line) => `<li class="ok">✓ ${escapeHtml(line)}</li>`).join("");
+  const warn = (decision.reasons?.warning ?? []).map((line) => `<li class="warn">⚠ ${escapeHtml(line)}</li>`).join("");
+  return `
+    <section class="kbk-final-decision-hero kbk-final-${tone}" aria-label="최종 판단">
+      <p class="kbk-final-kicker">최종 판단</p>
+      <strong class="kbk-final-label">${escapeHtml(decision.label)}</strong>
+      <p class="kbk-final-confidence">신뢰도 <b>${escapeHtml(decision.confidence)}</b>점</p>
+      <div class="kbk-final-reasons">
+        <p class="kbk-final-reasons-title">판단 근거</p>
+        <ul>${pos}${warn}</ul>
+      </div>
+    </section>
+  `;
+}
+
 function formatKrwFromUsdDollar(dollarUsd) {
   const usd = toNumber(dollarUsd);
   const rate = currentUsdKrw();
   if (usd === null || usd <= 0 || !Number.isFinite(rate) || rate <= 0) return null;
   const krw = usd * rate;
-  if (krw >= 100_000_000) return `??${(krw / 100_000_000).toFixed(1)}????;
-  if (krw >= 10_000_000) return `??${Math.round(krw / 10_000_000)}泥쒕쭔 ??;
-  return `??${Math.round(krw).toLocaleString("ko-KR")}??;
+  if (krw >= 100_000_000) return `약 ${(krw / 100_000_000).toFixed(1)}억원`;
+  if (krw >= 10_000_000) return `약 ${Math.round(krw / 10_000_000)}천만 원`;
+  return `약 ${Math.round(krw).toLocaleString("ko-KR")}원`;
 }
 
 function computeVolumeQualityScore(item, price, volume, rvol) {
@@ -259,14 +493,14 @@ function topPickReasoning(item, metrics) {
   const surgeAcceleration = computeSurgeAccelerationScore(item);
 
   const legacyReasons = [];
-  if (setup.volumeStarting) legacyReasons.push("嫄곕옒?됱씠 利앷??섍린 ?쒖옉?덉뒿?덈떎");
-  if (metrics.rvol !== null && metrics.rvol >= 3) legacyReasons.push(`RVOL ${metrics.rvol.toFixed(1)}諛곕줈 湲곗? ?댁긽?낅땲??);
-  if (topPickItemField(item, "volumeAccelerationScore") >= 65) legacyReasons.push("嫄곕옒??媛?띾룄媛 ?묓샇?⑸땲??);
-  if (setup.vwapRecovering) legacyReasons.push(setup.vwapAbove ? "VWAP ?꾩뿉???뚮났 ?먮쫫?낅땲?? : "VWAP ?щ룎?뚮? ?쒕룄 以묒엯?덈떎");
-  if (topPickItemField(item, "higherLowScore") >= 65) legacyReasons.push("Higher Low 援ъ“媛 媛먯??⑸땲??);
-  if (topPickItemField(item, "reSurgeSetupScore") >= 65) legacyReasons.push("?뚮┝ ???ъ긽??媛?μ꽦???덉뒿?덈떎");
-  if (setup.lowRecovery) legacyReasons.push("媛寃⑹씠 ?섎떒遺?먯꽌 ?뚮났 以묒엯?덈떎");
-  if (topPickItemField(item, "compressionScore") >= 70) legacyReasons.push("諛뺤뒪沅??뺤텞???뺤씤?⑸땲??);
+  if (setup.volumeStarting) legacyReasons.push("거래량이 증가하기 시작했습니다");
+  if (metrics.rvol !== null && metrics.rvol >= 3) legacyReasons.push(`RVOL ${metrics.rvol.toFixed(1)}배로 기준 이상입니다`);
+  if (topPickItemField(item, "volumeAccelerationScore") >= 65) legacyReasons.push("거래량 가속도가 양호합니다");
+  if (setup.vwapRecovering) legacyReasons.push(setup.vwapAbove ? "VWAP 위에서 상승 흐름입니다" : "VWAP 회복을 시도 중입니다");
+  if (topPickItemField(item, "higherLowScore") >= 65) legacyReasons.push("Higher Low 구조가 감지됩니다");
+  if (topPickItemField(item, "reSurgeSetupScore") >= 65) legacyReasons.push("눌림 후 재상승 가능성이 있습니다");
+  if (setup.lowRecovery) legacyReasons.push("가격이 하단에서 회복 중입니다");
+  if (topPickItemField(item, "compressionScore") >= 70) legacyReasons.push("박스권 압축이 확인됩니다");
 
   const volumeQualityLines = [];
   const surgeAccelerationLines = [];
@@ -274,27 +508,27 @@ function topPickReasoning(item, metrics) {
   const cautions = [];
 
   if (volumeQuality.contributed) {
-    volumeQualityLines.push(`嫄곕옒???덉쭏 ?먯닔 ${volumeQuality.score}??);
+    volumeQualityLines.push(`거래량 품질 점수 ${volumeQuality.score}점`);
     if (volume >= 500_000) volumeQualityLines.push(`嫄곕옒??${compact(volume)}`);
     const dollarText = formatKrwFromUsdDollar(volumeQuality.dollarVolume);
     if (dollarText) volumeQualityLines.push(`嫄곕옒?湲?${dollarText}`);
     if (rvol >= 1.5 && volumeQuality.rvolScore >= 48) {
-      volumeQualityLines.push(`RVOL ${rvol.toFixed(1)}諛곕줈 ?됯퇏 ?鍮?嫄곕옒媛 遺숈뿀?듬땲??);
+      volumeQualityLines.push(`RVOL ${rvol.toFixed(1)}배로 평균 대비 거래가 붙었습니다`);
     }
   }
 
   if (surgeAcceleration.contributed) {
     if (surgeAcceleration.accel5m !== null && surgeAcceleration.accel5m >= 1.35) {
-      surgeAccelerationLines.push(`理쒓렐 5遺?嫄곕옒??${surgeAcceleration.accel5m.toFixed(1)}諛?利앷?`);
-      surgeAccelerationLines.push(`理쒓렐 5遺?嫄곕옒?湲?${surgeAcceleration.accel5m.toFixed(1)}諛?利앷?`);
+      surgeAccelerationLines.push(`최근 5분 거래량 ${surgeAcceleration.accel5m.toFixed(1)}배 증가`);
+      surgeAccelerationLines.push(`최근 5분 거래대금 ${surgeAcceleration.accel5m.toFixed(1)}배 증가`);
     }
     if (surgeAcceleration.accel1m !== null && surgeAcceleration.accel1m >= 1.35) {
-      surgeAccelerationLines.push(`理쒓렐 1遺?嫄곕옒??${surgeAcceleration.accel1m.toFixed(1)}諛?利앷?`);
+      surgeAccelerationLines.push(`최근 1분 거래량 ${surgeAcceleration.accel1m.toFixed(1)}배 증가`);
     }
     if (surgeAcceleration.strong) {
-      surgeAccelerationLines.push(`湲됰벑 媛?띾룄 ?먯닔 ${surgeAcceleration.score}??);
+      surgeAccelerationLines.push(`급등 가속도 점수 ${surgeAcceleration.score}점`);
     } else if (surgeAcceleration.moderate) {
-      surgeAccelerationLines.push(`?섍툒 媛???먯닔 ${surgeAcceleration.score}??);
+      surgeAccelerationLines.push(`수급 가속 점수 ${surgeAcceleration.score}점`);
     }
   }
 
@@ -316,21 +550,21 @@ function topPickReasoning(item, metrics) {
   if (surgeAccelerationLines.length) sections.push({ title: "?섍툒 媛?띾룄", lines: surgeAccelerationLines });
   if (technicalLines.length) sections.push({ title: "湲곗닠???⑦꽩", lines: technicalLines });
 
-  let decision = "愿李?;
+  let decision = "관찰";
   if (setup.overheated || setup.highFailed || setup.extremeRvolWeak || metrics.risk >= 78 || metrics.finalScore < 58) {
-    decision = "吏꾩엯 湲덉?";
+    decision = "진입 금지";
   } else if (metrics.finalScore >= 74 && setup.volumeStarting && setup.vwapRecovering && !setup.vwapBelow && metrics.risk < 70) {
-    decision = "留ㅼ닔 媛??;
+    decision = "매수 가능";
   }
 
-  const reasons = legacyReasons.length ? legacyReasons.slice(0, 6) : ["珥덉엯 ?뚮났 議곌굔??愿李?以묒엯?덈떎"];
+  const reasons = legacyReasons.length ? legacyReasons.slice(0, 6) : ["초입 회복 조건을 관찰 중입니다"];
 
   return {
     reasons,
-    cautions: cautions.length ? cautions.slice(0, 5) : ["?ㅼ젣 吏꾩엯 ??VWAP/泥닿껐 諛섏쓳 ?ы솗??],
+    cautions: cautions.length ? cautions.slice(0, 5) : ["실제 진입 전 VWAP/체결 반응을 확인하세요"],
     sections,
     decision,
-    priority: decision === "留ㅼ닔 媛?? ? 3 : decision === "愿李? ? 2 : 0,
+    priority: decision === "매수 가능" ? 3 : decision === "관찰" ? 2 : 0,
     volumeQualityScore: volumeQuality.score,
     surgeAccelerationScore: surgeAcceleration.score,
   };
@@ -352,10 +586,10 @@ function patchFloatingPointText(root = document.body) {
   while (walker.nextNode()) nodes.push(walker.currentNode);
   for (const node of nodes) {
     const before = node.nodeValue;
-    if (!before || !/\d+\.\d{3,}??.test(before)) continue;
-    node.nodeValue = before.replace(/(\d+\.\d{3,})??g, (_, raw) => {
+    if (!before || !/\d+\.\d{3,}점/.test(before)) continue;
+    node.nodeValue = before.replace(/(\d+\.\d{3,})점/g, (_, raw) => {
       const value = Number(raw);
-      return Number.isFinite(value) ? `${Math.round(value)}?? : `${raw}??;
+      return Number.isFinite(value) ? `${Math.round(value)}점` : `${raw}점`;
     });
   }
 }
@@ -505,7 +739,7 @@ function addRefreshShortcut() {
 
 function refreshCurrentView() {
   const visibleRefresh = Array.from(document.querySelectorAll("button"))
-    .find((button) => /?덈줈怨좎묠|媛먯떆 媛깆떊|?꾩껜 遺꾩꽍/.test(button.textContent || "") && button.offsetParent);
+    .find((button) => /새로고침|감시 갱신|전체 분석/.test(button.textContent || "") && button.offsetParent);
   if (visibleRefresh) {
     visibleRefresh.click();
     return;
@@ -520,7 +754,7 @@ function ensureRouteLinks() {
   const configs = [
     { label: "諛깊뀒?ㅽ듃", path: "/backtest", target: "backtest-panel" },
     { label: "AI 遺꾩꽍", path: "/ai-analysis", target: "debug-panel" },
-    { label: "?듯빀 理쒖쥌 ?꾨낫", path: "/top-picks", target: "kbk-pro-top-picks" },
+    { label: "통합 최종 후보", path: "/top-picks", target: "kbk-pro-top-picks" },
   ];
 
   for (const config of configs) {
@@ -640,31 +874,38 @@ async function renderTopPicksOnly() {
           setup: signal.setup,
         });
         const setup = signal.setup ?? {};
-        const trendRaw = String(item?.oneMinuteTrend ?? "").toLowerCase();
-        const trendGood = trendRaw.includes("up") || trendRaw.includes("상승") || item?.technical?.ma5vs20 === "above";
-        const vwapGood = setup.vwapAbove || setup.vwapNear || setup.vwapRecovering;
-        const chaseRisk = computeChaseRisk(item, {
-          change,
-          risk,
-          vwapGood,
-          trendGood,
-          riskPenalty: setup.riskPenalty,
-          setup,
-        });
-        const fd = finalDecision({
-          item,
-          setup,
-          topPickScore: finalScore,
-          volumeQualityScore: reasoning.volumeQualityScore,
-          surgeAccelerationScore: reasoning.surgeAccelerationScore,
-          chaseRisk,
-          vwapAbove: setup.vwapAbove,
-          vwapNear: setup.vwapNear,
-          vwapFarBelow: setup.vwapBelow && !setup.vwapNear,
-          rsi: setup.rsi,
-          change,
-          higherLow: setup.higherLow ?? topPickItemField(item, "higherLowScore"),
-        });
+        let chaseRisk = 0;
+        let fd = null;
+        try {
+          const trendRaw = String(item?.oneMinuteTrend ?? "").toLowerCase();
+          const trendGood = trendRaw.includes("up") || trendRaw.includes("상승") || item?.technical?.ma5vs20 === "above";
+          const vwapGood = setup.vwapAbove || setup.vwapNear || setup.vwapRecovering;
+          chaseRisk = computeChaseRisk(item, {
+            change,
+            risk,
+            vwapGood,
+            trendGood,
+            riskPenalty: setup.riskPenalty,
+            setup,
+          });
+          fd = finalDecision({
+            item,
+            setup,
+            topPickScore: finalScore,
+            volumeQualityScore: reasoning.volumeQualityScore,
+            surgeAccelerationScore: reasoning.surgeAccelerationScore,
+            chaseRisk,
+            vwapAbove: setup.vwapAbove,
+            vwapNear: setup.vwapNear,
+            vwapFarBelow: setup.vwapBelow && !setup.vwapNear,
+            rsi: setup.rsi,
+            change,
+            higherLow: setup.higherLow ?? topPickItemField(item, "higherLowScore"),
+          });
+        } catch (_) {
+          chaseRisk = 0;
+          fd = null;
+        }
         return {
           item,
           price,
@@ -697,7 +938,7 @@ async function renderTopPicksOnly() {
       </section>
       ${items.length ? items.map(({ item, price, change, volume, surge, risk, pattern, finalScore, signalBonus, reasoning, chaseRisk, finalDecision: fd }) => `
         <article class="kbk-pro-top-card">
-          ${renderFinalDecisionHeroHtml(fd, textEscape)}
+          ${fd ? renderFinalDecisionHeroHtml(fd, textEscape) : ""}
           <div class="kbk-pro-top-head">
             <div><h3>${textEscape(item.symbol)}</h3><p>${textEscape(item.name || item.symbol)}</p></div>
             <div class="kbk-pro-top-score">${finalScore}</div>
@@ -718,7 +959,7 @@ async function renderTopPicksOnly() {
               <div class="kbk-pro-top-explain">${renderTopPickSectionHtml(reasoning.sections || [])}</div>
             </div>
             <div class="kbk-pro-top-caution"><span>二쇱쓽 ?붿씤</span><p>${reasoning.cautions.map((line) => `??${textEscape(line)}`).join(" 쨌 ")}</p></div>
-            <div class="kbk-pro-top-decision"><span>레거시 요약</span><b>${textEscape(reasoning.decision)}</b><small> · 단타 ${textEscape(fd.scalpAction)}</small></div>
+            <div class="kbk-pro-top-decision"><span>레거시 요약</span><b>${textEscape(reasoning.decision)}</b>${fd ? `<small> · 단타 ${textEscape(fd.scalpAction)}</small>` : ""}</div>
           </div>
         </article>
       `).join("") : `<section class="kbk-empty-note">?꾩옱 ?듯빀 湲곗????듦낵???꾨낫媛 ?놁뒿?덈떎. ?덈줈怨좎묠?쇰줈 ?ㅼ떆 ?뺤씤??二쇱꽭??</section>`}
@@ -834,7 +1075,7 @@ function krwMoneyFromUsd(usd) {
   const rate = currentUsdKrw();
   const value = Number(usd);
   if (!Number.isFinite(value) || !rate) return "-";
-  return `${Math.round(value * rate).toLocaleString("ko-KR")}??;
+  return `${Math.round(value * rate).toLocaleString("ko-KR")}원`;
 }
 
 function syncMonitorPriceBadge(symbol, price) {
@@ -843,7 +1084,7 @@ function syncMonitorPriceBadge(symbol, price) {
   if (!summary || !symbol || !Number.isFinite(value)) return;
   const label = `?ㅼ떆媛?遺꾨큺 ${money(value)} / ${krwMoneyFromUsd(value)} 쨌 ${new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
   const candidates = Array.from(summary.querySelectorAll("*")).filter((node) =>
-    node.children.length === 0 && (/?ㅼ떆媛?遺꾨큺/.test(node.textContent || "") || /^\$[\d.]+\s*\/\s*[\d,]+??.test((node.textContent || "").trim()))
+    node.children.length === 0 && (/실시간 구간/.test(node.textContent || "") || /^\$[\d.]+\s*\/\s*[\d,]+/.test((node.textContent || "").trim()))
   );
   for (const node of candidates) node.textContent = label;
   if (!candidates.length) {
@@ -864,15 +1105,15 @@ function syncRvolCopy(panel, quote) {
   const rvol = rvolValue(quote);
   const volume = toNumber(quote?.volume ?? quote?.preMarketVolume);
   const replacement = rvol === null
-    ? `RVOL? ?됯퇏 嫄곕옒???곗씠?곌? ?놁뼱 怨꾩궛 遺덇??낅땲?? ?꾩옱 ?꾩쟻 嫄곕옒?됱? ${compact(volume)}?낅땲??`
-    : `RVOL? ${rvol.toFixed(1)}諛곗엯?덈떎.`;
+    ? `RVOL은 평균 거래량 데이터가 없어 계산 불가입니다. 현재 누적 거래량은 ${compact(volume)}입니다`
+    : `RVOL은 ${rvol.toFixed(1)}배입니다.`;
   const walker = document.createTreeWalker(panel, NodeFilter.SHOW_TEXT);
   const nodes = [];
   while (walker.nextNode()) nodes.push(walker.currentNode);
   for (const node of nodes) {
     const text = node.nodeValue || "";
-    if (/RVOL[?댁?]?\s*1\.0諛?.test(text)) {
-      node.nodeValue = text.replace(/RVOL[?댁?]?\s*1\.0諛?^.??*(\.|?낅땲??.)?/g, replacement);
+    if (/RVOL[은이]?\s*1\.0배/.test(text)) {
+      node.nodeValue = text.replace(/RVOL[은이]?\s*1\.0배[^.]*(\.|입니다\.)?/g, replacement);
     }
   }
 }
@@ -911,49 +1152,49 @@ function fastSignalDecision({ quote, bars, price, vwap, entryLow, entryHigh, rec
 
   if (!aboveVwap) {
     return {
-      action: "湲곕떎由ъ꽭??,
+      action: "기다리세요",
       tone: "hold",
-      headline: "VWAP ?뚮났 ?꾩엯?덈떎.",
-      reason: "嫄곕옒?됱씠 ?덉뼱??VWAP ?꾨옒?먯꽌???⑦? 吏꾩엯 ?좊ː?꾧? ?⑥뼱吏묐땲??",
+      headline: "VWAP 회복 전입니다.",
+      reason: "거래량이 살아도 VWAP 아래에서는 단타 진입 신뢰도가 낮습니다.",
     };
   }
   if (tooExtended) {
     return {
-      action: "異붽꺽 湲덉?",
+      action: "추격 금지",
       tone: "profit",
-      headline: "?대? 湲곗??좎뿉??留롮씠 踰뚯뼱議뚯뒿?덈떎.",
-      reason: "?곸듅? 媛뺥븯吏留?吏湲덉? ?뚮┝ ?먮뒗 ?щ룎???뺤씤?????좊━?⑸땲??",
+      headline: "이미 기준가에서 많이 벌어졌습니다.",
+      reason: "상승은 강하지만 지금은 눌림 또는 되돌림 확인이 유리합니다.",
     };
   }
   if (strongVolume && inEntryZone && trendUp) {
     return {
-      action: "吏꾩엯 媛??,
+      action: "진입 가능",
       tone: "buy",
-      headline: "嫄곕옒?됯낵 遺꾨큺 異붿꽭媛 吏꾩엯 援ш컙?먯꽌 媛숈씠 遺숈뿀?듬땲??",
-      reason: `RVOL ${rvol !== null ? rvol.toFixed(1) + "諛? : "-"} / ?꾩씪?鍮?${previousDayRatio !== null ? previousDayRatio.toFixed(1) + "諛? : "-"} / 3遊?蹂??${pct(shortReturn)}`,
+      headline: "거래량과 분봉 추세가 진입 구간에서 같이 붙었습니다.",
+      reason: `RVOL ${rvol !== null ? `${rvol.toFixed(1)}배` : "-"} / 전일대비 ${previousDayRatio !== null ? `${previousDayRatio.toFixed(1)}배` : "-"} / 3분 변화 ${pct(shortReturn)}`,
     };
   }
   if (strongVolume && breakout && trendUp) {
     return {
-      action: "?뚰뙆 ?뺤씤",
+      action: "돌파 확인",
       tone: "buy",
-      headline: "吏곸쟾 遺꾨큺 怨좎젏 ?뚰뙆? 嫄곕옒??議곌굔??媛숈씠 ?≫삍?듬땲??",
-      reason: `?꾩옱媛媛 理쒓렐 ?④린 怨좎젏沅뚯쓣 ?섏뼱?곌퀬 嫄곕옒??諛곗닔媛 媛뺥빀?덈떎. ?먯젅? ATR/VWAP 湲곗??쇰줈 吏㏐쾶 遊먯빞 ?⑸땲??`,
+      headline: "직전 분봉 고점 돌파와 거래량 조건이 같이 맞았습니다.",
+      reason: "현재가가 최근 단기 고점대를 넘어서고 거래량 배수가 강합니다. 손절은 ATR/VWAP 기준으로 짧게 잡아야 합니다.",
     };
   }
   if (strongVolume && trendUp) {
     return {
-      action: "愿???좎?",
+      action: "관심 유지",
       tone: "watch",
-      headline: "嫄곕옒?됱? 媛뺥븯吏留?吏꾩엯 湲곗????ы솗?몄씠 ?꾩슂?⑸땲??",
-      reason: "媛寃⑹씠 吏꾩엯 援ш컙???욧굅???④린 怨좎젏???ㅼ떆 ?섎뒗吏 ?뺤씤?섏꽭??",
+      headline: "거래량은 강하지만 진입 구간 확인이 더 필요합니다.",
+      reason: "가격이 진입 구간에 닿거나 단기 고점을 다시 넘는지 확인하세요.",
     };
   }
   return {
-    action: "湲곕떎由ъ꽭??,
+    action: "기다리세요",
     tone: "hold",
-    headline: "嫄곕옒???먮뒗 ?④린 異붿꽭 ?뺤씤???꾩쭅 遺議깊빀?덈떎.",
-    reason: "RVOL, ?꾩씪 ?鍮?嫄곕옒?? VWAP, ?④린 怨좎젏 ?뚰뙆媛 ?숈떆??遺숈뼱??鍮좊Ⅸ 吏꾩엯 ?좏샇濡?諛붾앸땲??",
+    headline: "거래량 또는 분봉 추세 확인이 아직 부족합니다.",
+    reason: "RVOL, 전일 대비 거래량, VWAP, 단기 고점 돌파가 동시에 붙어야 빠른 진입 신호로 봅니다.",
   };
 }
 
@@ -966,7 +1207,7 @@ function updateFastSignalCard(panel, decision) {
     <p>${textEscape(decision.reason)}</p>
   `;
   const card = Array.from(panel.querySelectorAll("section, article, div"))
-    .filter((node) => /?⑦? 湲곗? ?좏샇/.test(node.textContent || ""))
+    .filter((node) => /단타 기준 신호/.test(node.textContent || ""))
     .sort((a, b) => (a.textContent || "").length - (b.textContent || "").length)[0];
   if (card) {
     card.classList.add("kbk-pro-fast-signal", `kbk-pro-fast-${className}`);
@@ -1080,7 +1321,7 @@ async function enhanceMonitorPanel() {
         <div><strong>${textEscape(symbol)} ?먯껜 罹붾뱾李⑦듃</strong><span>理쒓렐 遺꾨큺 湲곗?, VWAP ?뚮? ?먯꽑 / 吏꾩엯쨌?먯젅 湲곗????쒖떆</span></div>
         <span>${new Date().toLocaleTimeString("ko-KR")}</span>
       </div>
-      ${candleChartSvg(bars, price, { VWAP: vwap, 吏꾩엯: entryLow, ?먯젅: atrStop })}
+      ${candleChartSvg(bars, price, { VWAP: vwap, entry: entryLow, stop: atrStop })}
     `;
     const basis = document.createElement("section");
     basis.className = "kbk-pro-basis";
