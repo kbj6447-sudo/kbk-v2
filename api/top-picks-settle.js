@@ -63,9 +63,18 @@ function settleSnapshot(snapshot) {
     watch: [],
     block: [],
   };
+  const gradeBuckets = {
+    S: [],
+    A: [],
+    B: [],
+    C: [],
+    D: [],
+  };
   for (const item of snapshot.items) {
     if (item.returnPct === null || item.returnPct === undefined) continue;
     buckets[verdictBucket(item.verdict)].push(item.returnPct);
+    const grade = String(item.grade || "").toUpperCase();
+    if (gradeBuckets[grade]) gradeBuckets[grade].push(item.returnPct);
   }
   snapshot.summary = {
     buyAvgReturn: average(buckets.buy),
@@ -74,6 +83,16 @@ function settleSnapshot(snapshot) {
     buyCount: buckets.buy.length,
     watchCount: buckets.watch.length,
     blockCount: buckets.block.length,
+    gradeSAvgReturn: average(gradeBuckets.S),
+    gradeAAvgReturn: average(gradeBuckets.A),
+    gradeBAvgReturn: average(gradeBuckets.B),
+    gradeCAvgReturn: average(gradeBuckets.C),
+    gradeDAvgReturn: average(gradeBuckets.D),
+    gradeSCount: gradeBuckets.S.length,
+    gradeACount: gradeBuckets.A.length,
+    gradeBCount: gradeBuckets.B.length,
+    gradeCCount: gradeBuckets.C.length,
+    gradeDCount: gradeBuckets.D.length,
   };
   return snapshot;
 }

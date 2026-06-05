@@ -100,7 +100,7 @@ function deriveScalpSignal(item, setup = {}) {
   const dayHigh = toNumber(item?.dayHigh ?? item?.regularMarketDayHigh);
   const highPullbackPct = price > 0 && dayHigh > 0 ? ((dayHigh - price) / dayHigh) * 100 : null;
 
-  const overheated = setup.overheated === true || change >= 80 || (rsi !== null && rsi >= 80);
+  const overheated = setup.overheated === true || change >= 80 || (rsi !== null && rsi >= 80 && change >= 20);
   const priceWeak = change < 0 || String(item?.oneMinuteTrend ?? "").toLowerCase().includes("down");
   const vwapWeak = vwapBelow && !vwapNear;
 
@@ -428,7 +428,7 @@ function topPickSetupProfile(item, price, volume, change) {
   const resurge = toNumber(item?.reSurgeSetupScore) ?? 50;
   const reclaim = toNumber(item?.vwapReclaimScore) ?? 50;
 
-  const overheated = change >= 80 || rsi >= 80;
+  const overheated = change >= 80 || (rsi !== null && rsi >= 80 && change >= 20);
   const veryExtended = change >= 120 || (highPosition !== null && highPosition >= 88 && change >= 60);
   const highFailed = highPullbackPct !== null && highPullbackPct >= 18 && change >= 25;
   const extremeRvolWeak = rvol !== null && rvol >= 8 && highPullbackPct !== null && highPullbackPct >= 22 && !vwapAbove;

@@ -70,6 +70,16 @@ function summarizeSnapshot(snapshot) {
     buyCount: summary.buyCount ?? 0,
     watchCount: summary.watchCount ?? 0,
     blockCount: summary.blockCount ?? 0,
+    gradeSAvgReturn: summary.gradeSAvgReturn ?? null,
+    gradeAAvgReturn: summary.gradeAAvgReturn ?? null,
+    gradeBAvgReturn: summary.gradeBAvgReturn ?? null,
+    gradeCAvgReturn: summary.gradeCAvgReturn ?? null,
+    gradeDAvgReturn: summary.gradeDAvgReturn ?? null,
+    gradeSCount: summary.gradeSCount ?? 0,
+    gradeACount: summary.gradeACount ?? 0,
+    gradeBCount: summary.gradeBCount ?? 0,
+    gradeCCount: summary.gradeCCount ?? 0,
+    gradeDCount: summary.gradeDCount ?? 0,
     notes: Array.isArray(snapshot.notes) ? snapshot.notes : [],
   };
 }
