@@ -157,9 +157,13 @@ function fdVwapFlags(setup = {}, vwapLabel = "") {
 function buildFinalDecisionReasons(input, scalp) {
   const positive = [];
   const warning = [];
+  const accelerationLabel = String(input.accelerationLabel ?? "");
 
   if (input.volumeQualityScore >= 60) positive.push("거래량 품질 우수");
-  if (input.surgeAccelerationScore >= 60) positive.push("최근 거래량 가속도 강함");
+  if (accelerationLabel === "수급 가속도 강함") positive.push(accelerationLabel);
+  else if (accelerationLabel === "수급 가속도 보통") positive.push(accelerationLabel);
+  else if (accelerationLabel === "가속도 데이터 부족") positive.push(accelerationLabel);
+  else if (input.surgeAccelerationScore >= 60) positive.push("최근 거래량 가속도 강함");
   if (input.vwapAbove) positive.push("VWAP 위 유지");
   else if (input.vwapNear) positive.push("VWAP 근처");
   if (input.higherLow >= 60) positive.push("Higher Low 형성");
@@ -169,7 +173,8 @@ function buildFinalDecisionReasons(input, scalp) {
   if (input.rsi !== null && input.rsi >= 70) warning.push(`RSI ${Math.round(input.rsi)}`);
   if (input.change >= 42) warning.push(`당일 +${input.change.toFixed(1)}% 상승`);
   if (input.vwapFarBelow) warning.push("VWAP 크게 이탈");
-  if (input.surgeAccelerationScore < 60) warning.push("수급 가속도 약함");
+  if (accelerationLabel === "수급 가속도 약함") warning.push(accelerationLabel);
+  else if (!accelerationLabel && input.surgeAccelerationScore < 60) warning.push("수급 가속도 약함");
   if (scalp.action === "진입 주의") warning.push(`실시간 단타 시그널: ${scalp.action}`);
   if (scalp.action === "관심 유지") warning.push(`실시간 단타 시그널: ${scalp.action}`);
 
@@ -199,6 +204,7 @@ function finalDecision(input) {
     topPickScore: top,
     volumeQualityScore: vq,
     surgeAccelerationScore: sa,
+    accelerationLabel: input.accelerationLabel,
     chaseRisk,
     vwapAbove,
     vwapNear,
@@ -354,6 +360,9 @@ function computeSurgeAccelerationScore(item) {
   const surgePrecursorScore = topPickItemField(item, "surgePrecursorScore") ?? 50;
   const accel1m = topPickItemField(item, "volumeAcceleration1m");
   const accel5m = topPickItemField(item, "volumeAcceleration5m");
+  const accel5mWindow = topPickItemField(item, "volumeAcceleration5mWindow");
+  const tradeValueAccel5mWindow = topPickItemField(item, "tradeValueAcceleration5mWindow");
+  const hasAccelerationData = [accel1m, accel5m, accel5mWindow, tradeValueAccel5mWindow].some((value) => value !== null);
   let score = Math.round(clampTopPickScore(
     volumeAccelerationScore * 0.42
     + momentumExpansionScore * 0.28
@@ -362,11 +371,22 @@ function computeSurgeAccelerationScore(item) {
   if (accel5m !== null && accel5m >= 2.2) score = Math.round(clampTopPickScore(score + 8));
   else if (accel5m !== null && accel5m >= 1.5) score = Math.round(clampTopPickScore(score + 4));
   if (accel1m !== null && accel1m >= 2) score = Math.round(clampTopPickScore(score + 3));
+  const accelerationLabel = !hasAccelerationData
+    ? "가속도 데이터 부족"
+    : score >= 72
+      ? "수급 가속도 강함"
+      : score >= 58
+        ? "수급 가속도 보통"
+        : "수급 가속도 약함";
   return {
     score,
     volumeAccelerationScore,
     accel1m,
     accel5m,
+    accel5mWindow,
+    tradeValueAccel5mWindow,
+    hasAccelerationData,
+    accelerationLabel,
     strong: score >= 72,
     moderate: score >= 58,
     contributed: score >= 58 && (
@@ -567,6 +587,8 @@ function topPickReasoning(item, metrics) {
     priority: decision === "매수 가능" ? 3 : decision === "관찰" ? 2 : 0,
     volumeQualityScore: volumeQuality.score,
     surgeAccelerationScore: surgeAcceleration.score,
+    hasAccelerationData: surgeAcceleration.hasAccelerationData,
+    accelerationLabel: surgeAcceleration.accelerationLabel,
   };
 }
 
@@ -894,6 +916,7 @@ async function renderTopPicksOnly() {
             topPickScore: finalScore,
             volumeQualityScore: reasoning.volumeQualityScore,
             surgeAccelerationScore: reasoning.surgeAccelerationScore,
+            accelerationLabel: reasoning.accelerationLabel,
             chaseRisk,
             vwapAbove: setup.vwapAbove,
             vwapNear: setup.vwapNear,
