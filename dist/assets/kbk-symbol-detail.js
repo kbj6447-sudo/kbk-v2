@@ -925,7 +925,7 @@ function setupBiasOf(item, price, change, rvol, vwapGood, trendGood) {
   const notOverChased = change >= 1 && change <= 45;
   const lowRecovery = highPosition !== null && highPosition >= 15 && highPosition <= 70;
   const highFailed = highPullbackPct !== null && highPullbackPct >= 18 && change >= 25;
-  const overheated = change >= 80 || rsi >= 80;
+  const overheated = change >= 80 || (rsi >= 80 && change >= 20);
   const extremeRvolWeak = rvol >= 8 && highPullbackPct !== null && highPullbackPct >= 22 && (!vwapGood || !trendGood);
   const strongEarlySignal = volumeStarting
     && notOverChased
@@ -1050,6 +1050,13 @@ function scoreTopPick(item) {
   else verdict = "愿李?;
 
   const reasons = [];
+  const verdictReasonCodes = [];
+  if (setupBias.overheated) verdictReasonCodes.push("overheated");
+  if (setupBias.highFailed) verdictReasonCodes.push("highFailed");
+  if (setupBias.extremeRvolWeak) verdictReasonCodes.push("extremeRvolWeak");
+  if (chaseRisk >= 82) verdictReasonCodes.push("chaseRiskBlock");
+  if (finalScore >= 76 && setupBias.strongEarlySignal && chaseRisk < 68) verdictReasonCodes.push("buyableSetup");
+  else verdictReasonCodes.push("watchSetup");
   if (setupBias.strongEarlySignal) reasons.push("珥덉엯 ?뚮났 ?좏샇");
   if (setupBias.underDollarLowRvol) reasons.push("RVOL 3諛?誘몃쭔 媛뺣벑");
   if (setupBias.highFailed) reasons.push("怨좎젏 ?댄깉 ?꾪뿕");
@@ -1080,6 +1087,7 @@ function scoreTopPick(item) {
     chaseRisk: Math.round(chaseRisk),
     finalScore,
     verdict,
+    verdictReasonCodes,
     setupBias,
     volumeQualityScore: volumeQuality.score,
     surgeAccelerationScore: surgeAcceleration.score,
@@ -1089,6 +1097,7 @@ function scoreTopPick(item) {
 
 function enrichTopPickDecision(pick) {
   const item = pick?.item ?? {};
+  const verdict = String(pick?.verdict ?? "愿李?");
   const preMarketChange = num(item?.preMarketChangePercent) ?? pick?.change ?? 0;
   const vwap = String(pick?.vwap ?? "");
   const vwapBelow = vwap.includes("?꾨옒") || vwap.toLowerCase().includes("below");
@@ -1104,19 +1113,12 @@ function enrichTopPickDecision(pick) {
   const priceWeak = (pick?.change ?? 0) < 0 || pick?.trend !== "?곸듅";
   const volumeButWeak = volumeGood && priceWeak;
 
-  let finalScore = num(pick?.finalScore) ?? 0;
-  if (negativeSession && vwapBelow) finalScore -= severeDrop ? 22 : 14;
-  if (elevatedRisk && (pick?.change ?? 0) >= 12) finalScore -= 10;
-  if (volumeButWeak) finalScore -= 8;
-  if (overheated) finalScore -= veryOverheated ? 12 : 6;
-  finalScore = Math.round(clampScore(finalScore));
-
-  let verdict = pick?.verdict ?? "愿李?;
-  if (severeDrop && vwapBelow) verdict = "吏꾩엯 湲덉?";
-  else if ((negativeSession && vwapBelow) || elevatedRisk || volumeButWeak || veryOverheated) verdict = "愿李?;
-  else if (finalScore <= 44 || ((pick?.chaseRisk ?? 0) >= 82 && vwapBelow)) verdict = "吏꾩엯 湲덉?";
-  else if (finalScore >= 78 && !negativeSession && !vwapBelow && !elevatedRisk && (pick?.chaseRisk ?? 0) < 62) verdict = "理쒖슦???⑦? ?꾨낫";
-  else if (finalScore >= 76 && pick?.verdict === "留ㅼ닔 媛??) verdict = "留ㅼ닔 媛??;
+  let displayFinalScore = num(pick?.finalScore) ?? 0;
+  if (negativeSession && vwapBelow) displayFinalScore -= severeDrop ? 22 : 14;
+  if (elevatedRisk && (pick?.change ?? 0) >= 12) displayFinalScore -= 10;
+  if (volumeButWeak) displayFinalScore -= 8;
+  if (overheated) displayFinalScore -= veryOverheated ? 12 : 6;
+  displayFinalScore = Math.round(clampScore(displayFinalScore));
 
   const volumeQuality = computeVolumeQualityScore(item, pick?.price ?? 0, pick?.volume ?? 0, pick?.rvol ?? 1);
   const surgeAcceleration = computeSurgeAccelerationScore(item);
@@ -1135,8 +1137,8 @@ function enrichTopPickDecision(pick) {
   return {
     ...pick,
     preMarketChange,
-    finalScore,
     verdict,
+    displayFinalScore,
     reasons: reasons.length ? reasons : ["媛寃?嫄곕옒??援ъ“ 媛먯떆"],
     selectionSections: explanation.sections,
     detailReasons: explanation.detailReasons,
@@ -1146,7 +1148,7 @@ function enrichTopPickDecision(pick) {
     riskScore: Math.round(riskScore),
     volumeQualityScore: explanation.volumeQualityScore,
     surgeAccelerationScore: explanation.surgeAccelerationScore,
-    baseFinalScore: num(pick?.finalScore) ?? 0,
+    baseFinalScore: num(pick?.baseFinalScore) ?? num(pick?.finalScore) ?? 0,
   };
 }
 
@@ -1267,7 +1269,7 @@ function renderTopPicks(picks, updatedAt) {
         +       '<h3>' + esc(pick.symbol) + '</h3>'
         +       '<p>' + esc(pick.name) + '</p>'
         +     '</div>'
-        +     '<div class="kbk-top-score">' + pick.finalScore + '<span>' + (index === 0 ? '1?? : esc(pick.verdict)) + '</span></div>'
+        +     '<div class="kbk-top-score">' + (pick.displayFinalScore ?? pick.finalScore) + '<span>' + (index === 0 ? '1?? : esc(pick.verdict)) + '</span></div>'
         +   '</div>'
         +   '<div class="kbk-top-row">'
         +     '<strong>' + pricePairText(pick.price) + '</strong>'
@@ -1299,7 +1301,7 @@ function renderTopPicks(picks, updatedAt) {
         +         '<h4>理쒖쥌 ?먮떒</h4>'
         +         '<div class="kbk-top-judgement ' + verdictTone + '">' + esc(pick.verdict) + '</div>'
         +         '<ul>'
-        +           '<li>?듯빀 ?먯닔: ' + pick.finalScore + '??/li>'
+        +           '<li>?듯빀 ?먯닔: ' + (pick.displayFinalScore ?? pick.finalScore) + '??/li>'
         +           '<li>湲곕낯 ?먯닔: ' + pick.baseFinalScore + '??/li>'
         +           '<li>異붽꺽 由ъ뒪?? ' + pick.chaseRisk + '??/li>'
         +         '</ul>'
