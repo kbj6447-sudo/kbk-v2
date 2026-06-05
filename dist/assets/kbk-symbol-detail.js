@@ -1095,6 +1095,33 @@ function scoreTopPick(item) {
   };
 }
 
+function topPickScoreGrade(score) {
+  const value = num(score) ?? 0;
+  if (value >= 85) return "S등급";
+  if (value >= 75) return "A등급";
+  if (value >= 65) return "B등급";
+  if (value >= 55) return "C등급";
+  return "D등급";
+}
+
+function topPickScoreInterpretation(score) {
+  const value = num(score) ?? 0;
+  if (value >= 85) return { title: "최상위 후보", lines: ["강한 거래량, 추세, VWAP 조건 충족", "우선 검토"] };
+  if (value >= 75) return { title: "유망 후보", lines: ["진입 가능성 높음", "관찰 우선순위 높음"] };
+  if (value >= 65) return { title: "관찰 후보", lines: ["일부 조건 부족", "추가 확인 필요"] };
+  if (value >= 55) return { title: "보조 후보", lines: ["신호 약함", "우선순위 낮음"] };
+  return { title: "낮은 우선순위", lines: ["당장 진입 비추천"] };
+}
+
+function renderTopPickScoreInterpretation(score) {
+  const interpretation = topPickScoreInterpretation(score);
+  return '<div class="kbk-score-interpretation">'
+    + '<h4>점수 해석</h4>'
+    + '<strong>' + esc(interpretation.title) + '</strong>'
+    + '<ul>' + interpretation.lines.map((line) => '<li>' + esc(line) + '</li>').join('') + '</ul>'
+    + '</div>';
+}
+
 function enrichTopPickDecision(pick) {
   const item = pick?.item ?? {};
   const verdict = String(pick?.verdict ?? "愿李?");
@@ -1168,7 +1195,8 @@ function ensureTopPickStyles() {
     .kbk-top-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}
     .kbk-top-head h3{margin:0;color:#0f172a;font-size:1.7rem}
     .kbk-top-head p{margin:8px 0 0;color:#475569}
-    .kbk-top-score{font-size:3rem;font-weight:900;line-height:1;color:#0f172a;text-align:right}
+    .kbk-top-score{font-size:3rem;font-weight:900;line-height:1;color:#0f172a;text-align:right;overflow-wrap:anywhere}
+    .kbk-top-score small{display:block;font-size:.9rem;font-weight:900;color:#334155;margin-top:6px;line-height:1.2}
     .kbk-top-score span{display:block;font-size:.78rem;color:#fff;background:#2563eb;border-radius:999px;padding:7px 10px;margin-top:8px}
     .kbk-top-row{display:flex;flex-wrap:wrap;gap:12px;color:#334155;margin-top:14px}
     .kbk-top-row strong{color:#0f172a}
@@ -1178,6 +1206,11 @@ function ensureTopPickStyles() {
     .kbk-top-metrics b{display:block;color:#0f172a;margin-top:5px}
     .kbk-top-reasons{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
     .kbk-top-reasons span{background:#cffafe;color:#155e75;border-radius:999px;padding:7px 10px;font-size:.78rem;font-weight:700}
+    .kbk-score-interpretation{margin-top:16px;background:#f8fafc;border:1px solid rgba(15,23,42,.08);border-radius:16px;padding:13px 14px;color:#334155;overflow-wrap:anywhere}
+    .kbk-score-interpretation h4{margin:0 0 7px;color:#64748b;font-size:.78rem;font-weight:900}
+    .kbk-score-interpretation strong{display:block;color:#0f172a;font-size:1rem;font-weight:900;line-height:1.35}
+    .kbk-score-interpretation ul{margin:8px 0 0;padding-left:18px}
+    .kbk-score-interpretation li{font-size:.84rem;line-height:1.45;font-weight:700}
     .kbk-top-explain{display:grid;gap:12px;margin-top:14px}
     .kbk-top-explain-block{background:#f8fafc;border:1px solid rgba(15,23,42,.08);border-radius:14px;padding:12px 14px}
     .kbk-top-explain-block h5{margin:0 0 8px;color:#0f172a;font-size:.9rem}
@@ -1261,6 +1294,8 @@ function renderTopPicks(picks, updatedAt) {
     + '<br>??? ??: ' + (updatedAt ? new Date(updatedAt).toLocaleTimeString('ko-KR') : new Date().toLocaleTimeString('ko-KR'))
     + '</section>'
     + (enrichedPicks.length ? ('<section class="kbk-top-grid">' + enrichedPicks.map((pick, index) => {
+      const displayScore = pick.displayFinalScore ?? pick.finalScore;
+      const scoreGrade = topPickScoreGrade(displayScore);
       const verdictTone = pick.verdict === '留ㅼ닔 媛?? || pick.verdict === '理쒖슦???⑦? ?꾨낫' ? 'buy' : pick.verdict === '愿李? || pick.verdict === '?곸쐞 媛먯떆 ?꾨낫' ? 'watch' : 'block';
       return ''
         + '<article class="kbk-top-card" data-top-pick-card="' + esc(pick.symbol) + '" tabindex="0" role="button" aria-expanded="false">'
@@ -1269,7 +1304,7 @@ function renderTopPicks(picks, updatedAt) {
         +       '<h3>' + esc(pick.symbol) + '</h3>'
         +       '<p>' + esc(pick.name) + '</p>'
         +     '</div>'
-        +     '<div class="kbk-top-score">' + (pick.displayFinalScore ?? pick.finalScore) + '<span>' + (index === 0 ? '1?? : esc(pick.verdict)) + '</span></div>'
+        +     '<div class="kbk-top-score">' + displayScore + '점 <small>(' + esc(scoreGrade) + ')</small><span>' + (index === 0 ? '1?? : esc(pick.verdict)) + '</span></div>'
         +   '</div>'
         +   '<div class="kbk-top-row">'
         +     '<strong>' + pricePairText(pick.price) + '</strong>'
@@ -1284,6 +1319,7 @@ function renderTopPicks(picks, updatedAt) {
         +     '<div><span>嫄곕옒???덉쭏</span><b>' + (pick.volumeQualityScore ?? '-') + '??/b></div>'
         +     '<div><span>?섍툒 媛??/span><b>' + (pick.surgeAccelerationScore ?? '-') + '??/b></div>'
         +   '</div>'
+        +   renderTopPickScoreInterpretation(displayScore)
         +   '<div class="kbk-top-reasons">' + pick.reasons.map((reason) => '<span>' + esc(reason) + '</span>').join('') + '</div>'
         +   '<div class="kbk-top-toggle">移대뱶瑜??뚮윭 ?좎젙 ?댁쑀쨌二쇱쓽 ?붿씤쨌理쒖쥌 ?먮떒???쇱튌 ???덉뒿?덈떎.</div>'
         +   '<div class="kbk-top-detail" hidden>'
