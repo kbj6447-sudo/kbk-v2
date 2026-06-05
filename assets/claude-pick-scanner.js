@@ -31,73 +31,54 @@
   function calcClaudeScore(item) {
     const rvol = item.relativeVolume ?? item.volumeRatio ?? 0;
     const changePct = Math.abs(item.changePercent ?? 0);
-    const aboveVwap = item.aboveVwap;
+    const rawVwapState = String(item.vwapState ?? item.technical?.vwapState ?? '').toLowerCase();
+    const aboveVwap = item.aboveVwap === true || rawVwapState === 'above';
+    const nearVwap = rawVwapState === 'near' || rawVwapState === 'recovering' || rawVwapState === 'reclaim';
+    const vwapState = aboveVwap ? 'above' : nearVwap ? 'near' : item.aboveVwap === false || rawVwapState === 'below' ? 'below' : 'unknown';
     const trend = item.oneMinuteTrend?.toLowerCase();
     const stage = item.stage ?? '';
     const preSurge = item.surgePrecursorScore ?? 50;
     const rsi = item.rsi ?? 50;
-    const scannerScore = item.scannerScore ?? 50;
-    const hasVwap = item.vwap && item.vwap > 0;
     const pullback = item.technical?.pullbackVolumeSignal ?? false;
     const ma5vs20 = item.technical?.ma5vs20 ?? item.ma5vs20;
     const commonSignalBonus = Math.max(0, Math.min(10, Math.round(num(item.rankAuxiliaryScore) ?? 0)));
     const volumeQuality = num(item.volumeQualityScore);
-    const volumeQualityBonus = volumeQuality === null ? 0 : Math.round((volumeQuality - 50) * 0.12);
-
-    // 1. RVOL 점수 (핵심 - 가격 대비 거래량 폭발)
-    // 아직 가격은 조용한데 거래량이 먼저 터지는 것이 핵심
+    const volumeAcceleration = num(item.volumeAccelerationScore ?? item.technical?.volumeAccelerationScore) ?? 0;
+    const higherLow = num(item.higherLowScore ?? item.technical?.higherLowScore) ?? 0;
+    const vwapReclaim = num(item.vwapReclaimScore ?? item.technical?.vwapReclaimScore) ?? 0;
+    const fiveMinuteBreakout = Boolean(item.fiveMinuteHighBreakout ?? item.technical?.fiveMinuteHighBreakout);
+    const dropRisk = Math.max(0, Math.min(100, Math.round((rsi >= 90 ? 28 : rsi >= 80 ? 18 : 0) + (changePct >= 200 ? 34 : changePct >= 100 ? 24 : changePct >= 50 ? 14 : 0) + (vwapState === 'below' ? 12 : 0) + (trend === 'down' ? 12 : 0))));
     let rvolScore = 0;
-    if (rvol >= 50)       rvolScore = 40;
-    else if (rvol >= 20)  rvolScore = 35;
-    else if (rvol >= 10)  rvolScore = 28;
-    else if (rvol >= 5)   rvolScore = 20;
-    else if (rvol >= 3)   rvolScore = 13;
-    else if (rvol >= 2)   rvolScore = 7;
-
-    // RVOL은 높은데 가격 상승이 작으면 보너스 (핵심 매집 신호)
-    const rvolVsPricePremium = (rvol >= 5 && changePct <= 20) ? 8 :
-                               (rvol >= 3 && changePct <= 15) ? 5 : 0;
-
-    // 2. 가격 아직 안 오른 점수 (낮을수록 선취매 기회)
+    if (rvol >= 50) rvolScore = 40;
+    else if (rvol >= 20) rvolScore = 35;
+    else if (rvol >= 10) rvolScore = 28;
+    else if (rvol >= 5) rvolScore = 20;
+    else if (rvol >= 3) rvolScore = 18;
+    else if (rvol >= 2) rvolScore = 12;
+    else if (rvol >= 1.2) rvolScore = 7;
+    const rvolTrendBonus = rvol >= 3 ? 8 : rvol >= 2 ? 5 : rvol >= 1.2 ? 2 : 0;
     let priceScore = 0;
-    if (changePct <= 10)       priceScore = 28;
-    else if (changePct <= 20)  priceScore = 22;
-    else if (changePct <= 35)  priceScore = 14;
-    else if (changePct <= 50)  priceScore = 6;
-
-    // 3. 스테이지 점수 (PRE-SURGE가 최고)
-    const stageScore = stage === 'PRE-SURGE' ? 18 :
-                       stage === 'EARLY SURGE' ? 13 :
-                       stage === 'ACCUMULATION' ? 10 : 0;
-
-    // 4. VWAP 관계 (VWAP 위 = 매수세 우위)
-    const vwapScore = hasVwap ? (aboveVwap ? 9 : -3) : 0;
-
-    // 5. 1분봉 추세
-    const trendScore = trend === 'up' ? 8 : trend === 'down' ? -5 : 0;
-
-    // 6. RSI (적정 구간 = 과매수 아닌 것)
-    const rsiScore = rsi > 78 ? -12 : rsi > 70 ? -6 :
-                     rsi >= 40 && rsi <= 65 ? 7 : 0;
-
-    // 7. 기존 preSurge 점수 보조 반영 (20%)
+    if (changePct >= 200) priceScore = 14;
+    else if (changePct >= 100) priceScore = 18;
+    else if (changePct >= 50) priceScore = 22;
+    else if (changePct >= 20) priceScore = 18;
+    else if (changePct >= 5) priceScore = 14;
+    const stageScore = stage === 'PRE-SURGE' ? 18 : stage === 'EARLY SURGE' ? 13 : stage === 'ACCUMULATION' ? 10 : 0;
+    const vwapScore = aboveVwap ? 8 : nearVwap ? 4 : 0;
+    const trendScore = trend === 'up' ? 8 : 0;
+    const accelerationBonus = volumeAcceleration >= 70 ? 10 : volumeAcceleration >= 55 ? 6 : 0;
+    const higherLowBonus = higherLow >= 75 ? 10 : higherLow >= 60 ? 6 : 0;
+    const reclaimBonus = vwapReclaim >= 70 || nearVwap ? 8 : vwapReclaim >= 55 ? 4 : 0;
+    const breakoutBonus = fiveMinuteBreakout ? 10 : 0;
+    const rsiPenalty = rsi >= 90 ? -6 : rsi >= 80 ? -3 : 0;
+    const changePenalty = changePct >= 200 ? -8 : changePct >= 100 ? -4 : changePct >= 50 ? -2 : 0;
     const preSurgeBonus = Math.round((preSurge - 50) * 0.08);
-
-    // 8. 눌림목 신호 (이미 올라갔다 눌린 후 재상승 시도)
     const pullbackBonus = pullback ? 5 : 0;
-
-    // 9. MA5 > MA20 골든크로스
     const maScore = ma5vs20 === 'above' ? 5 : 0;
-
-    const total = rvolScore + rvolVsPricePremium + priceScore + stageScore +
-                  vwapScore + trendScore + rsiScore + preSurgeBonus + pullbackBonus + maScore + commonSignalBonus;
-    const adjustedTotal = total + volumeQualityBonus;
-    const cappedTotal = volumeQuality !== null && volumeQuality < 30 ? Math.min(adjustedTotal, 44) : adjustedTotal;
-
-    return {
-      total: Math.max(0, Math.min(100, Math.round(cappedTotal))),
-      breakdown: { rvolScore, rvolVsPricePremium, priceScore, stageScore, vwapScore, trendScore, rsiScore, preSurgeBonus, pullbackBonus, maScore, commonSignalBonus, volumeQualityBonus }
-    };
+    const volumeQualityBonus = volumeQuality === null ? 0 : Math.max(0, Math.round((volumeQuality - 40) * 0.08));
+    const total = rvolScore + rvolTrendBonus + priceScore + stageScore + vwapScore + trendScore + accelerationBonus + higherLowBonus + reclaimBonus + breakoutBonus + rsiPenalty + changePenalty + preSurgeBonus + pullbackBonus + maScore + commonSignalBonus + volumeQualityBonus;
+    const hardExcluded = rsi >= 95 || changePct > 300;
+    return { total: Math.max(0, Math.min(100, Math.round(total))), hardExcluded, dropRisk, volumeAcceleration, vwapState, breakdown: { rvolScore, rvolTrendBonus, priceScore, stageScore, vwapScore, trendScore, accelerationBonus, higherLowBonus, reclaimBonus, breakoutBonus, rsiPenalty, changePenalty, preSurgeBonus, pullbackBonus, maScore, commonSignalBonus, volumeQualityBonus } };
   }
 
   // ---- 신호 등급 분류 ----
@@ -119,13 +100,13 @@
         const sc = calcClaudeScore(item);
         const rvol = item.relativeVolume ?? item.volumeRatio ?? 0;
         const changePct = item.changePercent ?? 0;
-        return { ...item, claudeScore: sc.total, breakdown: sc.breakdown, rvol, changePct };
+        return { ...item, claudeScore: sc.total, hardExcluded: sc.hardExcluded, breakdown: sc.breakdown, dropRisk: sc.dropRisk, volumeAcceleration: sc.volumeAcceleration, vwapState: sc.vwapState, rvol, changePct };
       })
-      .filter(item => item.claudeScore >= 40)
+      .filter(item => !item.hardExcluded)
       .sort((a, b) => b.claudeScore - a.claudeScore);
 
-    const top = scored.slice(0, 3); // 강력 신호
-    const watch = scored.slice(3, 15); // 관심
+    const top = scored.slice(0, 10);
+    const watch = scored.slice(10, 30);
 
     function fmtKrw(usd) {
       return Math.round(usd * krw).toLocaleString('ko-KR');
@@ -139,6 +120,9 @@
       const priceKrw = fmtKrw(livePrice);
       const priceText = `${priceKrw}원 (${fmtUsd(livePrice)})`;
       const rvolDisplay = rvol >= 1 ? rvol.toFixed(1) + 'x' : '-';
+      const dropRiskText = Math.round(item.dropRisk ?? 0);
+      const accelText = item.volumeAcceleration ? (item.volumeAcceleration >= 10 ? item.volumeAcceleration.toFixed(1) : item.volumeAcceleration.toFixed(2)) : '-';
+      const vwapLabel = item.vwapState === 'above' ? 'above' : item.vwapState === 'near' ? 'near' : item.vwapState === 'below' ? 'below' : (item.aboveVwap ? 'above' : 'unknown');
       const changeColor = changePct >= 0 ? '#16a34a' : '#dc2626';
       const rankEmoji = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '';
 
@@ -202,6 +186,18 @@
             </span>
             <span style="background:#f8fafc; color:#374151; border-radius:6px; padding:2px 8px; font-size:11px">
               RSI ${item.rsi?.toFixed(0)??'-'}
+            </span>
+            <span style="background:#eef2ff; color:#3730a3; border-radius:6px; padding:2px 8px; font-size:11px">
+              Accel ${accelText}
+            </span>
+            <span style="background:#ecfeff; color:#155e75; border-radius:6px; padding:2px 8px; font-size:11px">
+              VWAP ${vwapLabel}
+            </span>
+            <span style="background:${item.dropRisk >= 80 ? '#fef3c7' : '#f1f5f9'}; color:${item.dropRisk >= 80 ? '#92400e' : '#475569'}; border-radius:6px; padding:2px 8px; font-size:11px">
+              Drop ${dropRiskText}
+            </span>
+            <span style="background:#111827; color:#fff; border-radius:6px; padding:2px 8px; font-size:11px">
+              Score ${item.claudeScore}
             </span>
           </div>
 

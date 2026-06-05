@@ -209,3 +209,50 @@
     </div>
   `}async function It(){try{let e;try{e=await Y(j.exchange)}catch{e=await Y("https://open.er-api.com/v6/latest/USD")}d.exchangeRate=l(e.rate)??l(e.usdKrw)??l(e.exchangeRate),!d.exchangeRate&&e.rates?.KRW&&(d.exchangeRate=l(e.rates.KRW)),$("exchange-rate").textContent=d.exchangeRate?`USD/KRW ${Math.round(d.exchangeRate).toLocaleString("ko-KR")}`:"환율 없음"}catch{$("exchange-rate").textContent="환율 조회 실패"}}function Dt(){$("refresh-btn").addEventListener("click",()=>Ve(!0)),$("monitor-refresh").addEventListener("click",()=>fe(!0)),$("telegram-settings").addEventListener("click",()=>{const e=Ce(),t=prompt("텔레그램 Chat ID를 입력하세요. Vercel 환경변수 TELEGRAM_CHAT_ID를 쓰면 비워둬도 됩니다.",e.chatId||"");t!==null&&(ot({...e,enabled:!0,chatId:t}),alert("텔레그램 알림 설정을 저장했습니다. 선택 종목에서 매수/매도 신호가 뜰 때만 알림을 보냅니다."))}),$("search-btn").addEventListener("click",()=>be($("ticker-input").value)),$("ticker-input").addEventListener("keydown",e=>{e.key==="Enter"&&be($("ticker-input").value)}),$("candidate-list").addEventListener("click",e=>{const t=e.target.closest("[data-symbol]");t&&be(t.dataset.symbol)}),document.querySelectorAll("[data-selected-backtest]").forEach(e=>{e.addEventListener("click",()=>Rt(Number(e.dataset.selectedBacktest)))}),$("run-backtest").addEventListener("click",Vt),$("clear-signals").addEventListener("click",()=>{confirm("저장된 시그널 기록을 삭제할까요?")&&(ve([]),ae())})}Dt();ae();It().then(()=>Ve(!1));
 xe=function(e){const rank=t=>[t.entryAction?.action==="매수 가능"?1:0,t.scalpProfile?.vwapGood?1:0,t.scalpProfile?.higherLow??0,t.scalpProfile?.volumeAcceleration??0,t.rvol??0,t.scalpProfile?.reSurge??0,-(t.scalpProfile?.risk??0),t.scalpScore||0,t.dollarVolume||0];return[...e].sort((t,n)=>{const o=rank(n),s=rank(t);for(let r=0;r<o.length;r++){const c=o[r]-s[r];if(Math.abs(c)>1e-9)return c}return 0})};vt=function(e){const t=scalpProfile(e),n=_(e),o=q(e),s=l(e.rsi)??l(e.technical?.rsi),r=t.rvol>=3||t.rvol>=1.2&&(t.volumeAcceleration>=70||t.reSurge>=70),c=t.risk>=38||t.overheated||t.highPullback>=25||t.vwapWeak&&t.priceWeak,a=t.vwapGood&&t.higherLow>=58&&t.volumeAcceleration>=50&&r&&t.risk<34&&!t.overheated,i=a?"매수 가능":c?"진입 주의":"관찰",u=a?"buy":c?"avoid":"hold",h=[];return t.vwapGood&&h.push(n.state==="above"?"VWAP 위 유지":"VWAP 회복/근처"),t.higherLow>=58&&h.push("Higher Low 유지"),t.rvol>=3&&h.push("RVOL 3배 이상"),t.volumeAcceleration>=70&&h.push("거래량 가속도 강함"),t.reSurge>=70&&h.push("눌림 후 재상승 구조"),{action:i,tone:u,reason:a?"거래량과 VWAP, Higher Low가 동시에 맞는 단타 후보":c?"과열 또는 VWAP 약세 리스크가 있어 진입 주의":"방향 확인이 필요한 관찰 후보",lines:[`진입 근거: ${h.length?h.join(" · "):"추가 확인 필요"}`,`주의 요인: ${s>=80?"RSI 과열 · ":""}${o>=80?"+80% 이상 상승 · ":""}${t.highPullback>=25?"고점 대비 이탈 · ":""}${t.vwapWeak?"VWAP 아래 약세 · ":""}${!r?"거래량 기준 미달 · ":""}${c?"리스크 확인 필요":"특이 과열 없음"}`,`현재 판단: ${i}`]}};
+function surgeDropRisk(e){return l(e.dropRisk)??l(e.dropRiskScore)??l(e.chaseRiskScore)??l(e.riskScore)??l(e.scalpProfile?.risk)??0}
+function surgePenalty(e,rsi,change,dropRisk){let t=0;return rsi!==null&&rsi>=90?t-=6:rsi!==null&&rsi>=80&&(t-=3),change>=200?t-=8:change>=100?t-=4:change>=50&&(t-=2),dropRisk>=90?t-=20:dropRisk>=80&&(t-=4),t}
+function surgeReasonText(e){const t=e.surgeReasons||[];return t.length?t.join(" · "):"RVOL 1.2+ 기준으로 후보를 넓게 유지"}
+scalpProfile=function(e){const t=M(e),n=q(e),o=Q(e)??0,s=_(e),r=ue(e),c=at(e),a=de(e),i=l(e.rsi)??l(e.technical?.rsi),u=surgeDropRisk(e),h=l(e.dayHigh),p=h&&t!==null?(h-t)/h*100:null,g=l(e.higherLowScore)??l(e.technical?.higherLowScore)??(c.lowRebound!==null&&c.lowRebound>=2.5?68:50),v=l(e.volumeAccelerationScore)??l(e.technical?.volumeAccelerationScore)??r.score,S=l(e.reSurgeSetupScore)??l(e.technical?.reSurgeSetupScore)??(e.technical?.pullbackVolumeSignal?72:50),w=l(e.vwapReclaimScore)??l(e.technical?.vwapReclaimScore)??(s.state==="above"?80:s.state==="near"?62:45),I=t!==null&&h!==null?t>=h*.985:c.highPosition>=72,R=s.state==="above"?8:s.state==="near"?4:0,A=o>=3?14:o>=2?9:o>=1.2?4:0,L=v>=70?12:v>=55?7:(r.acceleration??0)>=1.2?4:0,f=g>=70?10:g>=58?6:0,b=S>=70?10:S>=58?6:0,m=I?9:0,k=w>=70?8:w>=55?4:0,C=H(A+R+L+f+b+m+k,0,100),P=H((i!==null&&i>=90?6:i!==null&&i>=80?3:0)+(n>=200?8:n>=100?4:n>=50?2:0)+(u>=90?20:u>=80?4:0),0,100);return{setup:C,risk:P,dropRisk:u,vwapGood:s.state==="above"||s.state==="near",vwapWeak:s.state==="below",higherLow:g,volumeAcceleration:v,rvol:o,reSurge:S,vwapReclaim:w,breakoutAttempt:I,overheated:i!==null&&i>=95||n>300,warning:i!==null&&i>=80||n>=50||u>=80,highPullback:p,priceWeak:a==="하락"||n<0}}
+Oe=function(e){const t=M(e),n=q(e),o=l(e.volume)??l(e.preMarketVolume),s=Q(e)??0,r=_(e),c=ue(e),a=at(e),i=t!==null&&o!==null?t*o:null,u=ct(e),h=de(e),p=l(e.rsi)??l(e.technical?.rsi),g=surgeDropRisk(e),v=scalpProfile(e),S=[],w=s>=3?(S.push("RVOL 3.0+"),18):s>=2?(S.push("RVOL 2.0+"),12):s>=1.2?(S.push("RVOL 1.2+"),6):0,I=c.acceleration>=3?(S.push("거래량 가속도 상승"),14):c.acceleration>=1.2?(S.push("거래량 증가"),7):0,R=r.state==="above"?(S.push("VWAP 위 +8"),8):r.state==="near"?(S.push("VWAP 근처 +4"),4):0,A=v.breakoutAttempt?(S.push("5분봉 고점 돌파"),10):0,L=v.vwapReclaim>=60&&r.state!=="below"?(S.push("VWAP 재돌파"),8):0,f=v.higherLow>=58?(S.push("Higher Low"),8):0,b=v.reSurge>=60?(S.push("눌림 후 재상승"),6):0,m=h==="상승"?(S.push("1분봉 상승"),6):0,k=n>=0&&n<=300?Math.min(14,Math.max(0,n/12)):0,C=surgePenalty(e,p,n,g),P=Math.round(H(44+w+I+R+A+L+f+b+m+k+C,0,100)),W=p!==null&&p>=95||n>300;W&&S.push(p!==null&&p>=95?"RSI 95+ 제외권":"상승률 300% 초과 제외권"),g>=90?S.push("Drop Risk 90+ 매매 금지"):g>=80&&S.push("Drop Risk 80~90 경고");return{...e,price:t,change:n,volume:o,rvol:s,vwapInfo:r,volumeVelocity:c,volatility:a,dollarVolume:i,spread:u,trend:h,upwardSetup:s>=1.2&&n>=0,scalpProfile:v,dropRisk:g,rsiValue:p===null?"-":Math.round(p),surgeReasons:S,hardExcluded:W,scalpScore:P,scalpStatus:it(P)}}
+xe=function(e){const rank=t=>[t.hardExcluded?-1:0,t.entryAction?.action==="매수 가능"?3:t.entryAction?.action==="매수 후보"?2:t.entryAction?.action==="진입 경고"?1:0,t.rvol>=1.2?1:0,t.scalpProfile?.breakoutAttempt?1:0,t.scalpProfile?.vwapReclaim??0,t.scalpProfile?.volumeAcceleration??0,t.scalpProfile?.higherLow??0,t.rvol??0,t.scalpScore||0,t.dollarVolume||0,-(t.dropRisk??0)];return[...e].sort((t,n)=>{const o=rank(n),s=rank(t);for(let r=0;r<o.length;r++){const c=o[r]-s[r];if(Math.abs(c)>1e-9)return c}return 0})}
+vt=function(e){const t=e.scalpProfile??scalpProfile(e),n=e.rsiValue==="-"?null:l(e.rsiValue),o=e.change??q(e),s=e.dropRisk??surgeDropRisk(e),r=e.hardExcluded,a=s>=90,i=t.rvol>=1.2,u=t.vwapGood||t.vwapWeak,h=t.breakoutAttempt||t.vwapReclaim>=60||t.higherLow>=58||t.volumeAcceleration>=55||t.reSurge>=60,p=[];return i&&p.push(`RVOL ${B(t.rvol)}`),t.volumeAcceleration>=55&&p.push("거래량 가속도"),t.breakoutAttempt&&p.push("5분봉 고점 돌파"),t.vwapReclaim>=60&&p.push("VWAP 재돌파"),t.higherLow>=58&&p.push("Higher Low"),t.vwapGood&&p.push("VWAP 우호"),{action:r?"제외권":a?"매매 금지":i&&h?"매수 가능":i||u?"매수 후보":"빠른 확인",tone:r||a?"avoid":i&&h?"buy":"watch",reason:r?"RSI 95 이상 또는 상승률 300% 초과로 제외권입니다.":a?"Drop Risk 90 이상이라 후보에는 보이지만 매매 금지입니다.":p.length?`${p.join(" · ")} 신호로 급등 후보에 올렸습니다.`:"필터 부족으로 탈락시키지 않고 후보 부족 보완용으로 유지합니다.",lines:[`선정 근거: ${p.length?p.join(" · "):"후보 수 확대"}`,`경고: ${n!==null&&n>=80?`RSI ${n} `:""}${o>=50?`상승률 ${V(o)} `:""}${s>=80?`Drop Risk ${Math.round(s)} `:""}${t.vwapWeak?"VWAP 아래 ":""}${a?"매매 금지":s>=80?"경고":"제외 없음"}`,`선정 점수: ${e.scalpScore}`]}}
+ft=function(e){const t=xe(e.map(n=>{const o=vt(n);return{...n,entryAction:o}}).filter(n=>n.symbol&&n.included!==!1));return t.slice(0,30)}
+Re=function(){const e=xe(d.items).slice(0,20);if($("candidate-summary").textContent=`급등 후보 ${e.length}개 · ${d.lastScanAt?new Date(d.lastScanAt).toLocaleTimeString("ko-KR"):"-"} · 5초마다 갱신`,!e.length){$("candidate-list").className="empty-state",$("candidate-list").innerHTML="급등 후보가 아직 없습니다. 필터를 완화해 계속 갱신 중입니다.";return}$("candidate-list").className="table-wrap",$("candidate-list").innerHTML=`
+    <table class="candidate-table">
+      <thead><tr><th>선택</th><th>티커</th><th>현재가</th><th>상승률</th><th>거래량</th><th>RVOL</th><th>가속도</th><th>VWAP</th><th>Drop</th><th>RSI</th><th>점수</th><th>상태</th></tr></thead>
+      <tbody>${e.map(t=>`
+        <tr class="${t.symbol===d.selectedSymbol?"selected":""}" data-symbol="${y(t.symbol)}">
+          <td><button class="select-btn" type="button">${t.symbol===d.selectedSymbol?"감시중":"선택"}</button></td>
+          <td><strong>${y(t.symbol)}</strong><small>${y(t.name||surgeReasonText(t))}</small></td>
+          <td>${x(M(t))}</td>
+          <td class="${t.change>=0?"up":"down"}">${V(t.change)}</td>
+          <td>${Le(t.volume)}</td>
+          <td>${B(t.rvol)}</td>
+          <td>${debugSpeedText(t)}</td>
+          <td>${y(t.vwapInfo.label)}</td>
+          <td>${Math.round(t.dropRisk??0)}</td>
+          <td>${t.rsiValue??"-"}</td>
+          <td><b class="${t.scalpScore>=90?"hot":t.scalpScore>=75?"warm":t.scalpScore>=60?"mid":"cold"}">${t.scalpScore}</b></td>
+          <td><span class="status ${t.entryAction?.tone||"watch"}">${y(t.entryAction?.action||t.scalpStatus.label)}</span></td>
+        </tr>
+      `).join("")}</tbody>
+    </table>`}
+Ue=function(){const e=d.items.slice(0,40);$("debug-panel").innerHTML=`
+    <div class="table-wrap">
+      <table class="debug-table">
+        <thead><tr><th>티커</th><th>거래대금</th><th>RVOL</th><th>가속도</th><th>VWAP</th><th>Drop Risk</th><th>RSI</th><th>선정 점수</th><th>선정 이유</th></tr></thead>
+        <tbody>${e.map(t=>`
+          <tr>
+            <td><strong>${y(t.symbol)}</strong></td>
+            <td>${x(t.dollarVolume)}</td>
+            <td>${B(t.rvol)}</td>
+            <td>${debugSpeedText(t)}</td>
+            <td>${y(t.vwapInfo.label)}</td>
+            <td>${Math.round(t.dropRisk??0)}${(t.dropRisk??0)>=90?" · 금지":(t.dropRisk??0)>=80?" · 경고":""}</td>
+            <td>${t.rsiValue??"-"}</td>
+            <td>${t.scalpScore}</td>
+            <td class="reason-cell">${y(surgeReasonText(t))}</td>
+          </tr>
+        `).join("")}</tbody>
+      </table>
+    </div>`}
