@@ -1325,7 +1325,12 @@ const BASE_SCANNER_SCREENER_IDS = [
   "small_cap_gainers",
   "undervalued_large_caps",
 ];
+const UNDER_ONE_SCANNER_IDS = [
+  "small_cap_stocks",
+  "aggressive_small_caps",
+];
 const BASE_SCANNER_ITEM_LIMIT = 80;
+const UNDER_ONE_MIN_ITEMS = 30;
 const BASE_SCANNER_SOURCE = "yahoo-screener-local";
 
 async function fetchYahooScreenerQuotes(screenerId, count = 100) {
@@ -1345,23 +1350,92 @@ async function fetchYahooScreenerQuotes(screenerId, count = 100) {
 
 async function collectBaseScannerQuotes() {
   const quoteBySymbol = new Map();
-  await Promise.all(BASE_SCANNER_SCREENER_IDS.map(async (screenerId) => {
+  const screenerSources = [
+    ...BASE_SCANNER_SCREENER_IDS.map((screenerId) => ({
+      screenerId,
+      sourceTag: `yahoo-screener-${screenerId}`,
+    })),
+    ...UNDER_ONE_SCANNER_IDS.map((screenerId) => ({
+      screenerId,
+      sourceTag: `yahoo-screener-under1-${screenerId}`,
+    })),
+  ];
+  await Promise.all(screenerSources.map(async ({ screenerId, sourceTag }) => {
     const quotes = await fetchYahooScreenerQuotes(screenerId);
     for (const quote of quotes) {
       const symbol = String(quote?.symbol || "").toUpperCase();
       if (!symbol) continue;
       const existing = quoteBySymbol.get(symbol);
       if (!existing) {
-        quoteBySymbol.set(symbol, { quote, sourceTags: new Set([`yahoo-screener-${screenerId}`]) });
+        quoteBySymbol.set(symbol, { quote, sourceTags: new Set([sourceTag]) });
         continue;
       }
-      existing.sourceTags.add(`yahoo-screener-${screenerId}`);
+      existing.sourceTags.add(sourceTag);
       const existingVolume = Math.max(num(existing.quote.regularMarketVolume) ?? 0, num(existing.quote.preMarketVolume) ?? 0);
       const nextVolume = Math.max(num(quote.regularMarketVolume) ?? 0, num(quote.preMarketVolume) ?? 0);
       if (nextVolume > existingVolume) existing.quote = quote;
     }
   }));
   return quoteBySymbol;
+}
+
+function scannerLivePriceUsd(item) {
+  return num(item?.price) ?? num(item?.preMarketPrice) ?? num(item?.postMarketPrice);
+}
+
+function isUnderOneScannerItem(item) {
+  const price = scannerLivePriceUsd(item);
+  return price !== null && price > 0 && price < 1;
+}
+
+function compareScannerItems(a, b) {
+  const scoreDiff = (num(b.finalProbabilityScore) ?? 0) - (num(a.finalProbabilityScore) ?? 0);
+  if (scoreDiff !== 0) return scoreDiff;
+  const bVolume = Math.max(num(b.volume) ?? 0, num(b.preMarketVolume) ?? 0);
+  const aVolume = Math.max(num(a.volume) ?? 0, num(a.preMarketVolume) ?? 0);
+  return bVolume - aVolume;
+}
+
+function compareUnderOneScannerItems(a, b) {
+  const aChange = num(a.changePercent) ?? num(a.preMarketChangePercent) ?? 0;
+  const bChange = num(b.changePercent) ?? num(b.preMarketChangePercent) ?? 0;
+  const aUp = aChange > 0 ? 1 : 0;
+  const bUp = bChange > 0 ? 1 : 0;
+  if (bUp !== aUp) return bUp - aUp;
+  return compareScannerItems(a, b);
+}
+
+function selectBalancedScannerItems(rawItems, limit = BASE_SCANNER_ITEM_LIMIT) {
+  const underOneItems = [];
+  const otherItems = [];
+  for (const item of rawItems) {
+    if (isUnderOneScannerItem(item)) underOneItems.push(item);
+    else otherItems.push(item);
+  }
+  underOneItems.sort(compareUnderOneScannerItems);
+  otherItems.sort(compareScannerItems);
+
+  const selected = [];
+  const seen = new Set();
+  const underOneTarget = Math.min(UNDER_ONE_MIN_ITEMS, underOneItems.length);
+  for (const item of underOneItems.slice(0, underOneTarget)) {
+    selected.push(item);
+    seen.add(item.symbol);
+  }
+  for (const item of otherItems) {
+    if (selected.length >= limit) break;
+    if (seen.has(item.symbol)) continue;
+    selected.push(item);
+    seen.add(item.symbol);
+  }
+  for (const item of underOneItems.slice(underOneTarget)) {
+    if (selected.length >= limit) break;
+    if (seen.has(item.symbol)) continue;
+    selected.push(item);
+    seen.add(item.symbol);
+  }
+  selected.sort(compareScannerItems);
+  return selected;
 }
 
 function inferVolumeSourceFromQuote(quote) {
@@ -1508,13 +1582,9 @@ async function fetchBaseScannerPayload() {
     rawItems.push(buildBaseScannerItem(quote, [...entry.sourceTags]));
   }
 
-  rawItems.sort((a, b) => {
-    const scoreDiff = (num(b.finalProbabilityScore) ?? 0) - (num(a.finalProbabilityScore) ?? 0);
-    if (scoreDiff !== 0) return scoreDiff;
-    const bVolume = Math.max(num(b.volume) ?? 0, num(b.preMarketVolume) ?? 0);
-    const aVolume = Math.max(num(a.volume) ?? 0, num(a.preMarketVolume) ?? 0);
-    return bVolume - aVolume;
-  });
+  rawItems.sort(compareScannerItems);
+
+  const items = selectBalancedScannerItems(rawItems, BASE_SCANNER_ITEM_LIMIT);
 
   return {
     ok: true,
@@ -1522,7 +1592,8 @@ async function fetchBaseScannerPayload() {
       updatedAt: new Date().toISOString(),
       source: BASE_SCANNER_SOURCE,
       candidateCount: rawItems.length,
-      items: rawItems.slice(0, BASE_SCANNER_ITEM_LIMIT),
+      underOneCandidateCount: rawItems.filter(isUnderOneScannerItem).length,
+      items,
     },
   };
 }
