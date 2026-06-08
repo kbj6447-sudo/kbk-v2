@@ -151,6 +151,14 @@
     return now() < forceRefreshUntil;
   }
 
+  function requestBypassesCache(input, init) {
+    var cacheMode = String((init && init.cache) || (input && input.cache) || "").toLowerCase();
+    if (cacheMode === "no-store" || cacheMode === "reload") return true;
+    var url = scannerUrl(input);
+    if (!url) return false;
+    return url.searchParams.has("fresh") || url.searchParams.has("noCache") || url.searchParams.has("_");
+  }
+
   function markForceRefresh() {
     persistForceUntil(now() + FORCE_REFRESH_WINDOW_MS);
   }
@@ -178,7 +186,7 @@
       return originalFetch(input, init);
     }
 
-    var force = shouldForceRefresh();
+    var force = shouldForceRefresh() || requestBypassesCache(input, init);
     if (!cachedEntry || !isCacheAgeValid(cachedEntry.cachedAt)) {
       cachedEntry = readPersistedCache();
     }

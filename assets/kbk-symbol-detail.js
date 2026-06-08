@@ -27,6 +27,7 @@ function esc(value) {
 }
 
 function num(value) {
+  if (value === null || value === undefined || value === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -90,6 +91,56 @@ function mainChangePct(quote, priceOverride = null) {
 
 function changePct(quote) {
   return mainChangePct(quote) ?? 0;
+}
+
+function hasConfirmedVolume(item = {}) {
+  const source = String(item.volumeSource || "").toLowerCase();
+  if (!source || source.includes("unconfirmed") || source.includes("fallback")) return false;
+  if (source.includes("chart") || source.includes("daily") || source.includes("history")) return false;
+  return num(item.volume) !== null;
+}
+
+function displayVolumeText(volume) {
+  return num(volume) === null ? "거래량 미확인" : `거래량 ${compact(volume)}`;
+}
+
+function displayRelativeVolumeText(pick = {}) {
+  const source = pick.displayVolumeSource ?? pick.quote?.volumeSource ?? pick.volumeSource;
+  const volume = num(pick.displayVolume);
+  if (volume === null || !hasConfirmedVolume({ volume, volumeSource: source })) return "상대거래량 미확인";
+  const rvol = num(pick.displayRvol);
+  return rvol === null ? "상대거래량 미확인" : `RVOL ${rvol.toFixed(1)}`;
+}
+
+function mergeTopPickDisplayQuote(pick, quote) {
+  const latest = quote?.symbol ? quote : {};
+  const displayVolume = num(latest.volume);
+  const confirmedVolume = hasConfirmedVolume(latest);
+  return {
+    ...pick,
+    displayPrice: priceUsd(latest) ?? pick.price,
+    displayChange: mainChangePct(latest, priceUsd(latest)) ?? pick.change,
+    displayVolume,
+    displayVolumeSource: latest.volumeSource ?? pick.quote?.volumeSource,
+    displayRvol: displayVolume !== null && confirmedVolume
+      ? (num(latest.relativeVolume) ?? num(latest.volumeRatio) ?? pick.rvol)
+      : null,
+    displayQuote: latest,
+  };
+}
+
+async function hydrateTopPicksWithLatestQuotes(picks) {
+  const symbols = [...new Set(picks.map((pick) => String(pick.symbol || "").toUpperCase()).filter(Boolean))];
+  const entries = await Promise.all(symbols.map(async (symbol) => {
+    try {
+      const payload = await fetchJson(`/api/quote?symbol=${encodeURIComponent(symbol)}`);
+      return [symbol, payload?.data || payload];
+    } catch (_error) {
+      return [symbol, null];
+    }
+  }));
+  const quoteMap = new Map(entries);
+  return picks.map((pick) => mergeTopPickDisplayQuote(pick, quoteMap.get(String(pick.symbol || "").toUpperCase())));
 }
 
 function vwapValue(quote) {
@@ -1374,10 +1425,10 @@ function renderTopPicks(picks, updatedAt) {
         +     '<div class="kbk-top-score">' + displayScore + '점 <small>(' + esc(scoreGrade) + ')</small><span>' + (index === 0 ? '1?? : esc(pick.verdict)) + '</span></div>'
         +   '</div>'
         +   '<div class="kbk-top-row">'
-        +     '<strong>' + pricePairText(pick.price) + '</strong>'
-        +     '<span>' + pct(pick.change) + '</span>'
-        +     '<span>嫄곕옒??' + compact(pick.volume) + '</span>'
-        +     '<span>RVOL ' + (pick.rvol ? pick.rvol.toFixed(1) : '-') + '</span>'
+        +     '<strong>' + pricePairText(pick.displayPrice ?? pick.price) + '</strong>'
+        +     '<span>' + pct(pick.displayChange ?? pick.change) + '</span>'
+        +     '<span>' + displayVolumeText(pick.displayVolume) + '</span>'
+        +     '<span>' + displayRelativeVolumeText(pick) + '</span>'
         +     '<span>' + esc(pick.vwap) + '</span>'
         +   '</div>'
         +   '<div class="kbk-top-metrics">'
@@ -1469,6 +1520,9 @@ async function loadTopPicks() {
   const renderToken = ++topPicksRenderToken;
   renderTopPickLoading();
   topPicksLoadPromise = (async () => {
+    if (typeof window.__kbkClearScannerCache === "function") {
+      window.__kbkClearScannerCache();
+    }
     const [payload, exchangePayload] = await Promise.all([
       fetchJson("/api/scanner"),
       fetchJson("/api/exchange").catch(() => null),
@@ -1502,7 +1556,9 @@ async function loadTopPicks() {
       scored.sort((a, b) => (b.setupBias?.strongEarlySignal ? 1 : 0) - (a.setupBias?.strongEarlySignal ? 1 : 0) || b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk);
     }
     if (!isTopPicksActive() || renderToken !== topPicksRenderToken) return;
-    renderTopPicks(scored.slice(0, 20), payload?.data?.updatedAt ?? payload?.updatedAt);
+    const hydrated = await hydrateTopPicksWithLatestQuotes(scored.slice(0, 20));
+    if (!isTopPicksActive() || renderToken !== topPicksRenderToken) return;
+    renderTopPicks(hydrated, payload?.data?.updatedAt ?? payload?.updatedAt);
   })().catch((error) => {
     if (!isTopPicksActive() || renderToken !== topPicksRenderToken) return;
     const activePanel = topPickPanel();

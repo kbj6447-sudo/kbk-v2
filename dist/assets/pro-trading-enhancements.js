@@ -37,6 +37,7 @@ function pct(n) {
 }
 
 function compact(n) {
+  if (n === null || n === undefined || n === "") return "-";
   const value = Number(n);
   if (!Number.isFinite(value)) return "-";
   if (Math.abs(value) >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
@@ -79,6 +80,62 @@ function volumeSourceLabel(item = {}) {
   if (source.includes("chart") || source.includes("daily") || source.includes("history") || source.includes("fallback")) return "전일 정규장";
   if (source.includes("kis")) return "데이마켓";
   return "미확인";
+}
+
+function hasConfirmedVolume(item = {}) {
+  const source = String(item.volumeSource || "").toLowerCase();
+  if (!source || source.includes("unconfirmed") || source.includes("fallback")) return false;
+  if (source.includes("chart") || source.includes("daily") || source.includes("history")) return false;
+  return toNumber(item.volume) !== null;
+}
+
+function displayVolumeText(volume) {
+  return toNumber(volume) === null ? "거래량 미확인" : `거래량 ${compact(volume)}`;
+}
+
+function displayRvolText(item = {}) {
+  if (!hasConfirmedVolume(item)) return "상대거래량 미확인";
+  const rvol = rvolValue(item);
+  return rvol === null ? "상대거래량 미확인" : `상대거래량 ${rvol.toFixed(1)}배`;
+}
+
+function displayQuoteFrom(scannerItem = {}, quote = null) {
+  const source = quote && quote.symbol ? quote : {};
+  const volume = toNumber(source.volume);
+  const merged = {
+    ...scannerItem,
+    ...source,
+    symbol: scannerItem.symbol || source.symbol,
+    price: toNumber(source.price) ?? livePriceOf(scannerItem),
+    changePercent: toNumber(source.changePercent) ?? mainChangePercent(scannerItem),
+    volume,
+    relativeVolume: volume !== null && hasConfirmedVolume(source)
+      ? (toNumber(source.relativeVolume) ?? toNumber(source.volumeRatio) ?? rvolValue(scannerItem))
+      : null,
+    volumeRatio: volume !== null && hasConfirmedVolume(source)
+      ? (toNumber(source.volumeRatio) ?? toNumber(source.relativeVolume) ?? rvolValue(scannerItem))
+      : null,
+    priceSource: source.priceSource || scannerItem.priceSource,
+    changeBasis: source.changeBasis || scannerItem.changeBasis,
+    volumeSource: source.volumeSource || scannerItem.volumeSource,
+    sessionType: source.sessionType || scannerItem.sessionType,
+    dataReliability: source.dataReliability || scannerItem.dataReliability,
+    dataReliabilityLabel: source.dataReliabilityLabel || scannerItem.dataReliabilityLabel,
+  };
+  return merged;
+}
+
+async function latestQuotesBySymbol(symbols) {
+  const uniqueSymbols = [...new Set(symbols.filter(Boolean).map((symbol) => String(symbol).toUpperCase()))];
+  const entries = await Promise.all(uniqueSymbols.map(async (symbol) => {
+    try {
+      const payload = await fetch(`/api/quote?symbol=${encodeURIComponent(symbol)}`, { cache: "no-store" }).then((res) => res.json());
+      return [symbol, payload?.data || null];
+    } catch (_error) {
+      return [symbol, null];
+    }
+  }));
+  return new Map(entries);
 }
 
 function reliabilityLabel(item = {}) {
@@ -1010,6 +1067,9 @@ async function renderTopPicksOnly() {
   if (!panel) return;
   panel.innerHTML = `<section class="kbk-route-note">?듯빀 理쒖쥌 ?꾨낫瑜?怨꾩궛?섎뒗 以묒엯?덈떎.</section>`;
   try {
+    if (typeof window.__kbkClearScannerCache === "function") {
+      window.__kbkClearScannerCache();
+    }
     const payload = await fetch("/api/scanner", { cache: "no-store" }).then((res) => res.json());
     const items = (payload?.data?.items || [])
       .filter((item) => item?.symbol && item.included !== false)
@@ -1100,6 +1160,18 @@ async function renderTopPicksOnly() {
       .filter((pick) => pick.finalScore >= 58 || pick.reasoning.priority >= 2)
       .sort((a, b) => b.displaySortScore - a.displaySortScore || b.reasoning.priority - a.reasoning.priority || b.finalScore - a.finalScore)
       .slice(0, 20);
+    const latestQuotes = await latestQuotesBySymbol(items.map((pick) => pick.item.symbol));
+    const displayItems = items.map((pick) => {
+      const latestQuote = latestQuotes.get(String(pick.item.symbol || "").toUpperCase());
+      const displayItem = displayQuoteFrom(pick.item, latestQuote);
+      return {
+        ...pick,
+        displayItem,
+        displayPrice: livePriceOf(displayItem),
+        displayChange: mainChangePercent(displayItem),
+        displayVolume: toNumber(displayItem.volume),
+      };
+    });
     panel.innerHTML = `
       <section class="accumulation-hero">
         <div>
@@ -1112,7 +1184,7 @@ async function renderTopPicksOnly() {
           <div class="score-card"><span>기준</span><strong>초입 우선</strong></div>
         </div>
       </section>
-      ${items.length ? items.map(({ item, price, change, volume, surge, risk, pattern, finalScore, signalBonus, reasoning, chaseRisk, finalDecision: fd }) => `
+      ${displayItems.length ? displayItems.map(({ item, displayItem, displayPrice, displayChange, displayVolume, surge, risk, pattern, finalScore, signalBonus, reasoning, chaseRisk, finalDecision: fd }) => `
         <article class="kbk-pro-top-card">
           ${fd ? renderFinalDecisionHeroHtml(fd, textEscape) : ""}
           <div class="kbk-pro-top-head">
@@ -1120,11 +1192,12 @@ async function renderTopPicksOnly() {
             <div class="kbk-pro-top-score">${finalScore}</div>
           </div>
           <div class="price-row">
-            <strong>${pairedMoney(price)}</strong>
-            <span>${pct(change)}</span>
-            <span>거래량 ${compact(volume)}</span>
+            <strong>${pairedMoney(displayPrice)}</strong>
+            <span>${pct(displayChange)}</span>
+            <span>${displayVolumeText(displayVolume)}</span>
+            <span>${displayRvolText(displayItem)}</span>
           </div>
-          ${sessionDebugHtml(item)}
+          ${sessionDebugHtml(displayItem)}
           <div class="kbk-pro-top-grid">
             <div><span>급등 감시</span><b>${surge}점</b></div>
             <div><span>거래량 품질</span><b>${reasoning.volumeQualityScore ?? "-"}점</b></div>
