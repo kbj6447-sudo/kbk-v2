@@ -86,7 +86,64 @@ function hasConfirmedVolume(item = {}) {
   const source = String(item.volumeSource || "").toLowerCase();
   if (!source || source.includes("unconfirmed") || source.includes("fallback")) return false;
   if (source.includes("chart") || source.includes("daily") || source.includes("history")) return false;
-  return toNumber(item.volume) !== null;
+  const volume = toNumber(item.volume);
+  return volume !== null && volume > 0;
+}
+
+function quoteChangePercent(quote = {}, priceOverride = null) {
+  const provided = toNumber(quote?.changePercent);
+  if (provided !== null) return provided;
+  const price = toNumber(priceOverride) ?? livePriceOf(quote);
+  const previousClose = toNumber(quote?.previousClose) ?? toNumber(quote?.regularMarketPreviousClose);
+  if (price !== null && previousClose !== null && previousClose > 0) {
+    return ((price - previousClose) / previousClose) * 100;
+  }
+  return null;
+}
+
+function quoteDisplayVolume(quote = {}) {
+  if (!quote?.symbol) return null;
+  if (!hasConfirmedVolume(quote)) return null;
+  return toNumber(quote.volume);
+}
+
+function resolveTopPickDisplayFields(scannerItem = {}, quote = null, renderPhase = "initial", caller = "resolveTopPickDisplayFields") {
+  const candidatePrice = livePriceOf(scannerItem);
+  const candidateChange = mainChangePercent(scannerItem);
+  const candidateVolume = toNumber(scannerItem?.volume ?? scannerItem?.preMarketVolume);
+  const hasQuote = Boolean(quote?.symbol);
+  const displayPrice = hasQuote ? livePriceOf(quote) : null;
+  const displayChange = hasQuote ? quoteChangePercent(quote, displayPrice) : null;
+  const displayVolume = hasQuote ? quoteDisplayVolume(quote) : null;
+  const displayItem = displayQuoteFrom(scannerItem, quote);
+  const finalDisplay = {
+    price: displayPrice,
+    changePercent: displayChange,
+    volume: displayVolume,
+  };
+  console.log("[TOP_PICKS_CARD]", {
+    symbol: scannerItem?.symbol,
+    renderPhase,
+    caller,
+    candidate: {
+      price: candidatePrice,
+      changePercent: candidateChange,
+      volume: candidateVolume,
+    },
+    latestQuote: hasQuote ? {
+      price: livePriceOf(quote),
+      changePercent: toNumber(quote?.changePercent),
+      volume: toNumber(quote?.volume),
+      volumeSource: quote?.volumeSource,
+    } : null,
+    finalDisplay,
+  });
+  return {
+    displayItem,
+    displayPrice: finalDisplay.price,
+    displayChange: finalDisplay.changePercent,
+    displayVolume: finalDisplay.volume,
+  };
 }
 
 function displayVolumeText(volume) {
@@ -100,29 +157,36 @@ function displayRvolText(item = {}) {
 }
 
 function displayQuoteFrom(scannerItem = {}, quote = null) {
-  const source = quote && quote.symbol ? quote : {};
-  const volume = toNumber(source.volume);
-  const merged = {
+  if (!quote?.symbol) {
+    return {
+      ...scannerItem,
+      volume: null,
+      relativeVolume: null,
+      volumeRatio: null,
+    };
+  }
+  const price = livePriceOf(quote);
+  const volume = quoteDisplayVolume(quote);
+  const confirmedVolume = volume !== null;
+  return {
     ...scannerItem,
-    ...source,
-    symbol: scannerItem.symbol || source.symbol,
-    price: toNumber(source.price) ?? livePriceOf(scannerItem),
-    changePercent: toNumber(source.changePercent) ?? mainChangePercent(scannerItem),
+    symbol: scannerItem.symbol || quote.symbol,
+    price,
+    changePercent: quoteChangePercent(quote, price),
     volume,
-    relativeVolume: volume !== null && hasConfirmedVolume(source)
-      ? (toNumber(source.relativeVolume) ?? toNumber(source.volumeRatio) ?? rvolValue(scannerItem))
+    relativeVolume: confirmedVolume
+      ? (toNumber(quote.relativeVolume) ?? toNumber(quote.volumeRatio))
       : null,
-    volumeRatio: volume !== null && hasConfirmedVolume(source)
-      ? (toNumber(source.volumeRatio) ?? toNumber(source.relativeVolume) ?? rvolValue(scannerItem))
+    volumeRatio: confirmedVolume
+      ? (toNumber(quote.volumeRatio) ?? toNumber(quote.relativeVolume))
       : null,
-    priceSource: source.priceSource || scannerItem.priceSource,
-    changeBasis: source.changeBasis || scannerItem.changeBasis,
-    volumeSource: source.volumeSource || scannerItem.volumeSource,
-    sessionType: source.sessionType || scannerItem.sessionType,
-    dataReliability: source.dataReliability || scannerItem.dataReliability,
-    dataReliabilityLabel: source.dataReliabilityLabel || scannerItem.dataReliabilityLabel,
+    priceSource: quote.priceSource || scannerItem.priceSource,
+    changeBasis: quote.changeBasis || scannerItem.changeBasis,
+    volumeSource: quote.volumeSource || scannerItem.volumeSource,
+    sessionType: quote.sessionType || scannerItem.sessionType,
+    dataReliability: quote.dataReliability || scannerItem.dataReliability,
+    dataReliabilityLabel: quote.dataReliabilityLabel || scannerItem.dataReliabilityLabel,
   };
-  return merged;
 }
 
 async function latestQuotesBySymbol(symbols) {
@@ -985,11 +1049,14 @@ function ensureRouteLinks() {
       node.textContent = config.label;
       menu.appendChild(node);
     }
-    node.addEventListener("click", (event) => {
-      event.preventDefault();
-      history.pushState({}, "", config.path);
-      handleRoute();
-    });
+    if (!node.dataset.kbkRouteBound) {
+      node.dataset.kbkRouteBound = "true";
+      node.addEventListener("click", (event) => {
+        event.preventDefault();
+        history.pushState({}, "", config.path);
+        handleRoute();
+      });
+    }
   }
 }
 
@@ -1050,28 +1117,100 @@ function routeScroll(targetId, message) {
 }
 
 let topPicksRouteBusyUntil = 0;
+let topPicksRenderToken = 0;
+let topPicksRenderInFlight = null;
+let suppressTopPicksHashRoute = false;
 
-async function renderTopPicksOnly() {
-  const now = Date.now();
-  if (topPicksRouteBusyUntil > now) return;
-  topPicksRouteBusyUntil = now + 800;
-  hideNonTopPicksPanels();
-  if (window.location.hash !== "#top-picks") {
-    window.location.hash = "top-picks";
+function patchTopPickCardRow(card, fields, renderPhase = "delayed-refresh") {
+  if (!card || !fields) return;
+  const priceRow = card.querySelector(".price-row");
+  if (!priceRow) return;
+  const strong = priceRow.querySelector("strong");
+  const spans = Array.from(priceRow.querySelectorAll("span"));
+  if (fields.displayPrice !== null && strong) {
+    strong.textContent = pairedMoney(fields.displayPrice);
   }
-  history.replaceState({}, "", "/top-picks");
-  window.setTimeout(() => {
-    topPicksRouteBusyUntil = 0;
-  }, 250);
-  const panel = topPicksOnlyPanel();
-  if (!panel) return;
-  panel.innerHTML = `<section class="kbk-route-note">?듯빀 理쒖쥌 ?꾨낫瑜?怨꾩궛?섎뒗 以묒엯?덈떎.</section>`;
+  if (fields.displayChange !== null && spans[0]) {
+    spans[0].textContent = pct(fields.displayChange);
+  }
+  if (spans[1]) {
+    spans[1].textContent = displayVolumeText(fields.displayVolume);
+  }
+  if (spans[2]) {
+    spans[2].textContent = displayRvolText(fields.displayItem);
+  }
+  console.log("[TOP_PICKS_CARD]", {
+    symbol: fields.symbol,
+    renderPhase,
+    caller: "patchTopPickCardRow",
+    candidate: fields.candidate,
+    latestQuote: fields.latestQuote,
+    finalDisplay: {
+      price: fields.displayPrice,
+      changePercent: fields.displayChange,
+      volume: fields.displayVolume,
+    },
+  });
+}
+
+async function refreshTopPickCardDisplayFromQuotes(renderPhase = "dual-price-update", caller = "refreshTopPickCardDisplayFromQuotes") {
+  if (!isTopPicksViewActive()) return;
+  const cards = Array.from(document.querySelectorAll("#kbk-pro-top-picks .kbk-pro-top-card"));
+  if (!cards.length) return;
+  const symbols = cards
+    .map((card) => card.querySelector("h3")?.textContent?.trim().toUpperCase())
+    .filter(Boolean);
+  const latestQuotes = await latestQuotesBySymbol(symbols);
+  for (const card of cards) {
+    const symbol = card.querySelector("h3")?.textContent?.trim().toUpperCase();
+    if (!symbol) continue;
+    const latestQuote = latestQuotes.get(symbol);
+    if (!latestQuote?.symbol) continue;
+    const candidate = { symbol };
+    const resolved = resolveTopPickDisplayFields(candidate, latestQuote, renderPhase, caller);
+    patchTopPickCardRow(card, {
+      symbol,
+      candidate: { symbol },
+      latestQuote: {
+        price: livePriceOf(latestQuote),
+        changePercent: toNumber(latestQuote?.changePercent),
+        volume: toNumber(latestQuote?.volume),
+        volumeSource: latestQuote?.volumeSource,
+      },
+      ...resolved,
+    }, renderPhase);
+  }
+}
+
+async function renderTopPicksOnly(renderPhase = "initial") {
+  const now = Date.now();
+  if (topPicksRouteBusyUntil > now) return topPicksRenderInFlight;
+  const renderToken = ++topPicksRenderToken;
+  topPicksRouteBusyUntil = now + 15000;
+  hideNonTopPicksPanels();
+  suppressTopPicksHashRoute = true;
   try {
-    if (typeof window.__kbkClearScannerCache === "function") {
-      window.__kbkClearScannerCache();
+    if (window.location.hash !== "#top-picks") {
+      window.location.hash = "top-picks";
     }
-    const payload = await fetch("/api/scanner", { cache: "no-store" }).then((res) => res.json());
-    const items = (payload?.data?.items || [])
+    history.replaceState({}, "", "/top-picks");
+  } finally {
+    suppressTopPicksHashRoute = false;
+  }
+  const panel = topPicksOnlyPanel();
+  if (!panel) {
+    topPicksRouteBusyUntil = 0;
+    return null;
+  }
+  panel.innerHTML = `<section class="kbk-route-note">통합 최종 후보를 계산하는 중입니다.</section>`;
+  const renderPromise = (async () => {
+    try {
+      if (typeof window.__kbkClearScannerCache === "function") {
+        window.__kbkClearScannerCache();
+      }
+      const payload = await fetch("/api/scanner", { cache: "no-store" }).then((res) => res.json());
+      if (renderToken !== topPicksRenderToken) return;
+      const items = (payload?.data?.items || [])
       .filter((item) => item?.symbol && item.included !== false)
       .map((item) => {
         const price = livePriceOf(item) ?? 0;
@@ -1160,19 +1299,17 @@ async function renderTopPicksOnly() {
       .filter((pick) => pick.finalScore >= 58 || pick.reasoning.priority >= 2)
       .sort((a, b) => b.displaySortScore - a.displaySortScore || b.reasoning.priority - a.reasoning.priority || b.finalScore - a.finalScore)
       .slice(0, 20);
-    const latestQuotes = await latestQuotesBySymbol(items.map((pick) => pick.item.symbol));
-    const displayItems = items.map((pick) => {
-      const latestQuote = latestQuotes.get(String(pick.item.symbol || "").toUpperCase());
-      const displayItem = displayQuoteFrom(pick.item, latestQuote);
-      return {
-        ...pick,
-        displayItem,
-        displayPrice: livePriceOf(displayItem),
-        displayChange: mainChangePercent(displayItem),
-        displayVolume: toNumber(displayItem.volume),
-      };
-    });
-    panel.innerHTML = `
+      if (renderToken !== topPicksRenderToken) return;
+      const latestQuotes = await latestQuotesBySymbol(items.map((pick) => pick.item.symbol));
+      if (renderToken !== topPicksRenderToken) return;
+      const displayItems = items.map((pick) => {
+        const latestQuote = latestQuotes.get(String(pick.item.symbol || "").toUpperCase());
+        return {
+          ...pick,
+          ...resolveTopPickDisplayFields(pick.item, latestQuote, renderPhase, "renderTopPicksOnly"),
+        };
+      });
+      panel.innerHTML = `
       <section class="accumulation-hero">
         <div>
           <p class="section-kicker">Integrated Picks</p>
@@ -1184,16 +1321,16 @@ async function renderTopPicksOnly() {
           <div class="score-card"><span>기준</span><strong>초입 우선</strong></div>
         </div>
       </section>
-      ${displayItems.length ? displayItems.map(({ item, displayItem, displayPrice, displayChange, displayVolume, surge, risk, pattern, finalScore, signalBonus, reasoning, chaseRisk, finalDecision: fd }) => `
-        <article class="kbk-pro-top-card">
+      ${displayItems.length ? displayItems.map(({ item, displayItem, displayPrice, displayChange, displayVolume, surge, risk, pattern, finalScore, reasoning, chaseRisk, finalDecision: fd }) => `
+        <article class="kbk-pro-top-card" data-symbol="${textEscape(item.symbol)}">
           ${fd ? renderFinalDecisionHeroHtml(fd, textEscape) : ""}
           <div class="kbk-pro-top-head">
             <div><h3>${textEscape(item.symbol)}</h3><p>${textEscape(item.name || item.symbol)}</p></div>
             <div class="kbk-pro-top-score">${finalScore}</div>
           </div>
           <div class="price-row">
-            <strong>${pairedMoney(displayPrice)}</strong>
-            <span>${pct(displayChange)}</span>
+            <strong>${displayPrice !== null ? pairedMoney(displayPrice) : "-"}</strong>
+            <span>${displayChange !== null ? pct(displayChange) : "-"}</span>
             <span>${displayVolumeText(displayVolume)}</span>
             <span>${displayRvolText(displayItem)}</span>
           </div>
@@ -1214,9 +1351,18 @@ async function renderTopPicksOnly() {
         </article>
       `).join("") : `<section class="kbk-empty-note">현재 통합 기준을 통과한 후보가 없습니다. 새로고침으로 다시 확인해 주세요.</section>`}
     `;
-  } catch (error) {
-    panel.innerHTML = `<section class="kbk-empty-note">통합 후보 계산에 실패했습니다: ${textEscape(error.message)}</section>`;
-  }
+    } catch (error) {
+      if (renderToken !== topPicksRenderToken) return;
+      panel.innerHTML = `<section class="kbk-empty-note">통합 후보 계산에 실패했습니다: ${textEscape(error.message)}</section>`;
+    } finally {
+      if (renderToken === topPicksRenderToken) {
+        topPicksRouteBusyUntil = 0;
+        topPicksRenderInFlight = null;
+      }
+    }
+  })();
+  topPicksRenderInFlight = renderPromise;
+  return renderPromise;
 }
 
 async function renderTopPicks() {
@@ -1228,7 +1374,9 @@ window.__kbkRenderTopPicksOnly = renderTopPicksOnly;
 function handleRoute() {
   const path = window.location.pathname;
   if (path === "/top-picks" || window.location.hash === "#top-picks") {
-    renderTopPicksOnly();
+    if (!suppressTopPicksHashRoute) {
+      renderTopPicksOnly("initial");
+    }
     return;
   }
   if (path === "/backtest") {
@@ -1625,11 +1773,19 @@ function boot() {
   clarifyEmptyAccumulation();
   patchFloatingPointText();
 
+  let lastExchangeText = "";
   const observer = new MutationObserver(() => {
     patchFloatingPointText();
     ensureRouteLinks();
     clarifyEmptyAccumulation();
     enhanceMonitorPanel();
+    if (isTopPicksViewActive()) {
+      const exchangeText = document.getElementById("exchange-rate")?.textContent?.trim() || "";
+      if (exchangeText && exchangeText !== lastExchangeText && /USD\/KRW/.test(exchangeText)) {
+        lastExchangeText = exchangeText;
+        refreshTopPickCardDisplayFromQuotes("dual-price-update", "exchange-rate-observer");
+      }
+    }
   });
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
   window.addEventListener("popstate", handleRoute);

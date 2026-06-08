@@ -97,7 +97,8 @@ function hasConfirmedVolume(item = {}) {
   const source = String(item.volumeSource || "").toLowerCase();
   if (!source || source.includes("unconfirmed") || source.includes("fallback")) return false;
   if (source.includes("chart") || source.includes("daily") || source.includes("history")) return false;
-  return num(item.volume) !== null;
+  const volume = num(item.volume);
+  return volume !== null && volume > 0;
 }
 
 function displayVolumeText(volume) {
@@ -113,16 +114,17 @@ function displayRelativeVolumeText(pick = {}) {
 }
 
 function mergeTopPickDisplayQuote(pick, quote) {
-  const latest = quote?.symbol ? quote : {};
-  const displayVolume = num(latest.volume);
-  const confirmedVolume = hasConfirmedVolume(latest);
+  const latest = quote?.symbol ? quote : null;
+  const displayVolume = latest && hasConfirmedVolume(latest) ? num(latest.volume) : null;
+  const displayPrice = latest ? priceUsd(latest) : null;
+  const displayChange = latest ? mainChangePct(latest, displayPrice) : null;
   return {
     ...pick,
-    displayPrice: priceUsd(latest) ?? pick.price,
-    displayChange: mainChangePct(latest, priceUsd(latest)) ?? pick.change,
+    displayPrice: displayPrice ?? pick.price,
+    displayChange: displayChange ?? pick.change,
     displayVolume,
-    displayVolumeSource: latest.volumeSource ?? pick.quote?.volumeSource,
-    displayRvol: displayVolume !== null && confirmedVolume
+    displayVolumeSource: latest?.volumeSource ?? pick.quote?.volumeSource,
+    displayRvol: displayVolume !== null
       ? (num(latest.relativeVolume) ?? num(latest.volumeRatio) ?? pick.rvol)
       : null,
     displayQuote: latest,
@@ -1369,6 +1371,11 @@ function topPickPanel() {
 function setTopPickMode(enabled) {
   const panel = topPickPanel();
   if (!panel) return;
+  if (enabled && document.getElementById("kbk-pro-top-picks")?.querySelector(".kbk-pro-top-card")) {
+    panel.hidden = true;
+    panel.style.display = "none";
+    return;
+  }
   window.__kbkActiveCategoryKey = enabled ? "top-picks" : window.location.pathname || "default";
   document.querySelectorAll(".page-stack > .page-panel").forEach((section) => {
     section.style.display = enabled ? "none" : "";
@@ -1510,6 +1517,9 @@ async function loadTopPicks() {
   if (typeof window.__kbkRenderTopPicksOnly === "function") {
     return null;
   }
+  if (document.getElementById("kbk-pro-top-picks")?.querySelector(".kbk-pro-top-card")) {
+    return null;
+  }
   const panel = topPickPanel();
   if (!panel) return null;
   const startedAt = Date.now();
@@ -1645,7 +1655,7 @@ function updateSurgeCardQuote(card, quote, livePrice = null) {
   if (!priceRow) return;
   const price = num(livePrice) ?? priceUsd(quote);
   const change = mainChangePct(quote, price) ?? changePct(quote);
-  const volume = num(quote?.volume) ?? num(quote?.preMarketVolume);
+  const volume = num(quote?.volume);
   const vwap = vwapState(quote);
   const strong = priceRow.querySelector("strong");
   const spans = Array.from(priceRow.querySelectorAll("span"));
@@ -1656,7 +1666,7 @@ function updateSurgeCardQuote(card, quote, livePrice = null) {
   if (strong) strong.textContent = krwTextFromUsd(price);
   if (spans[0]) spans[0].textContent = pct(change);
   if (spans[1]) spans[1].textContent = rvol ? `?곷?嫄곕옒??${rvol.toFixed(1)}諛? : "?곷?嫄곕옒??-";
-  if (spans[2]) spans[2].textContent = `嫄곕옒??${compact(volume)}`;
+  if (spans[2]) spans[2].textContent = displayVolumeText(volume);
   if (spans[3]) spans[3].textContent = vwap;
 
   let stamp = priceRow.querySelector(".kbk-live-quote-stamp");
