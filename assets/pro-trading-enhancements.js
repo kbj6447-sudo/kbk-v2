@@ -1121,6 +1121,12 @@ let topPicksRenderToken = 0;
 let topPicksRenderInFlight = null;
 let suppressTopPicksHashRoute = false;
 
+function topPickKrwPrice(usd) {
+  const price = Number(usd);
+  if (!Number.isFinite(price)) return "-";
+  return wonMoney(price);
+}
+
 function patchTopPickCardRow(card, fields, renderPhase = "delayed-refresh") {
   if (!card || !fields) return;
   const priceRow = card.querySelector(".price-row");
@@ -1128,7 +1134,7 @@ function patchTopPickCardRow(card, fields, renderPhase = "delayed-refresh") {
   const strong = priceRow.querySelector("strong");
   const spans = Array.from(priceRow.querySelectorAll("span"));
   if (fields.displayPrice !== null && strong) {
-    strong.textContent = pairedMoney(fields.displayPrice);
+    strong.textContent = topPickKrwPrice(fields.displayPrice);
   }
   if (fields.displayChange !== null && spans[0]) {
     spans[0].textContent = pct(fields.displayChange);
@@ -1329,7 +1335,7 @@ async function renderTopPicksOnly(renderPhase = "initial") {
             <div class="kbk-pro-top-score">${finalScore}</div>
           </div>
           <div class="price-row">
-            <strong>${displayPrice !== null ? pairedMoney(displayPrice) : "-"}</strong>
+            <strong>${displayPrice !== null ? topPickKrwPrice(displayPrice) : "-"}</strong>
             <span>${displayChange !== null ? pct(displayChange) : "-"}</span>
             <span>${displayVolumeText(displayVolume)}</span>
             <span>${displayRvolText(displayItem)}</span>
@@ -1773,19 +1779,11 @@ function boot() {
   clarifyEmptyAccumulation();
   patchFloatingPointText();
 
-  let lastExchangeText = "";
   const observer = new MutationObserver(() => {
     patchFloatingPointText();
     ensureRouteLinks();
     clarifyEmptyAccumulation();
     enhanceMonitorPanel();
-    if (isTopPicksViewActive()) {
-      const exchangeText = document.getElementById("exchange-rate")?.textContent?.trim() || "";
-      if (exchangeText && exchangeText !== lastExchangeText && /USD\/KRW/.test(exchangeText)) {
-        lastExchangeText = exchangeText;
-        refreshTopPickCardDisplayFromQuotes("dual-price-update", "exchange-rate-observer");
-      }
-    }
   });
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
   window.addEventListener("popstate", handleRoute);
