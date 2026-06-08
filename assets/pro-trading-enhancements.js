@@ -1468,8 +1468,9 @@ function selectedSymbolFromMonitor() {
 }
 
 function currentUsdKrw() {
-  const stateRate = Number(window.__kbkExchangeState?.rate);
-  if (Number.isFinite(stateRate) && stateRate > 0 && window.__kbkExchangeState?.status === "ok") {
+  const state = window.__kbkExchangeState;
+  const stateRate = Number(state?.rate);
+  if (Number.isFinite(stateRate) && stateRate > 0 && state?.status !== "failed") {
     return stateRate;
   }
   const match = document.body.textContent.match(/USD\/KRW\s*([\d,]+)/);
@@ -1493,6 +1494,13 @@ function formatExchangeUpdatedAt(value) {
   });
 }
 
+function formatExchangeSourceLabel(source, sourceLabel, fallback) {
+  const label = sourceLabel || source || "unknown";
+  if (fallback) return `${label} (fallback)`;
+  if (source === "yahoo-finance") return "Yahoo Finance";
+  return label;
+}
+
 function resolveExchangePayload(payload) {
   const data = payload?.data ?? payload ?? {};
   const rate = Number(data.rate ?? data.usdKrw ?? data.exchangeRate ?? data.rates?.KRW);
@@ -1500,10 +1508,20 @@ function resolveExchangePayload(payload) {
   const fetchedAtMs = fetchedAt ? Date.parse(String(fetchedAt)) : NaN;
   const ageMs = Number.isFinite(fetchedAtMs) ? Math.max(0, Date.now() - fetchedAtMs) : null;
   const stale = payload?.stale === true || data.stale === true || (ageMs !== null && ageMs > EXCHANGE_STALE_MS);
+  const spreadPct = Number(data.spreadPct);
+  const needsReview = data.needsReview === true
+    || payload?.needsReview === true
+    || (Number.isFinite(spreadPct) && spreadPct >= 0.01);
   return {
     rate: Number.isFinite(rate) && rate > 0 ? rate : null,
-    source: data.source || "open.er-api.com",
+    source: data.source || "yahoo-finance",
+    sourceLabel: data.sourceLabel || data.source || "yahoo-finance",
     updatedAt: data.updatedAt || data.fetchedAt || data.cachedAt || null,
+    fallback: data.fallback === true || payload?.fallback === "open.er-api.com",
+    altSource: data.altSource || null,
+    altRate: Number(data.altRate) > 0 ? Number(data.altRate) : null,
+    spreadPct: Number.isFinite(spreadPct) ? spreadPct : null,
+    needsReview,
     ageMs,
     stale,
     ok: payload?.ok !== false && Number.isFinite(rate) && rate > 0,
@@ -1523,14 +1541,29 @@ function renderExchangeRateStatus(state) {
 
   if (state.status === "stale" || state.stale) {
     node.textContent = "환율 갱신 실패";
-    node.title = `마지막 환율 ${Math.round(state.rate).toLocaleString("ko-KR")}원 · ${state.source} · ${formatExchangeUpdatedAt(state.updatedAt)}`;
+    node.title = `마지막 환율 ${Math.round(state.rate).toLocaleString("ko-KR")}원 · ${formatExchangeSourceLabel(state.source, state.sourceLabel, state.fallback)} · ${formatExchangeUpdatedAt(state.updatedAt)}`;
     node.dataset.kbkExchangeStatus = "stale";
     return;
   }
 
-  node.textContent = `USD/KRW ${Math.round(state.rate).toLocaleString("ko-KR")} · ${state.source} · ${formatExchangeUpdatedAt(state.updatedAt)}`;
-  node.title = `출처 ${state.source} · 갱신 ${formatExchangeUpdatedAt(state.updatedAt)}`;
-  node.dataset.kbkExchangeStatus = "ok";
+  const sourceText = formatExchangeSourceLabel(state.source, state.sourceLabel, state.fallback);
+  const updatedText = formatExchangeUpdatedAt(state.updatedAt);
+  const rateText = `USD/KRW ${Math.round(state.rate).toLocaleString("ko-KR")}`;
+
+  if (state.needsReview) {
+    node.textContent = `환율 확인 필요 · ${rateText} · ${sourceText} · ${updatedText}`;
+    node.title = [
+      "소스 간 환율 차이 1% 이상",
+      state.altSource && state.altRate ? `${state.altSource}: ${Math.round(state.altRate).toLocaleString("ko-KR")}원` : null,
+      state.spreadPct !== null && state.spreadPct !== undefined ? `차이 ${(state.spreadPct * 100).toFixed(1)}%` : null,
+    ].filter(Boolean).join(" · ");
+    node.dataset.kbkExchangeStatus = "review";
+    return;
+  }
+
+  node.textContent = `${rateText} · ${sourceText} · ${updatedText}`;
+  node.title = `출처 ${sourceText} · 갱신 ${updatedText}${state.fallback ? " · fallback 사용" : ""}`;
+  node.dataset.kbkExchangeStatus = state.fallback ? "fallback" : "ok";
 }
 
 async function syncExchangeRateStatus() {
@@ -1548,13 +1581,19 @@ async function syncExchangeRateStatus() {
       return;
     }
 
-    const status = resolved.stale ? "stale" : "ok";
+    const status = resolved.stale ? "stale" : resolved.needsReview ? "review" : resolved.fallback ? "fallback" : "ok";
     window.__kbkExchangeState = {
       status,
       rate: resolved.rate,
       source: resolved.source,
+      sourceLabel: resolved.sourceLabel,
       updatedAt: resolved.updatedAt,
       stale: resolved.stale,
+      fallback: resolved.fallback,
+      altSource: resolved.altSource,
+      altRate: resolved.altRate,
+      spreadPct: resolved.spreadPct,
+      needsReview: resolved.needsReview,
     };
     renderExchangeRateStatus(window.__kbkExchangeState);
   } catch (error) {
