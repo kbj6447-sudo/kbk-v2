@@ -1,4 +1,3 @@
-const UPSTREAM = "https://kbk-theta-accumulation-pro.vercel.app/api/scanner";
 const quoteHandler = require("./quote");
 const historyHandler = require("./history");
 const ENRICH_SYMBOL_LIMIT = 30;
@@ -1320,24 +1319,225 @@ async function normalizeItem(item, enrichVolume = true, metrics = null) {
   };
 }
 
+const BASE_SCANNER_SCREENER_IDS = [
+  "most_actives",
+  "day_gainers",
+  "small_cap_gainers",
+  "undervalued_large_caps",
+];
+const BASE_SCANNER_ITEM_LIMIT = 80;
+const BASE_SCANNER_SOURCE = "yahoo-screener-local";
+
+async function fetchYahooScreenerQuotes(screenerId, count = 100) {
+  try {
+    const url = `https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?count=${count}&scrIds=${encodeURIComponent(screenerId)}`;
+    const response = await fetch(url, {
+      headers: { "user-agent": "Mozilla/5.0", accept: "application/json" },
+    });
+    const payload = await response.json().catch(() => null);
+    const quotes = payload?.finance?.result?.[0]?.quotes;
+    if (!response.ok || !Array.isArray(quotes)) return [];
+    return quotes;
+  } catch {
+    return [];
+  }
+}
+
+async function collectBaseScannerQuotes() {
+  const quoteBySymbol = new Map();
+  await Promise.all(BASE_SCANNER_SCREENER_IDS.map(async (screenerId) => {
+    const quotes = await fetchYahooScreenerQuotes(screenerId);
+    for (const quote of quotes) {
+      const symbol = String(quote?.symbol || "").toUpperCase();
+      if (!symbol) continue;
+      const existing = quoteBySymbol.get(symbol);
+      if (!existing) {
+        quoteBySymbol.set(symbol, { quote, sourceTags: new Set([`yahoo-screener-${screenerId}`]) });
+        continue;
+      }
+      existing.sourceTags.add(`yahoo-screener-${screenerId}`);
+      const existingVolume = Math.max(num(existing.quote.regularMarketVolume) ?? 0, num(existing.quote.preMarketVolume) ?? 0);
+      const nextVolume = Math.max(num(quote.regularMarketVolume) ?? 0, num(quote.preMarketVolume) ?? 0);
+      if (nextVolume > existingVolume) existing.quote = quote;
+    }
+  }));
+  return quoteBySymbol;
+}
+
+function inferVolumeSourceFromQuote(quote) {
+  const marketState = String(quote?.marketState || "").toUpperCase();
+  const preVol = num(quote?.preMarketVolume);
+  const regVol = num(quote?.regularMarketVolume);
+  const postVol = num(quote?.postMarketVolume);
+  if (marketState === "PRE" || marketState === "PREPRE") {
+    return preVol !== null ? "yahoo-preMarketVolume" : "premarket-volume-unconfirmed";
+  }
+  if (marketState === "POST" || marketState === "POSTPOST") {
+    return postVol !== null ? "yahoo-postMarketVolume" : "postmarket-volume-unconfirmed";
+  }
+  if (regVol !== null) return "yahoo-regularMarketVolume";
+  if (preVol !== null) return "yahoo-preMarketVolume";
+  if (postVol !== null) return "yahoo-postMarketVolume";
+  return "regular-volume-unconfirmed";
+}
+
+function computeBaseScannerScores({ changePercent, volumeRatio, price, volume }) {
+  const change = Math.abs(changePercent ?? 0);
+  const rvol = volumeRatio ?? 0;
+  const rawVolume = volume ?? 0;
+
+  const surgePrecursorScore = Math.round(clamp(
+    40
+    + (change >= 5 ? 12 : change >= 2 ? 6 : 0)
+    + (rvol >= 5 ? 18 : rvol >= 3 ? 12 : rvol >= 1.5 ? 6 : 0)
+    + (price !== null && price < 5 ? 8 : 0),
+  ));
+
+  const momentumExpansionScore = Math.round(clamp(
+    40
+    + (change >= 10 && change <= 45 ? 22 : change >= 5 ? 10 : 0)
+    + (rvol >= 3 ? 15 : rvol >= 2 ? 8 : 0)
+    + (rawVolume >= 5_000_000 ? 12 : rawVolume >= 1_000_000 ? 6 : 0),
+  ));
+
+  const patternSimilarityScore = Math.round(clamp(
+    45
+    + (change >= 8 ? 12 : 0)
+    + (rvol >= 2 ? 10 : 0)
+    + (price !== null && price < 1 ? 8 : price !== null && price < 5 ? 4 : 0),
+  ));
+
+  const riskScore = Math.round(clamp(
+    35
+    + (change >= 100 ? 28 : change >= 60 ? 18 : change >= 35 ? 10 : 0)
+    + (price !== null && price < 1 ? 12 : 0)
+    + (rvol >= 10 && rawVolume < 500_000 ? 15 : 0),
+  ));
+
+  const scannerScore = Math.round(clamp(
+    surgePrecursorScore * 0.28
+    + momentumExpansionScore * 0.32
+    + patternSimilarityScore * 0.22
+    + (100 - riskScore) * 0.18,
+  ));
+
+  return {
+    scannerScore,
+    finalProbabilityScore: scannerScore,
+    surgePrecursorScore,
+    momentumExpansionScore,
+    patternSimilarityScore,
+    riskScore,
+    stage: scannerScore >= 75 ? "MOMENTUM EXPANSION" : scannerScore >= 60 ? "SURGE PRECURSOR" : "ACCUMULATION",
+    stageLabel: scannerScore >= 75 ? "추가 확장 가능" : scannerScore >= 60 ? "급등 전 조짐" : "누적 관찰",
+  };
+}
+
+function buildBaseScannerItem(quote, sourceTags = []) {
+  const symbol = String(quote.symbol || "").toUpperCase();
+  const previousClose = num(quote.regularMarketPreviousClose) ?? num(quote.previousClose);
+  const regularMarketPrice = num(quote.regularMarketPrice);
+  const preMarketPrice = num(quote.preMarketPrice);
+  const postMarketPrice = num(quote.postMarketPrice);
+  const marketState = String(quote.marketState || "").toUpperCase();
+  const price = regularMarketPrice ?? preMarketPrice ?? postMarketPrice;
+  const preMarketChangePercent = num(quote.preMarketChangePercent)
+    ?? pctFromBasis(preMarketPrice, previousClose);
+  const changePercent = num(quote.regularMarketChangePercent)
+    ?? preMarketChangePercent
+    ?? num(quote.postMarketChangePercent);
+  const preMarketVolume = num(quote.preMarketVolume);
+  const regularMarketVolume = num(quote.regularMarketVolume);
+  const postMarketVolume = num(quote.postMarketVolume);
+  const volumeSource = inferVolumeSourceFromQuote(quote);
+  const volume = volumeSource.includes("preMarket") ? preMarketVolume
+    : volumeSource.includes("postMarket") ? postMarketVolume
+      : regularMarketVolume ?? preMarketVolume ?? postMarketVolume;
+  const averageVolume = num(quote.averageDailyVolume3Month) ?? num(quote.averageDailyVolume10Day);
+  const volumeRatio = averageVolume && volume ? volume / averageVolume : null;
+  const scores = computeBaseScannerScores({
+    changePercent: Math.abs(changePercent ?? 0),
+    volumeRatio,
+    price,
+    volume,
+  });
+
+  return {
+    symbol,
+    name: quote.shortName || quote.longName || symbol,
+    price,
+    preMarketPrice,
+    postMarketPrice,
+    regularMarketPrice,
+    previousClose,
+    changePercent,
+    preMarketChangePercent,
+    preMarketVolume,
+    regularMarketVolume,
+    postMarketVolume,
+    volume,
+    volumeSource,
+    averageVolume,
+    volumeRatio,
+    relativeVolume: volumeRatio,
+    marketCap: num(quote.marketCap),
+    exchange: quote.fullExchangeName || quote.exchange || null,
+    currency: quote.currency || "USD",
+    marketState: quote.marketState || null,
+    extendedHours: marketState === "PRE" || marketState === "POST" || marketState === "POSTPOST",
+    sourceTags: [...sourceTags, "yahoo-v7-batch-base"],
+    included: true,
+    inScanUniverse: true,
+    ...scores,
+    selectionReasons: [
+      changePercent !== null ? `Session move ${changePercent.toFixed(1)}%` : null,
+      volumeRatio ? `Relative volume ${volumeRatio.toFixed(1)}x` : null,
+    ].filter(Boolean),
+  };
+}
+
+async function fetchBaseScannerPayload() {
+  const candidateQuotes = await collectBaseScannerQuotes();
+  const symbols = [...candidateQuotes.keys()];
+  const quoteMap = await fetchBatchQuoteMap(symbols);
+  const rawItems = [];
+
+  for (const [symbol, entry] of candidateQuotes) {
+    const quote = quoteMap.get(symbol) || entry.quote;
+    if (!quote?.symbol) continue;
+    rawItems.push(buildBaseScannerItem(quote, [...entry.sourceTags]));
+  }
+
+  rawItems.sort((a, b) => {
+    const scoreDiff = (num(b.finalProbabilityScore) ?? 0) - (num(a.finalProbabilityScore) ?? 0);
+    if (scoreDiff !== 0) return scoreDiff;
+    const bVolume = Math.max(num(b.volume) ?? 0, num(b.preMarketVolume) ?? 0);
+    const aVolume = Math.max(num(a.volume) ?? 0, num(a.preMarketVolume) ?? 0);
+    return bVolume - aVolume;
+  });
+
+  return {
+    ok: true,
+    data: {
+      updatedAt: new Date().toISOString(),
+      source: BASE_SCANNER_SOURCE,
+      candidateCount: rawItems.length,
+      items: rawItems.slice(0, BASE_SCANNER_ITEM_LIMIT),
+    },
+  };
+}
+
 module.exports = async function handler(req, res) {
   const requestStartedAt = Date.now();
   const requestId = headerValue(req.headers, "x-request-id") || makeRequestId("scanner");
   console.log(`[SCANNER] start requestId=${requestId}`);
   try {
-    const upstreamUrl = new URL(UPSTREAM);
-    const requestUrl = new URL(req.url, "https://kbk-theta-accumulation.vercel.app");
-    upstreamUrl.search = requestUrl.search;
-
-    const upstreamStartedAt = Date.now();
-    const response = await fetch(upstreamUrl, {
-      headers: { accept: "application/json" },
-    });
-    const payload = await response.json();
+    const baseStartedAt = Date.now();
+    const payload = await fetchBaseScannerPayload();
     const upstreamItems = Array.isArray(payload?.data?.items) ? payload.data.items.length : 0;
-    logScannerStep("upstream fetch", upstreamStartedAt, {
+    logScannerStep("base scanner fetch", baseStartedAt, {
       requestId,
-      status: response.status,
+      status: 200,
       items: upstreamItems,
     });
 
@@ -1562,11 +1762,11 @@ module.exports = async function handler(req, res) {
     res.setHeader("cache-control", "no-store");
     logScannerStep("completed", requestStartedAt, {
       requestId,
-      status: response.status,
+      status: 200,
       enrichLimit: ENRICH_SYMBOL_LIMIT,
     });
-    console.log(`[SCANNER] end requestId=${requestId} elapsed=${Date.now() - requestStartedAt}ms status=${response.status}`);
-    res.status(response.status).json(payload);
+    console.log(`[SCANNER] end requestId=${requestId} elapsed=${Date.now() - requestStartedAt}ms status=200`);
+    res.status(200).json(payload);
   } catch (error) {
     logScannerStep("completed", requestStartedAt, {
       requestId,
