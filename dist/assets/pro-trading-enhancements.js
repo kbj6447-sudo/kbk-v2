@@ -24,10 +24,7 @@ function wonMoney(n, rate = currentUsdKrw()) {
 }
 
 function pairedMoney(n, rate = currentUsdKrw()) {
-  const usd = money(n);
-  const krw = wonMoney(n, rate);
-  if (usd === "-" || krw === "-") return usd;
-  return `${krw} (${usd})`;
+  return wonMoney(n, rate);
 }
 
 function pct(n) {
@@ -147,7 +144,8 @@ function resolveTopPickDisplayFields(scannerItem = {}, quote = null, renderPhase
 }
 
 function displayVolumeText(volume) {
-  return toNumber(volume) === null ? "거래량 미확인" : `거래량 ${compact(volume)}`;
+  const n = toNumber(volume);
+  return n === null || n <= 0 ? "거래량 미확인" : `거래량 ${compact(n)}`;
 }
 
 function displayRvolText(item = {}) {
@@ -1470,9 +1468,117 @@ function selectedSymbolFromMonitor() {
 }
 
 function currentUsdKrw() {
+  const stateRate = Number(window.__kbkExchangeState?.rate);
+  if (Number.isFinite(stateRate) && stateRate > 0 && window.__kbkExchangeState?.status === "ok") {
+    return stateRate;
+  }
   const match = document.body.textContent.match(/USD\/KRW\s*([\d,]+)/);
   const parsed = match ? Number(match[1].replace(/,/g, "")) : null;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 1500;
+}
+
+const EXCHANGE_STATUS_REFRESH_MS = 5 * 60 * 1000;
+const EXCHANGE_STALE_MS = 2 * 60 * 60 * 1000;
+let exchangeStatusTimer = null;
+
+function formatExchangeUpdatedAt(value) {
+  if (!value) return "갱신시각 미확인";
+  const parsed = Date.parse(String(value));
+  if (!Number.isFinite(parsed)) return String(value);
+  return new Date(parsed).toLocaleString("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function resolveExchangePayload(payload) {
+  const data = payload?.data ?? payload ?? {};
+  const rate = Number(data.rate ?? data.usdKrw ?? data.exchangeRate ?? data.rates?.KRW);
+  const fetchedAt = data.fetchedAt ?? data.cachedAt ?? data.updatedAt ?? null;
+  const fetchedAtMs = fetchedAt ? Date.parse(String(fetchedAt)) : NaN;
+  const ageMs = Number.isFinite(fetchedAtMs) ? Math.max(0, Date.now() - fetchedAtMs) : null;
+  const stale = payload?.stale === true || data.stale === true || (ageMs !== null && ageMs > EXCHANGE_STALE_MS);
+  return {
+    rate: Number.isFinite(rate) && rate > 0 ? rate : null,
+    source: data.source || "open.er-api.com",
+    updatedAt: data.updatedAt || data.fetchedAt || data.cachedAt || null,
+    ageMs,
+    stale,
+    ok: payload?.ok !== false && Number.isFinite(rate) && rate > 0,
+  };
+}
+
+function renderExchangeRateStatus(state) {
+  const node = document.getElementById("exchange-rate");
+  if (!node) return;
+
+  if (!state || state.status === "failed" || !state.rate) {
+    node.textContent = "환율 갱신 실패";
+    node.title = state?.message || "환율 API 응답 없음";
+    node.dataset.kbkExchangeStatus = "failed";
+    return;
+  }
+
+  if (state.status === "stale" || state.stale) {
+    node.textContent = "환율 갱신 실패";
+    node.title = `마지막 환율 ${Math.round(state.rate).toLocaleString("ko-KR")}원 · ${state.source} · ${formatExchangeUpdatedAt(state.updatedAt)}`;
+    node.dataset.kbkExchangeStatus = "stale";
+    return;
+  }
+
+  node.textContent = `USD/KRW ${Math.round(state.rate).toLocaleString("ko-KR")} · ${state.source} · ${formatExchangeUpdatedAt(state.updatedAt)}`;
+  node.title = `출처 ${state.source} · 갱신 ${formatExchangeUpdatedAt(state.updatedAt)}`;
+  node.dataset.kbkExchangeStatus = "ok";
+}
+
+async function syncExchangeRateStatus() {
+  const node = document.getElementById("exchange-rate");
+  if (!node) return;
+
+  try {
+    const response = await fetch("/api/exchange", { cache: "no-store" });
+    const payload = await response.json().catch(() => null);
+    const resolved = resolveExchangePayload(payload);
+
+    if (!response.ok || !resolved.ok) {
+      window.__kbkExchangeState = { status: "failed", rate: null, stale: true };
+      renderExchangeRateStatus({ status: "failed", message: payload?.message || `HTTP ${response.status}` });
+      return;
+    }
+
+    const status = resolved.stale ? "stale" : "ok";
+    window.__kbkExchangeState = {
+      status,
+      rate: resolved.rate,
+      source: resolved.source,
+      updatedAt: resolved.updatedAt,
+      stale: resolved.stale,
+    };
+    renderExchangeRateStatus(window.__kbkExchangeState);
+  } catch (error) {
+    window.__kbkExchangeState = {
+      status: "failed",
+      rate: null,
+      stale: true,
+      message: error instanceof Error ? error.message : "exchange fetch failed",
+    };
+    renderExchangeRateStatus(window.__kbkExchangeState);
+  }
+}
+
+function ensureExchangeRateStatus() {
+  syncExchangeRateStatus();
+  if (exchangeStatusTimer) window.clearInterval(exchangeStatusTimer);
+  exchangeStatusTimer = window.setInterval(syncExchangeRateStatus, EXCHANGE_STATUS_REFRESH_MS);
+  const refreshBtn = document.getElementById("refresh-btn");
+  if (refreshBtn && !refreshBtn.dataset.kbkExchangeBound) {
+    refreshBtn.dataset.kbkExchangeBound = "1";
+    refreshBtn.addEventListener("click", () => {
+      window.setTimeout(syncExchangeRateStatus, 300);
+    });
+  }
 }
 
 function krwMoneyFromUsd(usd) {
@@ -1486,9 +1592,9 @@ function syncMonitorPriceBadge(symbol, price) {
   const summary = document.getElementById("monitor-summary");
   const value = Number(price);
   if (!summary || !symbol || !Number.isFinite(value)) return;
-  const label = `실시간 구간 ${money(value)} / ${krwMoneyFromUsd(value)} · ${new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
+  const label = `실시간 구간 ${krwMoneyFromUsd(value)} · ${new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
   const candidates = Array.from(summary.querySelectorAll("*")).filter((node) =>
-    node.children.length === 0 && (/실시간 구간/.test(node.textContent || "") || /^\$[\d.]+\s*\/\s*[\d,]+/.test((node.textContent || "").trim()))
+    node.children.length === 0 && (/실시간 구간/.test(node.textContent || "") || /^[\d,]+원/.test((node.textContent || "").trim()))
   );
   for (const node of candidates) node.textContent = label;
   if (!candidates.length) {
@@ -1674,7 +1780,7 @@ function candleChartSvg(bars, currentPrice, levels) {
   }).join("");
   const levelLines = Object.entries(levels).filter(([, value]) => Number.isFinite(value)).map(([label, value], index) => {
     const yy = y(value);
-    return `<line class="level" x1="${pad}" x2="${width - pad}" y1="${yy.toFixed(1)}" y2="${yy.toFixed(1)}"></line><text class="label" x="${pad + 4}" y="${(yy - 4 - index % 2 * 10).toFixed(1)}">${label} ${money(value)}</text>`;
+    return `<line class="level" x1="${pad}" x2="${width - pad}" y1="${yy.toFixed(1)}" y2="${yy.toFixed(1)}"></line><text class="label" x="${pad + 4}" y="${(yy - 4 - index % 2 * 10).toFixed(1)}">${label} ${wonMoney(value)}</text>`;
   }).join("");
   const last = bars.at(-1)?.close ?? currentPrice;
   return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="?먯껜 罹붾뱾李⑦듃">
@@ -1683,7 +1789,7 @@ function candleChartSvg(bars, currentPrice, levels) {
     ${levelLines}
     ${vwapPath.trim() ? `<path class="vwap" d="${vwapPath}"></path>` : ""}
     ${candles}
-    <text class="label" x="${width - pad - 120}" y="${pad + 12}">?꾩옱 ${money(last)}</text>
+    <text class="label" x="${width - pad - 120}" y="${pad + 12}">현재 ${wonMoney(last)}</text>
   </svg>`;
 }
 
@@ -1730,8 +1836,8 @@ async function enhanceMonitorPanel() {
     const basis = document.createElement("section");
     basis.className = "kbk-pro-basis";
     basis.innerHTML = `
-      <div><span>진입가 계산 근거</span><b>${money(entryLow)} ~ ${money(entryHigh)}</b><small>VWAP 위 유지 + 최근 20개 분봉 고점 돌파선을 기준으로 계산했습니다.</small></div>
-      <div><span>ATR 기반 손절</span><b>${money(atrStop)} ${stopPct !== null ? `(${pct(stopPct)})` : ""}</b><small>최근 14개 분봉 ATR ${atr ? money(atr) : "-"}와 직전 지지선을 함께 반영했습니다.</small></div>
+      <div><span>진입가 계산 근거</span><b>${wonMoney(entryLow)} ~ ${wonMoney(entryHigh)}</b><small>VWAP 위 유지 + 최근 20개 분봉 고점 돌파선을 기준으로 계산했습니다.</small></div>
+      <div><span>ATR 기반 손절</span><b>${wonMoney(atrStop)} ${stopPct !== null ? `(${pct(stopPct)})` : ""}</b><small>최근 14개 분봉 ATR ${atr ? wonMoney(atr) : "-"}와 직전 지지선을 함께 반영했습니다.</small></div>
       <div><span>검증 포인트</span><b>VWAP / 거래량 / 고점 돌파</b><small>현재가가 VWAP 아래로 내려가거나 돌파 거래량이 약하면 신규 진입은 보류합니다.</small></div>
     `;
     panel.querySelector(".kbk-pro-chart")?.remove();
@@ -1778,12 +1884,16 @@ function boot() {
   handleRoute();
   clarifyEmptyAccumulation();
   patchFloatingPointText();
+  ensureExchangeRateStatus();
 
   const observer = new MutationObserver(() => {
     patchFloatingPointText();
     ensureRouteLinks();
     clarifyEmptyAccumulation();
     enhanceMonitorPanel();
+    if (document.getElementById("exchange-rate") && !window.__kbkExchangeState) {
+      ensureExchangeRateStatus();
+    }
   });
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
   window.addEventListener("popstate", handleRoute);

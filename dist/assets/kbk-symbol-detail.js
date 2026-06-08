@@ -69,9 +69,7 @@ function krwText(value) {
 }
 
 function pricePairText(value) {
-  const n = num(value);
-  if (n === null) return "-";
-  return `${krwText(n)} (${usdText(n)})`;
+  return krwText(value);
 }
 
 function priceUsd(quote) {
@@ -102,7 +100,8 @@ function hasConfirmedVolume(item = {}) {
 }
 
 function displayVolumeText(volume) {
-  return num(volume) === null ? "거래량 미확인" : `거래량 ${compact(volume)}`;
+  const n = num(volume);
+  return n === null || n <= 0 ? "거래량 미확인" : `거래량 ${compact(n)}`;
 }
 
 function displayRelativeVolumeText(pick = {}) {
@@ -110,7 +109,7 @@ function displayRelativeVolumeText(pick = {}) {
   const volume = num(pick.displayVolume);
   if (volume === null || !hasConfirmedVolume({ volume, volumeSource: source })) return "상대거래량 미확인";
   const rvol = num(pick.displayRvol);
-  return rvol === null ? "상대거래량 미확인" : `RVOL ${rvol.toFixed(1)}`;
+  return rvol === null ? "상대거래량 미확인" : `상대거래량 ${rvol.toFixed(1)}배`;
 }
 
 function mergeTopPickDisplayQuote(pick, quote) {
@@ -507,7 +506,6 @@ function detailHtml(quote, bars, loading = false) {
   const signal = analyzeSignal(quote, bars);
   const price = signal.price;
   const krw = pricePairText(price);
-  const usd = price === null ? "-" : `USD ${usdText(price)}`;
   const scoreText = signal.probability === null ? "怨꾩궛以? : Math.round(signal.probability);
   const badge = signal.tone === "danger" ? "?꾪뿕" : signal.tone === "strong" ? "愿?? : signal.tone === "wait" ? "?湲? : "媛먯떆";
 
@@ -527,9 +525,8 @@ function detailHtml(quote, bars, loading = false) {
 
     <div class="kbk-detail-price">
       <strong>${krw}</strong>
-      <span>${usd}</span>
       <span>${pct(signal.change)}</span>
-      <span>嫄곕옒??${compact(signal.volume)}</span>
+      <span>${displayVolumeText(signal.volume)}</span>
       <span>${esc(signal.vwap)}</span>
       <span>Higher Lows: ${esc(signal.higherLowLabel)}</span>
       <span>VWAP ?좎?: ${esc(vwapHoldText(signal.vwapHoldMinutes))}</span>
@@ -1647,7 +1644,14 @@ function visibleSurgeCards() {
 }
 
 function krwTextFromUsd(price) {
-  return pricePairText(price);
+  return krwText(price);
+}
+
+function surgeRvolText(quote, volume) {
+  const volumeSource = quote?.volumeSource;
+  if (!hasConfirmedVolume({ volume, volumeSource })) return "상대거래량 미확인";
+  const quoteRvol = num(quote?.relativeVolume) ?? num(quote?.volumeRatio);
+  return quoteRvol !== null && quoteRvol > 0 ? `상대거래량 ${quoteRvol.toFixed(1)}배` : "상대거래량 미확인";
 }
 
 function updateSurgeCardQuote(card, quote, livePrice = null) {
@@ -1656,17 +1660,16 @@ function updateSurgeCardQuote(card, quote, livePrice = null) {
   const price = num(livePrice) ?? priceUsd(quote);
   const change = mainChangePct(quote, price) ?? changePct(quote);
   const volume = num(quote?.volume);
+  const volumeSource = quote?.volumeSource;
+  const confirmedVolume = hasConfirmedVolume({ volume, volumeSource }) ? volume : null;
   const vwap = vwapState(quote);
   const strong = priceRow.querySelector("strong");
   const spans = Array.from(priceRow.querySelectorAll("span"));
-  const existingRvol = num((spans[1]?.textContent || "").match(/([0-9.]+)\s*諛?)?.[1]);
-  const quoteRvol = num(quote?.relativeVolume) ?? num(quote?.volumeRatio);
-  const rvol = quoteRvol !== null && quoteRvol > 0 ? quoteRvol : existingRvol;
 
   if (strong) strong.textContent = krwTextFromUsd(price);
   if (spans[0]) spans[0].textContent = pct(change);
-  if (spans[1]) spans[1].textContent = rvol ? `?곷?嫄곕옒??${rvol.toFixed(1)}諛? : "?곷?嫄곕옒??-";
-  if (spans[2]) spans[2].textContent = displayVolumeText(volume);
+  if (spans[1]) spans[1].textContent = surgeRvolText(quote, volume);
+  if (spans[2]) spans[2].textContent = displayVolumeText(confirmedVolume);
   if (spans[3]) spans[3].textContent = vwap;
 
   let stamp = priceRow.querySelector(".kbk-live-quote-stamp");
@@ -1781,7 +1784,7 @@ function updateScalpMonitorPrice(symbol, price) {
   }
   if (badge) {
     const time = new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    badge.textContent = `?ㅼ떆媛?遺꾨큺 ${priceUsdText(price)} / ${krwTextFromUsd(price)} 쨌 ${time}`;
+    badge.textContent = `실시간 분봉 ${krwTextFromUsd(price)} · ${time}`;
   }
 }
 

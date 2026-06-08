@@ -118,8 +118,8 @@
       const sig = getSignalLabel(item.claudeScore, rvol, Math.abs(changePct), item.stage);
       const livePrice = pickLivePrice(item);
       const priceKrw = fmtKrw(livePrice);
-      const priceText = `${priceKrw}원 (${fmtUsd(livePrice)})`;
-      const rvolDisplay = rvol >= 1 ? rvol.toFixed(1) + 'x' : '-';
+      const priceText = `${priceKrw}원`;
+      const rvolDisplay = rvol > 0 ? `상대거래량 ${rvol.toFixed(1)}배` : '상대거래량 미확인';
       const dropRiskText = Math.round(item.dropRisk ?? 0);
       const accelText = item.volumeAcceleration ? (item.volumeAcceleration >= 10 ? item.volumeAcceleration.toFixed(1) : item.volumeAcceleration.toFixed(2)) : '-';
       const vwapLabel = item.vwapState === 'above' ? 'above' : item.vwapState === 'near' ? 'near' : item.vwapState === 'below' ? 'below' : (item.aboveVwap ? 'above' : 'unknown');
@@ -157,7 +157,7 @@
 
           <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:10px">
             <div style="background:#f8fafc; border-radius:8px; padding:8px; text-align:center">
-              <div style="font-size:10px; color:#6b7280; margin-bottom:2px">RVOL</div>
+              <div style="font-size:10px; color:#6b7280; margin-bottom:2px">상대거래량</div>
               <div style="font-weight:800; font-size:16px; color:${rvol>=10?'#dc2626':rvol>=5?'#d97706':'#2563eb'}">${rvolDisplay}</div>
             </div>
             <div style="background:#f8fafc; border-radius:8px; padding:8px; text-align:center">

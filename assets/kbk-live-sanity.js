@@ -47,10 +47,7 @@ function formatUsd(usd) {
 }
 
 function formatPricePair(usd, usdKrw) {
-  const krw = formatKrw(usd, usdKrw);
-  const usdText = formatUsd(usd);
-  if (krw === "-" || usdText === "-") return "-";
-  return `${krw} (${usdText})`;
+  return formatKrw(usd, usdKrw);
 }
 
 function formatKrw(usd, usdKrw) {
@@ -110,6 +107,14 @@ function updateLongDecimals(root = document.body) {
   }
 }
 
+function hasConfirmedVolume(quote, volume) {
+  const source = String(quote?.volumeSource || "").toLowerCase();
+  if (!source || source.includes("unconfirmed") || source.includes("fallback")) return false;
+  if (source.includes("chart") || source.includes("daily") || source.includes("history")) return false;
+  const n = toNumber(volume);
+  return n !== null && n > 0;
+}
+
 function updateCard(card, quote, livePrice, rate) {
   const row = card.querySelector(".price-row");
   if (!row) return;
@@ -118,21 +123,21 @@ function updateCard(card, quote, livePrice, rate) {
   const previousClose = toNumber(quote?.previousClose);
   const change = price !== null && previousClose ? ((price - previousClose) / previousClose) * 100 : toNumber(quote?.changePercent);
   const volume = toNumber(quote?.volume) ?? toNumber(quote?.preMarketVolume);
-  const existingRvol = (() => {
-    const text = row.textContent || "";
-    const match = text.match(/상대거래량\s*([\d.]+)배/);
-    const value = match ? toNumber(match[1]) : null;
-    return value !== null && value > 0 ? value : null;
-  })();
+  const volumeConfirmed = hasConfirmedVolume(quote, volume);
   const quoteRvol = toNumber(quote?.relativeVolume) ?? toNumber(quote?.volumeRatio);
-  const rvol = quoteRvol !== null && quoteRvol > 0 ? quoteRvol : existingRvol;
   const cells = Array.from(row.querySelectorAll("span"));
   const strong = row.querySelector("strong");
 
-  if (strong) strong.textContent = formatPricePair(price, rate);
+  if (strong) strong.textContent = formatKrw(price, rate);
   if (cells[0]) cells[0].textContent = pct(change);
-  if (cells[1] && rvol !== null) cells[1].textContent = `상대거래량 ${rvol.toFixed(1)}배`;
-  if (cells[2]) cells[2].textContent = `거래량 ${compact(volume)}`;
+  if (cells[1]) {
+    cells[1].textContent = volumeConfirmed && quoteRvol !== null && quoteRvol > 0
+      ? `상대거래량 ${quoteRvol.toFixed(1)}배`
+      : "상대거래량 미확인";
+  }
+  if (cells[2]) {
+    cells[2].textContent = volumeConfirmed ? `거래량 ${compact(volume)}` : "거래량 미확인";
+  }
 }
 
 async function refreshVisibleSurgeCards() {
