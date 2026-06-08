@@ -12,6 +12,27 @@ function orNum(a, b) {
   var va = num(a);
   return va !== null ? va : num(b);
 }
+
+function pctFromBasis(price, basis) {
+  var current = num(price);
+  var base = num(basis);
+  if (current === null || base === null || base <= 0) return null;
+  return ((current - base) / base) * 100;
+}
+
+function sessionLabel(sessionType) {
+  if (sessionType === 'PRE') return 'premarket';
+  if (sessionType === 'REGULAR') return 'regular';
+  if (sessionType === 'AFTER') return 'afterhours';
+  if (sessionType === 'DAY') return 'daymarket';
+  return 'unknown';
+}
+
+function confidenceLabel(value) {
+  if (value === 'high') return '높음';
+  if (value === 'medium') return '보통';
+  return '낮음';
+}
 var kisToken = require('../lib/kisToken');
 var KIS_BASE_URL = kisToken.KIS_BASE_URL;
 var getKisAccessToken = kisToken.getKisAccessToken;
@@ -223,11 +244,22 @@ module.exports = async function handler(req, res) {
     if (regularPrice === null) regularPrice = latestClose;
 
     var preMarketPrice = orNum(q.preMarketPrice, meta.preMarketPrice);
-    if (preMarketPrice === null) preMarketPrice = regularPrice;
+    if (preMarketPrice === null && sessionType === 'PRE') preMarketPrice = latestClose;
     var postMarketPrice = orNum(q.postMarketPrice, meta.postMarketPrice);
+    if (postMarketPrice === null && sessionType === 'AFTER') postMarketPrice = latestClose;
     var previousClose = orNum(q.regularMarketPreviousClose, orNum(q.previousClose, orNum(meta.previousClose, meta.chartPreviousClose)));
+    var regularMarketPreviousClose = orNum(q.regularMarketPreviousClose, orNum(q.previousClose, orNum(meta.previousClose, meta.chartPreviousClose)));
+    var regularMarketChange = orNum(q.regularMarketChange, regularPrice !== null && regularMarketPreviousClose !== null ? regularPrice - regularMarketPreviousClose : null);
+    var regularMarketChangePercent = orNum(q.regularMarketChangePercent, pctFromBasis(regularPrice, regularMarketPreviousClose));
+    var preMarketChange = orNum(q.preMarketChange, preMarketPrice !== null && regularPrice !== null ? preMarketPrice - regularPrice : null);
+    var preMarketChangePercent = orNum(q.preMarketChangePercent, pctFromBasis(preMarketPrice, regularPrice));
+    var postMarketChange = orNum(q.postMarketChange, postMarketPrice !== null && regularPrice !== null ? postMarketPrice - regularPrice : null);
+    var postMarketChangePercent = orNum(q.postMarketChangePercent, pctFromBasis(postMarketPrice, regularPrice));
     var avgVolume = orNum(q.averageDailyVolume3Month, orNum(q.averageDailyVolume10Day, orNum(meta.averageDailyVolume3Month, meta.averageDailyVolume10Day)));
-    var currentVolume = orNum(q.regularMarketVolume, meta.regularMarketVolume);
+    var regularMarketVolume = orNum(q.regularMarketVolume, meta.regularMarketVolume);
+    var preMarketVolume = orNum(q.preMarketVolume, meta.preMarketVolume);
+    var postMarketVolume = orNum(q.postMarketVolume, meta.postMarketVolume);
+    var currentVolume = null;
     var exchangeName = q.exchangeName || meta.exchangeName || meta.fullExchangeName || '';
     var kisQuote = await fetchKisQuote(symbol, exchangeName, sessionType, requestContext);
 
@@ -253,14 +285,12 @@ module.exports = async function handler(req, res) {
     }
 
     var priceSource = 'yahoo';
-    var volumeSource = currentVolume !== null ? 'yahoo-regularMarketVolume' : 'yahoo-chart-volume';
+    var volumeSource = null;
+    var changeBasis = null;
+    var dataReliability = 'medium';
     if (kisQuote.ok && kisQuote.price !== null) {
       displayPrice = kisQuote.price;
       priceSource = sessionType === 'DAY' ? 'kis-daymarket' : 'kis';
-    }
-    if (kisQuote.ok && kisQuote.volume !== null) {
-      currentVolume = kisQuote.volume;
-      volumeSource = 'kis-tvol';
     }
     if (kisQuote.ok && kisQuote.previousClose !== null) {
       previousClose = kisQuote.previousClose;
@@ -268,12 +298,44 @@ module.exports = async function handler(req, res) {
 
     var displayChange = null;
     var displayChangePct = null;
-    if (kisQuote.ok && kisQuote.diff !== null && kisQuote.rate !== null) {
+    if (sessionType === 'PRE') {
+      displayPrice = preMarketPrice !== null ? preMarketPrice : displayPrice;
+      displayChange = preMarketChange;
+      displayChangePct = preMarketChangePercent;
+      currentVolume = preMarketVolume;
+      volumeSource = currentVolume !== null ? 'yahoo-preMarketVolume' : 'premarket-volume-unconfirmed';
+      changeBasis = displayChangePct !== null ? 'preMarketPrice-vs-regularMarketPrice' : 'preMarketChangePercent-unavailable';
+      dataReliability = currentVolume !== null && displayChangePct !== null ? 'high' : 'low';
+    } else if (sessionType === 'REGULAR') {
+      displayPrice = regularPrice !== null ? regularPrice : displayPrice;
+      displayChange = regularMarketChange;
+      displayChangePct = regularMarketChangePercent;
+      currentVolume = regularMarketVolume;
+      volumeSource = currentVolume !== null ? 'yahoo-regularMarketVolume' : 'regular-volume-unconfirmed';
+      changeBasis = 'regularMarketPrice-vs-previousClose';
+      dataReliability = currentVolume !== null && displayChangePct !== null ? 'high' : 'medium';
+    } else if (sessionType === 'AFTER') {
+      displayPrice = postMarketPrice !== null ? postMarketPrice : displayPrice;
+      displayChange = postMarketChange;
+      displayChangePct = postMarketChangePercent;
+      currentVolume = postMarketVolume;
+      volumeSource = currentVolume !== null ? 'yahoo-postMarketVolume' : 'postmarket-volume-unconfirmed';
+      changeBasis = displayChangePct !== null ? 'postMarketPrice-vs-regularMarketPrice' : 'postMarketChangePercent-unavailable';
+      dataReliability = currentVolume !== null && displayChangePct !== null ? 'high' : 'low';
+    } else if (kisQuote.ok && kisQuote.diff !== null && kisQuote.rate !== null) {
       displayChange = kisQuote.diff;
       displayChangePct = kisQuote.rate;
+      currentVolume = kisQuote.volume;
+      volumeSource = currentVolume !== null ? 'kis-tvol' : 'daymarket-volume-unconfirmed';
+      changeBasis = 'kis-daymarket';
+      dataReliability = currentVolume !== null ? 'high' : 'low';
     } else if (displayPrice !== null && previousClose !== null && previousClose !== 0) {
       displayChange = displayPrice - previousClose;
       displayChangePct = (displayChange / previousClose) * 100;
+      currentVolume = null;
+      volumeSource = 'daymarket-volume-unconfirmed';
+      changeBasis = 'fallback-previousClose';
+      dataReliability = 'low';
     }
 
     // VWAP
@@ -311,13 +373,44 @@ module.exports = async function handler(req, res) {
       else if (last3[2] < last3[0]) oneMinuteTrend = 'down';
     }
 
-    if (currentVolume === null && vR.length > 0) {
+    var chartVolume = null;
+    if (vR.length > 0) {
       var vs = vR.map(num).filter(function(v) { return v !== null && v > 0; });
-      currentVolume = vs.reduce(function(s, v) { return s + v; }, 0) || null;
-      if (!kisQuote.ok) volumeSource = currentVolume !== null ? 'yahoo-chart-volume' : volumeSource;
+      chartVolume = vs.reduce(function(s, v) { return s + v; }, 0) || null;
+    }
+    if (currentVolume === null && sessionType === 'REGULAR' && chartVolume !== null) {
+      currentVolume = chartVolume;
+      volumeSource = 'yahoo-chart-volume';
+      dataReliability = displayChangePct !== null ? 'medium' : 'low';
     }
     var volumeRatio = (avgVolume && currentVolume) ? currentVolume / avgVolume : null;
     var isExtended = marketState === 'PRE' || marketState === 'POST' || marketState === 'POSTPOST';
+    if (symbol.toUpperCase() === 'RMSG') {
+      console.log('[QUOTE:RMSG:SESSION_FIELDS] ' + JSON.stringify({
+        symbol: q.symbol || meta.symbol || symbol,
+        price: displayPrice,
+        regularMarketPrice: regularPrice,
+        preMarketPrice: preMarketPrice,
+        postMarketPrice: postMarketPrice,
+        previousClose: previousClose,
+        regularMarketPreviousClose: regularMarketPreviousClose,
+        change: displayChange,
+        changePercent: displayChangePct,
+        preMarketChange: preMarketChange,
+        preMarketChangePercent: preMarketChangePercent,
+        volume: currentVolume,
+        regularMarketVolume: regularMarketVolume,
+        preMarketVolume: preMarketVolume,
+        postMarketVolume: postMarketVolume,
+        chartVolume: chartVolume,
+        avgVolume: avgVolume,
+        source: 'quote',
+        priceSource: priceSource,
+        volumeSource: volumeSource,
+        marketState: marketState,
+        sessionType: sessionType
+      }));
+    }
 
     return res.status(200).json({
       ok: true,
@@ -330,13 +423,25 @@ module.exports = async function handler(req, res) {
         postMarketPrice: postMarketPrice,
         change: displayChange,
         changePercent: displayChangePct,
+        preMarketChange: preMarketChange,
+        preMarketChangePercent: preMarketChangePercent,
+        regularMarketChange: regularMarketChange,
+        regularMarketChangePercent: regularMarketChangePercent,
+        postMarketChange: postMarketChange,
+        postMarketChangePercent: postMarketChangePercent,
         previousClose: previousClose,
+        regularMarketPreviousClose: regularMarketPreviousClose,
         marketState: marketState,
         extendedHours: isExtended,
         dayHigh: orNum(q.regularMarketDayHigh, meta.regularMarketDayHigh),
         dayLow: orNum(q.regularMarketDayLow, meta.regularMarketDayLow),
         volume: currentVolume,
+        regularMarketVolume: regularMarketVolume,
+        preMarketVolume: preMarketVolume,
+        postMarketVolume: postMarketVolume,
+        chartVolume: chartVolume,
         averageVolume: avgVolume,
+        avgVolume: avgVolume,
         relativeVolume: volumeRatio,
         volumeRatio: volumeRatio,
         vwap: vwap,
@@ -354,6 +459,10 @@ module.exports = async function handler(req, res) {
         sessionType: sessionType,
         priceSource: priceSource,
         volumeSource: volumeSource,
+        changeBasis: changeBasis,
+        dataReliability: dataReliability,
+        dataReliabilityLabel: confidenceLabel(dataReliability),
+        sessionLabel: sessionLabel(sessionType),
         kisMarketCode: kisQuote.marketCode || null,
         kisPrice: kisQuote.price || null,
         kisVolume: kisQuote.volume || null,

@@ -46,6 +46,7 @@ function changePercentFromPreviousClose(price, previousClose) {
 }
 
 function volumeStrength(item) {
+  if (!isTrustedCurrentVolumeSource(item.volumeSource)) return 18;
   const rawVolume = Math.max(num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0);
   const relativeVolume = num(item.relativeVolume) ?? num(item.volumeRatio);
   const previousVolumeRatio = num(item.previousDayVolumeRatio);
@@ -65,6 +66,7 @@ function volumeStrength(item) {
 }
 
 function volumeQualityScore(item) {
+  const trustedVolume = isTrustedCurrentVolumeSource(item.volumeSource);
   const rawVolume = Math.max(num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0);
   const relativeVolume = num(item.relativeVolume) ?? num(item.volumeRatio);
   const priceUsd = num(item.price) ?? num(item.preMarketPrice) ?? num(item.regularMarketPrice);
@@ -77,7 +79,13 @@ function volumeQualityScore(item) {
     ?? (priceKrw !== null && rawVolume ? priceKrw * rawVolume : null)
     ?? (priceUsd !== null && rawVolume ? priceUsd * rawVolume * usdKrw : null);
 
-  let score = 50;
+  let score = trustedVolume ? 50 : 20;
+  if (!trustedVolume) {
+    return {
+      score: Math.round(clamp(score)),
+      tradeValueKrw: null,
+    };
+  }
   if ((relativeVolume ?? 0) >= 3 && rawVolume < 100_000) score -= 25;
   else if (rawVolume > 0 && rawVolume < 100_000) score -= 12;
 
@@ -167,6 +175,36 @@ function sum(values) {
 function positive(value) {
   const parsed = num(value);
   return parsed !== null && parsed > 0 ? parsed : null;
+}
+
+function pctFromBasis(price, basis) {
+  const current = num(price);
+  const base = num(basis);
+  if (current === null || base === null || base <= 0) return null;
+  return ((current - base) / base) * 100;
+}
+
+function isTrustedCurrentVolumeSource(source) {
+  const text = String(source || "").toLowerCase();
+  return text.includes("premarketvolume")
+    || text.includes("postmarketvolume")
+    || text.includes("regularmarketvolume")
+    || text.includes("kis-tvol")
+    || text.includes("kis-evol");
+}
+
+function sessionLabel(sessionType) {
+  if (sessionType === "PRE") return "premarket";
+  if (sessionType === "REGULAR") return "regular";
+  if (sessionType === "AFTER") return "afterhours";
+  if (sessionType === "DAY") return "daymarket";
+  return "unknown";
+}
+
+function confidenceLabel(value) {
+  if (value === "high") return "높음";
+  if (value === "medium") return "보통";
+  return "낮음";
 }
 
 function getKstParts(date) {
@@ -918,21 +956,26 @@ function normalizeLiveQuote(item, quoteSnapshot = {}, chartSnapshot = {}) {
   const kisPrice = num(quoteSnapshot.kisPrice)
     ?? num(item.kisPrice)
     ?? null;
-  const regularPrice = num(quoteSnapshot.price)
-    ?? kisPrice
-    ?? num(quoteSnapshot.regularMarketPrice)
+  const regularPrice = num(quoteSnapshot.regularMarketPrice)
     ?? num(item.regularMarketPrice)
     ?? num(chartSnapshot.regularMarketPrice)
-    ?? num(item.price);
+    ?? (sessionType === "REGULAR" ? num(quoteSnapshot.price) ?? num(item.price) : null);
   const preMarketPrice = num(quoteSnapshot.preMarketPrice)
     ?? num(item.preMarketPrice)
     ?? num(chartSnapshot.preMarketPrice)
-    ?? regularPrice;
+    ?? (sessionType === "PRE" ? num(quoteSnapshot.price) ?? num(chartSnapshot.latestClose) ?? num(item.price) : null);
   const postMarketPrice = num(quoteSnapshot.postMarketPrice)
     ?? num(item.postMarketPrice)
-    ?? num(chartSnapshot.postMarketPrice);
+    ?? num(chartSnapshot.postMarketPrice)
+    ?? (sessionType === "AFTER" ? num(quoteSnapshot.price) ?? num(chartSnapshot.latestClose) ?? num(item.price) : null);
   const latestClose = num(chartSnapshot.latestClose);
-  const displayPrice = num(quoteSnapshot.price) ?? pickDisplayPrice({
+  const displayPrice = sessionType === "PRE"
+    ? preMarketPrice
+    : sessionType === "AFTER"
+      ? postMarketPrice
+      : sessionType === "REGULAR"
+        ? regularPrice
+        : num(quoteSnapshot.price) ?? kisPrice ?? pickDisplayPrice({
     marketState,
     regularPrice,
     preMarketPrice,
@@ -944,30 +987,59 @@ function normalizeLiveQuote(item, quoteSnapshot = {}, chartSnapshot = {}) {
     ?? num(item.previousClose)
     ?? num(chartSnapshot.previousClose)
     ?? num(chartSnapshot.chartPreviousClose);
-  const recalculatedChange = changePercentFromPreviousClose(displayPrice, previousClose);
-  const change = num(quoteSnapshot.change)
-    ?? num(item.change)
-    ?? (displayPrice !== null && previousClose !== null ? displayPrice - previousClose : null);
-  const rawChangePercent = num(quoteSnapshot.changePercent)
-    ?? num(item.changePercent)
-    ?? null;
-  const changePercent = recalculatedChange ?? rawChangePercent;
-  const currentVolume = Math.max(
-    num(quoteSnapshot.kisVolume) ?? 0,
-    num(item.kisVolume) ?? 0,
-    num(item.volume) ?? 0,
-    num(item.preMarketVolume) ?? 0,
-    num(quoteSnapshot.regularMarketVolume) ?? 0,
-    num(chartSnapshot.regularMarketVolume) ?? 0,
-    num(chartSnapshot.volume) ?? 0,
-  ) || null;
+  const regularMarketPreviousClose = num(quoteSnapshot.regularMarketPreviousClose)
+    ?? num(item.regularMarketPreviousClose)
+    ?? previousClose;
+  const regularChangePercent = num(quoteSnapshot.regularMarketChangePercent)
+    ?? num(item.regularMarketChangePercent)
+    ?? pctFromBasis(regularPrice, regularMarketPreviousClose);
+  const preChangePercent = num(quoteSnapshot.preMarketChangePercent)
+    ?? pctFromBasis(preMarketPrice, regularPrice);
+  const postChangePercent = num(quoteSnapshot.postMarketChangePercent)
+    ?? pctFromBasis(postMarketPrice, regularPrice);
+  let changePercent = null;
+  let changeBasis = null;
+  if (sessionType === "PRE") {
+    changePercent = preChangePercent;
+    changeBasis = changePercent !== null ? "preMarketPrice-vs-regularMarketPrice" : "preMarketChangePercent-unavailable";
+  } else if (sessionType === "AFTER") {
+    changePercent = postChangePercent;
+    changeBasis = changePercent !== null ? "postMarketPrice-vs-regularMarketPrice" : "postMarketChangePercent-unavailable";
+  } else if (sessionType === "REGULAR") {
+    changePercent = regularChangePercent;
+    changeBasis = "regularMarketPrice-vs-previousClose";
+  } else {
+    changePercent = num(quoteSnapshot.changePercent) ?? num(item.changePercent) ?? null;
+    changeBasis = quoteSnapshot.changeBasis ?? item.changeBasis ?? "daymarket";
+  }
+  const change = displayPrice !== null && changePercent !== null
+    ? displayPrice - (displayPrice / (1 + changePercent / 100))
+    : num(quoteSnapshot.change) ?? num(item.change) ?? null;
+  let currentVolume = null;
+  let volumeSource = null;
+  if (sessionType === "PRE") {
+    currentVolume = num(quoteSnapshot.preMarketVolume) ?? num(item.preMarketVolume);
+    volumeSource = currentVolume !== null ? "yahoo-preMarketVolume" : "premarket-volume-unconfirmed";
+  } else if (sessionType === "AFTER") {
+    currentVolume = num(quoteSnapshot.postMarketVolume) ?? num(item.postMarketVolume);
+    volumeSource = currentVolume !== null ? "yahoo-postMarketVolume" : "postmarket-volume-unconfirmed";
+  } else if (sessionType === "REGULAR") {
+    currentVolume = num(quoteSnapshot.regularMarketVolume)
+      ?? num(item.regularMarketVolume)
+      ?? num(chartSnapshot.regularMarketVolume);
+    volumeSource = currentVolume !== null ? "yahoo-regularMarketVolume" : "regular-volume-unconfirmed";
+  } else {
+    currentVolume = num(quoteSnapshot.kisVolume) ?? num(item.kisVolume);
+    volumeSource = currentVolume !== null ? "kis-tvol" : "daymarket-volume-unconfirmed";
+  }
   const priceSource = quoteSnapshot.priceSource
     ?? item.priceSource
     ?? (kisPrice !== null ? (sessionType === "DAY" ? "kis-daymarket" : "kis") : "yahoo");
-  const volumeSource = quoteSnapshot.volumeSource
-    ?? item.volumeSource
-    ?? chartSnapshot.volumeSource
-    ?? (num(quoteSnapshot.kisVolume) !== null ? "kis-tvol" : "yahoo-fallback");
+  const dataReliability = currentVolume !== null && changePercent !== null
+    ? "high"
+    : sessionType === "REGULAR" && changePercent !== null
+      ? "medium"
+      : "low";
   const historySource = chartSnapshot.historySource
     ?? item.historySource
     ?? null;
@@ -999,21 +1071,34 @@ function normalizeLiveQuote(item, quoteSnapshot = {}, chartSnapshot = {}) {
     preMarketPrice,
     postMarketPrice,
     previousClose: previousClose ?? item.previousClose ?? null,
+    regularMarketPreviousClose,
     change: change ?? null,
     changePercent: changePercent ?? null,
-    preMarketChangePercent: num(quoteSnapshot.preMarketChangePercent) ?? num(item.preMarketChangePercent) ?? null,
+    preMarketChange: num(quoteSnapshot.preMarketChange) ?? num(item.preMarketChange) ?? null,
+    preMarketChangePercent: preChangePercent,
+    regularMarketChangePercent: regularChangePercent,
+    postMarketChangePercent: postChangePercent,
     marketState,
     extendedHours: marketState === "PRE" || marketState === "POST" || marketState === "POSTPOST",
     latestClose,
     latestBarAge: num(chartSnapshot.latestBarAge),
     priceUpdatedAt: chartSnapshot.priceUpdatedAt ?? null,
-    volume: currentVolume ?? item.volume,
+    volume: currentVolume,
+    regularMarketVolume: num(quoteSnapshot.regularMarketVolume) ?? num(item.regularMarketVolume) ?? num(chartSnapshot.regularMarketVolume) ?? null,
+    preMarketVolume: num(quoteSnapshot.preMarketVolume) ?? num(item.preMarketVolume) ?? null,
+    postMarketVolume: num(quoteSnapshot.postMarketVolume) ?? num(item.postMarketVolume) ?? null,
+    chartVolume: num(chartSnapshot.volume) ?? null,
     averageVolume: num(quoteSnapshot.averageDailyVolume3Month)
       ?? num(quoteSnapshot.averageDailyVolume10Day)
       ?? num(item.averageVolume),
+    avgVolume: num(quoteSnapshot.avgVolume) ?? num(item.avgVolume) ?? num(item.averageVolume),
     sessionType,
     priceSource,
     volumeSource,
+    changeBasis,
+    dataReliability,
+    dataReliabilityLabel: confidenceLabel(dataReliability),
+    sessionLabel: sessionLabel(sessionType),
     historySource,
     vwap,
     vwapSource,
@@ -1122,6 +1207,17 @@ async function fetchChartSnapshot(symbol) {
 
 async function fetchVolumeProfile(symbol, currentVolume, currentVolumeSource = "yahoo") {
   if (!symbol) return {};
+  if (!isTrustedCurrentVolumeSource(currentVolumeSource) || num(currentVolume) === null) {
+    return {
+      averageVolume: null,
+      previousDayVolume: null,
+      relativeVolume: null,
+      volumeRatio: null,
+      previousDayVolumeRatio: null,
+      rvolSource: "disabled-non-session-volume",
+      volumeProfileStatus: "current-session-volume-unconfirmed",
+    };
+  }
   try {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1mo&interval=1d&includePrePost=true`;
     const response = await fetch(url, {
@@ -1136,8 +1232,7 @@ async function fetchVolumeProfile(symbol, currentVolume, currentVolumeSource = "
     const volumes = Array.isArray(quote.volume) ? quote.volume.map(num).filter((value) => value !== null && value > 0) : [];
     if (!volumes.length) return { volumeProfileStatus: "no-daily-volume" };
 
-    const latestChartVolume = volumes.at(-1);
-    const liveVolume = Math.max(num(currentVolume) ?? 0, num(result?.meta?.regularMarketVolume) ?? 0, latestChartVolume ?? 0);
+    const liveVolume = num(currentVolume);
     const previousDayVolume = volumes.length > 1 ? volumes.at(-2) : null;
     const averageVolume20d = average(volumes.slice(0, -1).slice(-20));
     return {
@@ -1146,7 +1241,7 @@ async function fetchVolumeProfile(symbol, currentVolume, currentVolumeSource = "
       relativeVolume: averageVolume20d ? liveVolume / averageVolume20d : null,
       volumeRatio: averageVolume20d ? liveVolume / averageVolume20d : null,
       previousDayVolumeRatio: previousDayVolume ? liveVolume / previousDayVolume : null,
-      volume: liveVolume || currentVolume,
+      volume: liveVolume,
       rvolSource: String(currentVolumeSource || "").startsWith("kis") ? "kis-current-volume-yahoo-average" : "yahoo",
       volumeProfileStatus: "ok",
     };
@@ -1185,8 +1280,11 @@ function boostedScore(item) {
 async function normalizeItem(item, enrichVolume = true, metrics = null) {
   if (!item || typeof item !== "object") return item;
 
-  const rawVolume = Math.max(num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0);
-  const needsVolumeProfile = enrichVolume && ((num(item.relativeVolume) ?? num(item.volumeRatio)) === null || num(item.averageVolume) === null);
+  const rawVolume = isTrustedCurrentVolumeSource(item.volumeSource) ? (num(item.volume) ?? num(item.preMarketVolume) ?? 0) : 0;
+  const needsVolumeProfile = enrichVolume
+    && isTrustedCurrentVolumeSource(item.volumeSource)
+    && rawVolume > 0
+    && ((num(item.relativeVolume) ?? num(item.volumeRatio)) === null || num(item.averageVolume) === null);
   let volumeProfile = {};
   if (needsVolumeProfile) {
     const volumeStartedAt = Date.now();
@@ -1206,7 +1304,7 @@ async function normalizeItem(item, enrichVolume = true, metrics = null) {
   return {
     ...merged,
     volumeComputationVersion: "pro-rvol-v2",
-    volume: Math.max(num(merged.volume) ?? 0, rawVolume) || item.volume,
+    volume: isTrustedCurrentVolumeSource(merged.volumeSource) ? ((num(merged.volume) ?? rawVolume) || null) : null,
     volumeStrengthScore: correctedVolumeScore,
     volumeQualityScore: quality.score,
     tradeValueKrw: quality.tradeValueKrw,
@@ -1278,13 +1376,11 @@ module.exports = async function handler(req, res) {
       })();
       const localQuoteSnapshotsPromise = (async () => {
         const quoteStartedAt = Date.now();
-        const snapshots = sessionType === "DAY"
-          ? await mapWithLimit(chartSymbols, 2, async (symbol) => [symbol, await fetchLocalQuoteSnapshot(symbol, requestId)])
-          : [];
+        const snapshots = await mapWithLimit(chartSymbols, 2, async (symbol) => [symbol, await fetchLocalQuoteSnapshot(symbol, requestId)]);
         logScannerStep("quote enrich", quoteStartedAt, {
           requestId,
           symbols: chartSymbols.length,
-          enabled: sessionType === "DAY",
+          enabled: true,
         });
         return snapshots;
       })();
@@ -1370,6 +1466,15 @@ module.exports = async function handler(req, res) {
         const responseItem = {
           ...normalizedItem,
           ...compactObject(liveQuote),
+          price: liveQuote.price ?? null,
+          normalizedLivePriceUsd: liveQuote.normalizedLivePriceUsd ?? null,
+          change: liveQuote.change ?? null,
+          changePercent: liveQuote.changePercent ?? null,
+          preMarketChange: liveQuote.preMarketChange ?? null,
+          preMarketChangePercent: liveQuote.preMarketChangePercent ?? null,
+          regularMarketChangePercent: liveQuote.regularMarketChangePercent ?? null,
+          postMarketChangePercent: liveQuote.postMarketChangePercent ?? null,
+          volume: liveQuote.volume ?? null,
           ...commonSignals,
           rankAuxiliaryScore,
           ...surgeAcceleration,
@@ -1380,6 +1485,31 @@ module.exports = async function handler(req, res) {
           scannerScore,
           finalProbabilityScore,
         };
+        if (symbolKey === "RMSG") {
+          console.log("[SCANNER:RMSG:SESSION_FIELDS] " + JSON.stringify({
+            symbol: responseItem.symbol,
+            price: responseItem.price,
+            regularMarketPrice: responseItem.regularMarketPrice,
+            preMarketPrice: responseItem.preMarketPrice,
+            postMarketPrice: responseItem.postMarketPrice ?? null,
+            previousClose: responseItem.previousClose,
+            regularMarketPreviousClose: responseItem.regularMarketPreviousClose,
+            change: responseItem.change,
+            changePercent: responseItem.changePercent,
+            preMarketChange: responseItem.preMarketChange,
+            preMarketChangePercent: responseItem.preMarketChangePercent,
+            volume: responseItem.volume,
+            regularMarketVolume: responseItem.regularMarketVolume ?? null,
+            preMarketVolume: responseItem.preMarketVolume ?? null,
+            chartVolume: responseItem.chartVolume ?? null,
+            avgVolume: responseItem.avgVolume ?? responseItem.averageVolume,
+            source: "scanner",
+            priceSource: responseItem.priceSource,
+            volumeSource: responseItem.volumeSource,
+            marketState: responseItem.marketState,
+            sessionType: responseItem.sessionType
+          }));
+        }
         const topPickEvaluation = evaluateTopPickForSnapshot(responseItem);
         const forbiddenPenalty = computeForbiddenPenalty(topPickEvaluation.topPickVerdict, topPickEvaluation.topPickChaseRisk);
         const marketPrioritySortScore = finalProbabilityScore + earlyMomentumBonus + liquidityMomentumBonus - forbiddenPenalty;

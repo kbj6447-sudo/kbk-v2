@@ -45,6 +45,70 @@ function compact(n) {
   return String(Math.round(value));
 }
 
+function sourceLabel(value, fallback = "미확인") {
+  const text = String(value || "").toLowerCase();
+  if (text.includes("premarket")) return "프리마켓";
+  if (text.includes("postmarket")) return "애프터장";
+  if (text.includes("regular")) return "정규장";
+  if (text.includes("daymarket") || text.includes("kis")) return "데이마켓";
+  if (text.includes("chart") || text.includes("daily") || text.includes("history")) return "전일/차트";
+  if (text.includes("unconfirmed")) return "미확인";
+  return fallback;
+}
+
+function changeBasisLabel(item = {}) {
+  const basis = String(item.changeBasis || "").toLowerCase();
+  if (basis.includes("premarket")) return "프리마켓 기준";
+  if (basis.includes("postmarket")) return "애프터장 기준";
+  if (basis.includes("regular")) return "정규장 기준";
+  if (basis.includes("daymarket")) return "데이마켓 기준";
+  if (basis.includes("unavailable")) return "기준 미확인";
+  return sourceLabel(item.sessionType, "기준 미확인");
+}
+
+function volumeSourceLabel(item = {}) {
+  const source = String(item.volumeSource || "").toLowerCase();
+  if (source.includes("unconfirmed")) {
+    if (source.includes("premarket")) return "프리마켓 미확인";
+    if (source.includes("postmarket")) return "애프터장 미확인";
+    return "미확인";
+  }
+  if (source.includes("premarketvolume")) return "프리마켓 실시간";
+  if (source.includes("postmarketvolume")) return "애프터장 실시간";
+  if (source.includes("regularmarketvolume")) return "정규장";
+  if (source.includes("chart") || source.includes("daily") || source.includes("history") || source.includes("fallback")) return "전일 정규장";
+  if (source.includes("kis")) return "데이마켓";
+  return "미확인";
+}
+
+function reliabilityLabel(item = {}) {
+  if (item.dataReliabilityLabel) return item.dataReliabilityLabel;
+  const value = String(item.dataReliability || "").toLowerCase();
+  if (value === "high") return "높음";
+  if (value === "medium") return "보통";
+  return "낮음";
+}
+
+function sessionTypeLabel(item = {}) {
+  const session = String(item.sessionType || item.sessionLabel || "").toUpperCase();
+  if (session === "PRE" || session === "PREMARKET") return "프리마켓";
+  if (session === "REGULAR") return "정규장";
+  if (session === "AFTER" || session === "AFTERHOURS") return "애프터장";
+  if (session === "DAY" || session === "DAYMARKET") return "데이마켓";
+  return "미확인";
+}
+
+function sessionDebugHtml(item = {}) {
+  return `
+    <div class="kbk-session-debug">
+      <span>가격: ${sourceLabel(item.priceSource || item.sessionType)}</span>
+      <span>등락률: ${changeBasisLabel(item)}</span>
+      <span>거래량: ${volumeSourceLabel(item)}</span>
+      <span>세션: ${sessionTypeLabel(item)}</span>
+      <span>데이터 신뢰도: ${reliabilityLabel(item)}</span>
+    </div>`;
+}
+
 function livePriceOf(item) {
   return toNumber(item?.normalizedLivePriceUsd)
     ?? toNumber(item?.price)
@@ -58,6 +122,8 @@ function rvolValue(item) {
 }
 
 function mainChangePercent(item, priceOverride = null) {
+  const providedChange = toNumber(item?.changePercent);
+  if (providedChange !== null) return providedChange;
   const price = toNumber(priceOverride)
     ?? livePriceOf(item)
     ?? toNumber(item?.regularMarketPrice)
@@ -67,7 +133,7 @@ function mainChangePercent(item, priceOverride = null) {
   if (price !== null && previousClose !== null && previousClose > 0) {
     return ((price - previousClose) / previousClose) * 100;
   }
-  return toNumber(item?.changePercent);
+  return providedChange;
 }
 
 function topPickItemField(item, key) {
@@ -711,6 +777,8 @@ function ensureStyles() {
     .ticker-row h3{font-size:1.28rem!important}
     .company-name,.stock-note{font-size:.86rem!important;margin-top:7px!important}
     .price-row{gap:8px!important;margin-top:10px!important;font-size:.86rem!important}
+    .kbk-session-debug{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;margin-top:10px}
+    .kbk-session-debug span{background:#f8fafc;border:1px solid rgba(15,23,42,.08);border-radius:8px;padding:7px 8px;color:#475569;font-size:.72rem;font-weight:800;line-height:1.3}
     .score-number{font-size:2.1rem!important}
     .signal-box{min-width:86px!important}
     .metric-grid,.score-copy-grid,.forecast-grid{gap:8px!important;margin-top:12px!important}
@@ -759,6 +827,7 @@ function ensureStyles() {
     .kbk-pro-top-grid div{background:#f8fafc;border-radius:10px;padding:9px}
     .kbk-pro-top-grid span{display:block;color:#64748b;font-size:.76rem}
     .kbk-pro-top-grid b{display:block;margin-top:4px;color:#0f172a}
+    .kbk-pro-top-card .kbk-session-debug{grid-template-columns:repeat(5,minmax(0,1fr));margin-top:0}
     .kbk-pro-top-meta{display:grid;grid-template-columns:1fr 1fr 150px;gap:8px}
     .kbk-pro-top-meta div{background:#f8fafc;border:1px solid rgba(15,23,42,.08);border-radius:10px;padding:9px}
     .kbk-pro-top-meta span{display:block;color:#64748b;font-size:.74rem;font-weight:900;margin-bottom:5px}
@@ -947,11 +1016,11 @@ async function renderTopPicksOnly() {
       .map((item) => {
         const price = livePriceOf(item) ?? 0;
         const change = Number(mainChangePercent(item) ?? 0);
-        const volume = Number(item.volume ?? item.preMarketVolume ?? 0);
+        const volume = toNumber(item.volume ?? item.preMarketVolume);
         const surge = Math.round(Number(item.finalProbabilityScore ?? item.scannerScore ?? 0));
         const risk = Math.round(Number(item.riskScore ?? 50));
         const pattern = Math.round(Number(item.patternSimilarityScore ?? 50));
-        const signal = topPickSignalScore(item, price, volume, change);
+        const signal = topPickSignalScore(item, price, volume ?? 0, change);
         const baseScore = surge * .55 + pattern * .2 + signal.volumeBonus + signal.changeBonus - risk * .12;
         const finalScore = Math.round(Math.max(0, Math.min(100, baseScore + signal.signalBonus)));
         const reasoning = topPickReasoning(item, {
@@ -1055,6 +1124,7 @@ async function renderTopPicksOnly() {
             <span>${pct(change)}</span>
             <span>거래량 ${compact(volume)}</span>
           </div>
+          ${sessionDebugHtml(item)}
           <div class="kbk-pro-top-grid">
             <div><span>급등 감시</span><b>${surge}점</b></div>
             <div><span>거래량 품질</span><b>${reasoning.volumeQualityScore ?? "-"}점</b></div>

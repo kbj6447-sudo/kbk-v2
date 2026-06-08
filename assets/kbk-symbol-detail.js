@@ -78,12 +78,14 @@ function priceUsd(quote) {
 }
 
 function mainChangePct(quote, priceOverride = null) {
+  const provided = num(quote?.changePercent);
+  if (provided !== null) return provided;
   const price = positiveNum(priceOverride) ?? priceUsd(quote);
   const previousClose = num(quote?.previousClose) ?? num(quote?.regularMarketPreviousClose);
   if (price !== null && previousClose && previousClose > 0) {
     return ((price - previousClose) / previousClose) * 100;
   }
-  return num(quote?.changePercent) ?? null;
+  return provided;
 }
 
 function changePct(quote) {
