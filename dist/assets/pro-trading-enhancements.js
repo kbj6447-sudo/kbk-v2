@@ -398,6 +398,60 @@ function computeSurgeAccelerationScore(item) {
   };
 }
 
+function computeTopPickShortTermNote(surgeAcceleration) {
+  if (!surgeAcceleration?.hasAccelerationData) return "1~5분 수급 수치는 데이터 부족";
+  const accel1m = toNumber(surgeAcceleration.accel1m);
+  const accel5m = toNumber(surgeAcceleration.accel5m ?? surgeAcceleration.accel5mWindow);
+  if (accel1m !== null && accel5m !== null && Math.abs(accel1m - accel5m) <= 0.15) {
+    return "1~5분 수급 수치는 단기 참고용";
+  }
+  return "";
+}
+
+function isForbiddenDecisionLabel(label = "") {
+  const text = String(label ?? "");
+  return ["매매 금지", "진입 금지", "금지", "위험 과다", "추격 금지"].some((token) => text.includes(token));
+}
+
+function computeDisplayMomentumBonuses(item, metrics = {}, reasoning = {}, chaseRisk = 0, finalDecisionLabel = "") {
+  const price = metrics.price ?? livePriceOf(item) ?? 0;
+  const volume = metrics.volume ?? toNumber(item?.volume ?? item?.preMarketVolume) ?? 0;
+  const change = metrics.change ?? toNumber(item?.changePercent ?? item?.preMarketChangePercent) ?? 0;
+  const rvol = metrics.rvol ?? rvolValue(item) ?? 0;
+  const tradeValueKrw = toNumber(item?.tradeValueKrw) ?? (price > 0 && volume > 0 ? price * volume * currentUsdKrw() : null);
+  const vwap = toNumber(item?.technical?.vwap ?? item?.vwap);
+  const vwapState = String(item?.technical?.vwapState ?? item?.vwapState ?? "").toLowerCase();
+  const vwapAbove = item?.aboveVwap === true || vwapState === "above" || (price > 0 && vwap > 0 && price >= vwap);
+  const vwapNear = !vwapAbove && (vwapState === "near" || (price > 0 && vwap > 0 && price >= vwap * 0.985));
+  const qualityScore = toNumber(reasoning.volumeQualityScore) ?? 0;
+  const surgeScore = toNumber(reasoning.surgeAccelerationScore) ?? 0;
+
+  let earlyMomentumBonus = 0;
+  if (change >= 10 && change <= 40) {
+    if (rvol >= 5) earlyMomentumBonus += 2;
+    else if (rvol >= 3) earlyMomentumBonus += 1;
+    if (vwapAbove || vwapNear) earlyMomentumBonus += 2;
+    if (surgeScore >= 72) earlyMomentumBonus += 2;
+    else if (surgeScore >= 58) earlyMomentumBonus += 1;
+    if ((tradeValueKrw !== null && tradeValueKrw >= 1_000_000_000) || volume >= 5_000_000) earlyMomentumBonus += 2;
+    else if ((tradeValueKrw !== null && tradeValueKrw >= 300_000_000) || volume >= 1_000_000) earlyMomentumBonus += 1;
+    if (change <= 25) earlyMomentumBonus += 1;
+  }
+  earlyMomentumBonus = Math.max(0, Math.min(8, Math.round(earlyMomentumBonus)));
+
+  let liquidityBonus = 0;
+  if (qualityScore >= 80) liquidityBonus += 4;
+  else if (qualityScore >= 68) liquidityBonus += 3;
+  else if (qualityScore >= 58) liquidityBonus += 2;
+  if (surgeScore >= 72) liquidityBonus += 2;
+  else if (surgeScore >= 58) liquidityBonus += 1;
+  if (rvol >= 5) liquidityBonus += 1;
+  liquidityBonus = Math.max(0, Math.min(6, Math.round(liquidityBonus)));
+
+  const forbiddenPenalty = isForbiddenDecisionLabel(finalDecisionLabel) || chaseRisk >= 90 ? (chaseRisk >= 90 ? 18 : 14) : 0;
+  return { earlyMomentumBonus, liquidityBonus, forbiddenPenalty };
+}
+
 function renderTopPickSectionHtml(sections) {
   return sections.map((section) => `
     <div class="kbk-pro-top-explain-block">
@@ -511,6 +565,7 @@ function topPickReasoning(item, metrics) {
   const rvol = metrics.rvol ?? rvolValue(item) ?? 1;
   const volumeQuality = computeVolumeQualityScore(item, price, volume, rvol);
   const surgeAcceleration = computeSurgeAccelerationScore(item);
+  const shortTermNote = computeTopPickShortTermNote(surgeAcceleration);
 
   const legacyReasons = [];
   if (setup.volumeStarting) legacyReasons.push("거래량이 증가하기 시작했습니다");
@@ -564,6 +619,7 @@ function topPickReasoning(item, metrics) {
   if (setup.extremeRvolWeak) cautions.push("RVOL은 높지만 가격 추세가 약합니다");
   if (setup.vwapBelow) cautions.push("VWAP 아래");
   if (metrics.risk >= 70) cautions.push("추격 위험 점수가 높습니다");
+  if (shortTermNote) cautions.push(shortTermNote);
 
   const sections = [];
   if (volumeQualityLines.length) sections.push({ title: "거래량 품질", lines: volumeQualityLines });
@@ -589,6 +645,7 @@ function topPickReasoning(item, metrics) {
     surgeAccelerationScore: surgeAcceleration.score,
     hasAccelerationData: surgeAcceleration.hasAccelerationData,
     accelerationLabel: surgeAcceleration.accelerationLabel,
+    shortTermNote,
   };
 }
 
@@ -929,6 +986,19 @@ async function renderTopPicksOnly() {
           chaseRisk = 0;
           fd = null;
         }
+        const finalDecisionLabel = String(fd?.label ?? reasoning.decision ?? item?.topPickVerdict ?? "");
+        const displayMomentum = computeDisplayMomentumBonuses(item, {
+          price,
+          volume,
+          change,
+          rvol: signal.rvol,
+        }, reasoning, chaseRisk, finalDecisionLabel);
+        const displaySortScore =
+          reasoning.priority * 35
+          + finalScore
+          + displayMomentum.liquidityBonus
+          + displayMomentum.earlyMomentumBonus
+          - displayMomentum.forbiddenPenalty;
         return {
           item,
           price,
@@ -942,10 +1012,11 @@ async function renderTopPicksOnly() {
           reasoning,
           chaseRisk,
           finalDecision: fd,
+          displaySortScore,
         };
       })
       .filter((pick) => pick.finalScore >= 58 || pick.reasoning.priority >= 2)
-      .sort((a, b) => b.reasoning.priority - a.reasoning.priority || b.finalScore - a.finalScore)
+      .sort((a, b) => b.displaySortScore - a.displaySortScore || b.reasoning.priority - a.reasoning.priority || b.finalScore - a.finalScore)
       .slice(0, 20);
     panel.innerHTML = `
       <section class="accumulation-hero">
@@ -1194,7 +1265,7 @@ function fastSignalDecision({ quote, bars, price, vwap, entryLow, entryHigh, rec
       action: "진입 가능",
       tone: "buy",
       headline: "거래량과 분봉 추세가 진입 구간에서 같이 붙었습니다.",
-      reason: `RVOL ${rvol !== null ? `${rvol.toFixed(1)}배` : "-"} / 전일대비 ${previousDayRatio !== null ? `${previousDayRatio.toFixed(1)}배` : "-"} / 3분 변화 ${pct(shortReturn)}`,
+      reason: `RVOL ${rvol !== null ? `${rvol.toFixed(1)}배` : "-"} / 전일대비 ${previousDayRatio !== null ? `${previousDayRatio.toFixed(1)}배` : "-"} / 3분 변화 ${pct(shortReturn)} (단기 참고용)`,
     };
   }
   if (strongVolume && breakout && trendUp) {

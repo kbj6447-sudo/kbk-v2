@@ -96,6 +96,57 @@ function volumeQualityScore(item) {
   };
 }
 
+function computeEarlyMomentumBonus(item, quality = {}, surgeAcceleration = {}, liveQuote = {}, commonSignals = {}) {
+  const changePercent = num(liveQuote.changePercent) ?? num(item.changePercent) ?? num(item.preMarketChangePercent) ?? 0;
+  if (changePercent < 10 || changePercent > 40) return 0;
+
+  const rvol = num(liveQuote.relativeVolume) ?? num(liveQuote.volumeRatio) ?? num(item.relativeVolume) ?? num(item.volumeRatio) ?? 0;
+  const rawVolume = Math.max(num(liveQuote.volume) ?? 0, num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0);
+  const tradeValueKrw = num(quality.tradeValueKrw);
+  const vwapState = String(item?.technical?.vwapState ?? item?.vwapState ?? "").toLowerCase();
+  const vwap = num(item?.technical?.vwap ?? item?.vwap);
+  const price = num(liveQuote.price) ?? num(item.price) ?? num(item.preMarketPrice) ?? num(item.regularMarketPrice) ?? 0;
+  const vwapAbove = liveQuote.aboveVwap === true || item.aboveVwap === true || vwapState === "above" || ((num(commonSignals.vwapHoldMinutes) ?? 0) > 0) || (price > 0 && vwap > 0 && price >= vwap);
+  const vwapNear = !vwapAbove && (vwapState === "near" || ((num(commonSignals.vwapReclaimScore) ?? 0) >= 58) || (price > 0 && vwap > 0 && price >= vwap * 0.985));
+  const surgeScore = num(surgeAcceleration.surgeAccelerationScore) ?? 0;
+
+  let bonus = 0;
+  if (rvol >= 5) bonus += 2;
+  else if (rvol >= 3) bonus += 1;
+  if (vwapAbove || vwapNear) bonus += 2;
+  if (surgeScore >= 72) bonus += 2;
+  else if (surgeScore >= 58) bonus += 1;
+  if ((tradeValueKrw !== null && tradeValueKrw >= 1_000_000_000) || rawVolume >= 5_000_000) bonus += 2;
+  else if ((tradeValueKrw !== null && tradeValueKrw >= 300_000_000) || rawVolume >= 1_000_000) bonus += 1;
+  if (changePercent >= 10 && changePercent <= 25) bonus += 1;
+
+  return Math.max(0, Math.min(8, Math.round(bonus)));
+}
+
+function computeLiquidityMomentumBonus(item, quality = {}, surgeAcceleration = {}) {
+  const qualityScore = num(quality.score) ?? 0;
+  const surgeScore = num(surgeAcceleration.surgeAccelerationScore) ?? 0;
+  const rvol = num(item.relativeVolume) ?? num(item.volumeRatio) ?? 0;
+  let bonus = 0;
+  if (qualityScore >= 80) bonus += 4;
+  else if (qualityScore >= 68) bonus += 3;
+  else if (qualityScore >= 58) bonus += 2;
+  if (surgeScore >= 72) bonus += 2;
+  else if (surgeScore >= 58) bonus += 1;
+  if (rvol >= 5) bonus += 1;
+  return Math.max(0, Math.min(6, Math.round(bonus)));
+}
+
+function computeForbiddenPenalty(verdict, chaseRisk = null) {
+  const label = String(verdict ?? "");
+  const risk = num(chaseRisk) ?? 0;
+  if (label.includes("진입 금지") || label.includes("매매 금지") || label.includes("추격 금지") || label.includes("위험 과다")) {
+    return risk >= 90 ? 18 : 14;
+  }
+  if (label.includes("금지")) return 12;
+  return 0;
+}
+
 function average(values) {
   const clean = values.map(num).filter((value) => value !== null && value > 0);
   if (!clean.length) return null;
@@ -1283,10 +1334,13 @@ module.exports = async function handler(req, res) {
         const boostedFinalScore = Math.round(clamp(baseFinalScore + rankAuxiliaryScore));
         const quality = volumeQualityScore({ ...normalizedItem, ...compactObject(liveQuote) });
         const surgeAcceleration = calculateSurgeAccelerationScore(chartSnapshot.bars || [], normalizedItem, liveQuote, commonSignals);
+        const earlyMomentumBonus = computeEarlyMomentumBonus(normalizedItem, quality, surgeAcceleration, liveQuote, commonSignals);
+        const liquidityMomentumBonus = computeLiquidityMomentumBonus({ ...normalizedItem, ...compactObject(liveQuote) }, quality, surgeAcceleration);
         const volumeAdjustedFinalScore = Math.round(clamp(
-          boostedFinalScore * 0.70
-          + quality.score * 0.15
-          + surgeAcceleration.surgeAccelerationScore * 0.15,
+          boostedFinalScore * 0.58
+          + quality.score * 0.22
+          + surgeAcceleration.surgeAccelerationScore * 0.20
+          + earlyMomentumBonus,
         ));
         const finalProbabilityScore = quality.score < 30
           ? Math.min(volumeAdjustedFinalScore, 69)
@@ -1312,15 +1366,21 @@ module.exports = async function handler(req, res) {
           ...surgeAcceleration,
           volumeQualityScore: quality.score,
           tradeValueKrw: quality.tradeValueKrw,
+          earlyMomentumBonus,
+          liquidityMomentumBonus,
           scannerScore,
           finalProbabilityScore,
         };
         const topPickEvaluation = evaluateTopPickForSnapshot(responseItem);
+        const forbiddenPenalty = computeForbiddenPenalty(topPickEvaluation.topPickVerdict, topPickEvaluation.topPickChaseRisk);
+        const marketPrioritySortScore = finalProbabilityScore + earlyMomentumBonus + liquidityMomentumBonus - forbiddenPenalty;
 
         return {
           ...responseItem,
           ...topPickEvaluation,
-          volumeQualitySortScore: finalProbabilityScore + (quality.score * 0.03) + (surgeAcceleration.surgeAccelerationScore * 0.04),
+          forbiddenPenalty,
+          marketPrioritySortScore,
+          volumeQualitySortScore: marketPrioritySortScore + (quality.score * 0.03) + (surgeAcceleration.surgeAccelerationScore * 0.04),
           sourceTags: [...new Set([
             ...(Array.isArray(normalizedItem.sourceTags) ? normalizedItem.sourceTags : []),
             batchQuoteMap.has(symbolKey) ? "yahoo-v7-batch" : null,
@@ -1343,11 +1403,12 @@ module.exports = async function handler(req, res) {
           const aPrice = num(a.price) ?? num(a.preMarketPrice) ?? 0;
           const bPrice = num(b.price) ?? num(b.preMarketPrice) ?? 0;
           const sameDollarBucket = (aPrice < 1 && bPrice < 1) || (aPrice >= 1 && bPrice >= 1);
-          const finalDiff = (num(b.finalProbabilityScore) ?? 0) - (num(a.finalProbabilityScore) ?? 0);
-          if (sameDollarBucket && Math.abs(finalDiff) <= 3) {
+          const sortDiff = (num(b.marketPrioritySortScore) ?? num(b.volumeQualitySortScore) ?? num(b.finalProbabilityScore) ?? 0)
+            - (num(a.marketPrioritySortScore) ?? num(a.volumeQualitySortScore) ?? num(a.finalProbabilityScore) ?? 0);
+          if (sameDollarBucket && Math.abs(sortDiff) <= 3) {
             return (num(b.volumeQualitySortScore) ?? 0) - (num(a.volumeQualitySortScore) ?? 0);
           }
-          return finalDiff;
+          return sortDiff;
         });
       logScannerElapsed("volume profile", metrics.volumeProfileMs, {
         requestId,
