@@ -77,8 +77,17 @@ function priceUsd(quote) {
   return positiveNum(quote?.price) ?? positiveNum(quote?.preMarketPrice) ?? positiveNum(quote?.regularMarketPrice);
 }
 
+function mainChangePct(quote, priceOverride = null) {
+  const price = positiveNum(priceOverride) ?? priceUsd(quote);
+  const previousClose = num(quote?.previousClose) ?? num(quote?.regularMarketPreviousClose);
+  if (price !== null && previousClose && previousClose > 0) {
+    return ((price - previousClose) / previousClose) * 100;
+  }
+  return num(quote?.changePercent) ?? null;
+}
+
 function changePct(quote) {
-  return num(quote?.changePercent) ?? num(quote?.preMarketChangePercent) ?? 0;
+  return mainChangePct(quote) ?? 0;
 }
 
 function vwapValue(quote) {
@@ -1577,8 +1586,7 @@ function updateSurgeCardQuote(card, quote, livePrice = null) {
   const priceRow = card.querySelector(".price-row");
   if (!priceRow) return;
   const price = num(livePrice) ?? priceUsd(quote);
-  const previousClose = num(quote?.previousClose);
-  const change = price !== null && previousClose ? ((price - previousClose) / previousClose) * 100 : changePct(quote);
+  const change = mainChangePct(quote, price) ?? changePct(quote);
   const volume = num(quote?.volume) ?? num(quote?.preMarketVolume);
   const vwap = vwapState(quote);
   const strong = priceRow.querySelector("strong");

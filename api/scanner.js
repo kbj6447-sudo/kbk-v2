@@ -38,6 +38,13 @@ function clamp(value, min = 0, max = 100) {
   return Math.max(min, Math.min(max, value));
 }
 
+function changePercentFromPreviousClose(price, previousClose) {
+  const current = num(price);
+  const prev = num(previousClose);
+  if (current === null || prev === null || prev <= 0) return null;
+  return ((current - prev) / prev) * 100;
+}
+
 function volumeStrength(item) {
   const rawVolume = Math.max(num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0);
   const relativeVolume = num(item.relativeVolume) ?? num(item.volumeRatio);
@@ -937,13 +944,14 @@ function normalizeLiveQuote(item, quoteSnapshot = {}, chartSnapshot = {}) {
     ?? num(item.previousClose)
     ?? num(chartSnapshot.previousClose)
     ?? num(chartSnapshot.chartPreviousClose);
+  const recalculatedChange = changePercentFromPreviousClose(displayPrice, previousClose);
   const change = num(quoteSnapshot.change)
     ?? num(item.change)
     ?? (displayPrice !== null && previousClose !== null ? displayPrice - previousClose : null);
-  const changePercent = num(quoteSnapshot.changePercent)
+  const rawChangePercent = num(quoteSnapshot.changePercent)
     ?? num(item.changePercent)
-    ?? num(item.preMarketChangePercent)
-    ?? (change !== null && previousClose ? (change / previousClose) * 100 : null);
+    ?? null;
+  const changePercent = recalculatedChange ?? rawChangePercent;
   const currentVolume = Math.max(
     num(quoteSnapshot.kisVolume) ?? 0,
     num(item.kisVolume) ?? 0,
@@ -993,6 +1001,7 @@ function normalizeLiveQuote(item, quoteSnapshot = {}, chartSnapshot = {}) {
     previousClose: previousClose ?? item.previousClose ?? null,
     change: change ?? null,
     changePercent: changePercent ?? null,
+    preMarketChangePercent: num(quoteSnapshot.preMarketChangePercent) ?? num(item.preMarketChangePercent) ?? null,
     marketState,
     extendedHours: marketState === "PRE" || marketState === "POST" || marketState === "POSTPOST",
     latestClose,

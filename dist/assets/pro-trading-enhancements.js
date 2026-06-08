@@ -57,6 +57,19 @@ function rvolValue(item) {
   return toNumber(item?.volumeRatio ?? item?.relativeVolume);
 }
 
+function mainChangePercent(item, priceOverride = null) {
+  const price = toNumber(priceOverride)
+    ?? livePriceOf(item)
+    ?? toNumber(item?.regularMarketPrice)
+    ?? toNumber(item?.price)
+    ?? toNumber(item?.preMarketPrice);
+  const previousClose = toNumber(item?.previousClose) ?? toNumber(item?.regularMarketPreviousClose);
+  if (price !== null && previousClose !== null && previousClose > 0) {
+    return ((price - previousClose) / previousClose) * 100;
+  }
+  return toNumber(item?.changePercent);
+}
+
 function topPickItemField(item, key) {
   return toNumber(item?.[key]) ?? toNumber(item?.technical?.[key]);
 }
@@ -88,7 +101,7 @@ function deriveScalpSignal(item, setup = {}) {
   const volumeAcceleration = topPickItemField(item, "volumeAccelerationScore") ?? setup.volumeAcceleration ?? 50;
   const higherLow = topPickItemField(item, "higherLowScore") ?? setup.higherLow ?? 50;
   const reSurge = topPickItemField(item, "reSurgeSetupScore") ?? setup.resurge ?? 50;
-  const change = toNumber(item?.changePercent ?? item?.preMarketChangePercent) ?? 0;
+  const change = mainChangePercent(item) ?? 0;
   const rsi = toNumber(item?.rsi ?? item?.technical?.rsi) ?? setup.rsi ?? null;
 
   const vwapAbove = setup.vwapAbove === true;
@@ -132,7 +145,7 @@ function deriveScalpSignal(item, setup = {}) {
 
 function computeChaseRisk(item, ctx = {}) {
   const risk = toNumber(item?.riskScore) ?? ctx.risk ?? 50;
-  const change = toNumber(item?.changePercent ?? item?.preMarketChangePercent) ?? ctx.change ?? 0;
+  const change = mainChangePercent(item) ?? ctx.change ?? 0;
   const vwapGood = ctx.vwapGood === true;
   const trendGood = ctx.trendGood === true;
   const riskPenalty = toNumber(ctx.riskPenalty) ?? toNumber(ctx.setup?.riskPenalty) ?? 0;
@@ -416,7 +429,7 @@ function isForbiddenDecisionLabel(label = "") {
 function computeDisplayMomentumBonuses(item, metrics = {}, reasoning = {}, chaseRisk = 0, finalDecisionLabel = "") {
   const price = metrics.price ?? livePriceOf(item) ?? 0;
   const volume = metrics.volume ?? toNumber(item?.volume ?? item?.preMarketVolume) ?? 0;
-  const change = metrics.change ?? toNumber(item?.changePercent ?? item?.preMarketChangePercent) ?? 0;
+  const change = metrics.change ?? mainChangePercent(item) ?? 0;
   const rvol = metrics.rvol ?? rvolValue(item) ?? 0;
   const tradeValueKrw = toNumber(item?.tradeValueKrw) ?? (price > 0 && volume > 0 ? price * volume * currentUsdKrw() : null);
   const vwap = toNumber(item?.technical?.vwap ?? item?.vwap);
@@ -933,7 +946,7 @@ async function renderTopPicksOnly() {
       .filter((item) => item?.symbol && item.included !== false)
       .map((item) => {
         const price = livePriceOf(item) ?? 0;
-        const change = Number(item.changePercent ?? item.preMarketChangePercent ?? 0);
+        const change = Number(mainChangePercent(item) ?? 0);
         const volume = Number(item.volume ?? item.preMarketVolume ?? 0);
         const surge = Math.round(Number(item.finalProbabilityScore ?? item.scannerScore ?? 0));
         const risk = Math.round(Number(item.riskScore ?? 50));
@@ -1449,7 +1462,7 @@ async function renderBacktestExpectation() {
     const sample = items.slice(0, 80);
     const high = sample.filter((item) => Number(item.finalProbabilityScore ?? item.scannerScore ?? 0) >= 75);
     const avgScore = sample.reduce((sum, item) => sum + Number(item.finalProbabilityScore ?? item.scannerScore ?? 0), 0) / Math.max(sample.length, 1);
-    const avgMove = sample.reduce((sum, item) => sum + Number(item.changePercent ?? item.preMarketChangePercent ?? 0), 0) / Math.max(sample.length, 1);
+    const avgMove = sample.reduce((sum, item) => sum + Number(mainChangePercent(item) ?? 0), 0) / Math.max(sample.length, 1);
     const risk = sample.reduce((sum, item) => sum + Number(item.riskScore ?? 50), 0) / Math.max(sample.length, 1);
     box.innerHTML = `
       <strong>현재 후보군 기대값 요약</strong><br>
