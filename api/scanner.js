@@ -538,18 +538,135 @@ function computeTopPickGrade(score) {
   return "D";
 }
 
+function rvolScore(value) {
+  const rvol = num(value) ?? 0;
+  return rvol >= 8 ? 96
+    : rvol >= 5 ? 86
+      : rvol >= 3 ? 74
+        : rvol >= 1.5 ? 58
+          : rvol > 0 ? 38
+            : 24;
+}
+
+function changeConfirmationScore(change) {
+  const value = num(change) ?? 0;
+  if (value >= 80) return 18;
+  if (value >= 45) return 42;
+  if (value >= 18) return 78;
+  if (value >= 4) return 88;
+  if (value >= 0) return 58;
+  return value <= -20 ? 18 : 34;
+}
+
+function calculateQuantitativeScore(item, setup = {}, quality = {}, surgeAcceleration = {}, chaseRisk = 0) {
+  const change = num(item?.changePercent ?? item?.preMarketChangePercent) ?? 0;
+  const rvol = scannerTopPickRvol(item);
+  const finalProbability = num(item?.finalProbabilityScore ?? item?.scannerScore) ?? 50;
+  const acceleration = num(surgeAcceleration.surgeAccelerationScore ?? item?.surgeAccelerationScore) ?? 50;
+  const accumulation = num(item?.reSurgeSetupScore) ?? setup.resurge ?? 50;
+  const breakoutReady = num(item?.compressionScore) ?? setup.compression ?? 50;
+  const higherLow = num(item?.higherLowScore) ?? setup.higherLow ?? 50;
+  const vwapScore = setup.vwapAbove ? 90 : setup.vwapNear || setup.vwapRecovering ? 72 : setup.vwapBelow ? 28 : 50;
+  const pullbackScore = setup.highPullbackPct === null || setup.highPullbackPct === undefined
+    ? 50
+    : setup.highPullbackPct <= 4 ? 86
+      : setup.highPullbackPct <= 12 ? 74
+        : setup.highPullbackPct <= 22 ? 52
+          : 28;
+  const overheatGuard = 100 - Math.max(0, Math.min(100, chaseRisk));
+
+  const score =
+    finalProbability * 0.20
+    + acceleration * 0.16
+    + accumulation * 0.13
+    + breakoutReady * 0.11
+    + rvolScore(rvol) * 0.10
+    + higherLow * 0.10
+    + vwapScore * 0.08
+    + pullbackScore * 0.06
+    + changeConfirmationScore(change) * 0.04
+    + overheatGuard * 0.02;
+  return Math.round(clamp(score));
+}
+
+function calculateVolumeConfirmationScore(item, quality = {}, surgeAcceleration = {}) {
+  const qualityScore = num(quality.score ?? item?.volumeQualityScore) ?? 50;
+  const acceleration = num(surgeAcceleration.surgeAccelerationScore ?? item?.surgeAccelerationScore ?? item?.volumeAccelerationScore) ?? 50;
+  const rvol = scannerTopPickRvol(item);
+  return Math.round(clamp(qualityScore * 0.55 + acceleration * 0.30 + rvolScore(rvol) * 0.15));
+}
+
+function finalSelectionBadge(score) {
+  const value = num(score) ?? 0;
+  if (value >= 90) return "최우선";
+  if (value >= 75) return "매수 후보";
+  if (value >= 70) return "빠른 확인";
+  if (value >= 50) return "관찰";
+  return "제외 후보";
+}
+
+function selectionGroupRank(group) {
+  const label = String(group || "");
+  if (label === "상단 후보") return 0;
+  if (label === "관찰 필요") return 1;
+  if (label === "차트 구조 미흡") return 2;
+  if (label === "진입 부적합") return 3;
+  if (label === "추격 위험") return 4;
+  return 2;
+}
+
+function classifySelectionGroup(item, finalSelectionScore, chartPatternScore, chaseRisk, setup = {}) {
+  const change = num(item?.changePercent ?? item?.preMarketChangePercent) ?? 0;
+  if (change >= 80 || chaseRisk >= 80 || setup.overheated) return "추격 위험";
+  if (finalSelectionScore < 50) return "진입 부적합";
+  if (chartPatternScore < 40) return "차트 구조 미흡";
+  if (change <= -20 && !setup.lowRecovery && !setup.vwapRecovering) return "관찰 필요";
+  return "상단 후보";
+}
+
+function buildFinalSelectionScores(item, setup = {}, quality = {}, surgeAcceleration = {}) {
+  const chaseRisk = computeTopPickChaseRisk(
+    item,
+    setup,
+    num(item?.changePercent ?? item?.preMarketChangePercent) ?? 0,
+    Math.round(num(item?.riskScore) ?? 50),
+  );
+  const chartPatternScore = Math.round(num(item?.chartPatternScore ?? item?.patternSimilarityScore) ?? 50);
+  const quantitativeScore = calculateQuantitativeScore(item, setup, quality, surgeAcceleration, chaseRisk);
+  const volumeConfirmationScore = calculateVolumeConfirmationScore(item, quality, surgeAcceleration);
+  const finalSelectionScore = Math.round(clamp(
+    quantitativeScore * 0.50
+      + chartPatternScore * 0.25
+      + volumeConfirmationScore * 0.15
+      - chaseRisk * 0.10,
+  ));
+  const selectionGroup = classifySelectionGroup(item, finalSelectionScore, chartPatternScore, chaseRisk, setup);
+  return {
+    quantitativeScore,
+    chartPatternScore,
+    volumeConfirmationScore,
+    finalSelectionScore,
+    chaseRisk,
+    selectionGroup,
+    statusBadge: finalSelectionBadge(finalSelectionScore),
+  };
+}
+
 function evaluateTopPickForSnapshot(item) {
   const price = scannerTopPickLivePrice(item) ?? 0;
   const change = num(item?.changePercent ?? item?.preMarketChangePercent) ?? 0;
   const volume = num(item?.volume ?? item?.preMarketVolume) ?? 0;
   const surge = Math.round(num(item?.finalProbabilityScore ?? item?.scannerScore) ?? 0);
   const risk = Math.round(num(item?.riskScore) ?? 50);
-  const pattern = Math.round(num(item?.patternSimilarityScore) ?? 50);
+  const pattern = Math.round(num(item?.chartPatternScore ?? item?.patternSimilarityScore) ?? 50);
   const signal = topPickSignalScore(item, price, volume, change);
   const baseScore = surge * 0.55 + pattern * 0.2 + signal.volumeBonus + signal.changeBonus - risk * 0.12;
-  const finalScore = Math.round(clamp(baseScore + signal.signalBonus));
   const setup = signal.setup;
   const chaseRisk = computeTopPickChaseRisk(item, setup, change, risk);
+  const selectionScores = buildFinalSelectionScores(item, setup, { score: item?.volumeQualityScore }, {
+    surgeAccelerationScore: item?.surgeAccelerationScore,
+  });
+  const finalScore = selectionScores.finalSelectionScore || Math.round(clamp(baseScore + signal.signalBonus));
   const reasonCodes = [];
 
   if (setup.overheated) reasonCodes.push("overheated");
@@ -575,6 +692,16 @@ function evaluateTopPickForSnapshot(item) {
     topPickChaseRisk: chaseRisk,
     topPickVerdictReasonCodes: reasonCodes,
     topPickGrade: computeTopPickGrade(finalScore),
+    quantitativeScore: selectionScores.quantitativeScore,
+    chartPatternScore: selectionScores.chartPatternScore,
+    patternName: item.bestPatternName ?? item.patternName ?? null,
+    volumeConfirmationScore: selectionScores.volumeConfirmationScore,
+    finalSelectionScore: selectionScores.finalSelectionScore,
+    entrySuitability: finalScore,
+    chaseRisk,
+    rvol: scannerTopPickRvol(item),
+    selectionGroup: selectionScores.selectionGroup,
+    statusBadge: selectionScores.statusBadge,
   };
 }
 
@@ -785,6 +912,200 @@ function calculateReSurgeSetupScore(bars, signals = {}) {
   return Math.round(clamp(score));
 }
 
+function cleanPatternCandles(bars) {
+  return (Array.isArray(bars) ? bars : [])
+    .map((bar) => {
+      const close = positive(bar.close);
+      return {
+        open: positive(bar.open) ?? close,
+        high: positive(bar.high) ?? close,
+        low: positive(bar.low) ?? close,
+        close,
+        volume: positive(bar.volume),
+      };
+    })
+    .filter((bar) => bar.close !== null && bar.high !== null && bar.low !== null && bar.high >= bar.low);
+}
+
+function candleRangePct(bar) {
+  if (!bar || !bar.close) return 0;
+  return ((bar.high - bar.low) / Math.max(bar.close, 0.0001)) * 100;
+}
+
+function volumeRatio(recent, prior) {
+  const recentVol = average(recent.map((bar) => bar.volume));
+  const priorVol = average(prior.map((bar) => bar.volume));
+  return recentVol !== null && priorVol !== null && priorVol > 0 ? recentVol / priorVol : null;
+}
+
+function scoreBoxCompressionFromCandles(candles) {
+  const sample = candles.slice(-24);
+  if (sample.length < 12) return 0;
+  const recent = sample.slice(-8);
+  const prior = sample.slice(0, -8);
+  const last = sample.at(-1);
+  const priorRange = average(prior.map(candleRangePct));
+  const recentRange = average(recent.map(candleRangePct));
+  const highs = recent.map((bar) => bar.high);
+  const lows = recent.map((bar) => bar.low);
+  const resistance = Math.max(...highs);
+  const support = Math.min(...lows);
+  const resistanceTests = highs.filter((high) => high >= resistance * 0.988).length;
+  const lowerBreak = last.close < support * 0.992;
+  const volumeHold = volumeRatio(recent, prior);
+  const alreadyExtended = last.close > resistance * 1.03;
+  let score = 35;
+  if (priorRange !== null && recentRange !== null && recentRange <= priorRange * 0.78) score += 24;
+  if (last.close >= resistance * 0.975 && last.close <= resistance * 1.015) score += 18;
+  if (resistanceTests >= 2) score += 12;
+  if (!lowerBreak) score += 10;
+  if (volumeHold === null || volumeHold >= 0.35) score += 8;
+  if (lowerBreak) score -= 24;
+  if (volumeHold !== null && volumeHold < 0.18) score -= 16;
+  if (alreadyExtended) score -= 18;
+  return Math.round(clamp(score));
+}
+
+function scoreAscendingTriangleFromCandles(candles) {
+  const sample = candles.slice(-24);
+  if (sample.length < 12) return 0;
+  const recent = sample.slice(-10);
+  const prior = sample.slice(0, -10);
+  const lows = recent.map((bar) => bar.low);
+  const highs = recent.map((bar) => bar.high);
+  const last = recent.at(-1);
+  let higherLowPairs = 0;
+  for (let index = 1; index < lows.length; index += 1) {
+    if (lows[index] >= lows[index - 1] * 0.998) higherLowPairs += 1;
+  }
+  const resistance = Math.max(...highs);
+  const highBandPct = ((resistance - Math.min(...highs)) / Math.max(last.close, 0.0001)) * 100;
+  const recentRange = average(recent.map(candleRangePct));
+  const priorRange = average(prior.map(candleRangePct));
+  const nearResistance = last.close >= resistance * 0.975;
+  const lostRecentLow = last.close < Math.min(...lows.slice(0, -1)) * 0.992;
+  let score = 30;
+  score += (higherLowPairs / Math.max(1, lows.length - 1)) * 30;
+  if (highBandPct <= 4) score += 14;
+  if (priorRange !== null && recentRange !== null && recentRange <= priorRange * 0.88) score += 12;
+  if (nearResistance) score += 18;
+  if (lostRecentLow) score -= 28;
+  return Math.round(clamp(score));
+}
+
+function scorePullbackBreakoutFromCandles(candles) {
+  const sample = candles.slice(-36);
+  if (sample.length < 16) return 0;
+  const first = sample.slice(0, -12);
+  const recent = sample.slice(-12);
+  const last = sample.at(-1);
+  const impulseLow = Math.min(...first.map((bar) => bar.low));
+  const impulseHigh = Math.max(...first.map((bar) => bar.high));
+  const recentLow = Math.min(...recent.map((bar) => bar.low));
+  const recentHigh = Math.max(...recent.map((bar) => bar.high));
+  const impulsePct = impulseLow > 0 ? ((impulseHigh - impulseLow) / impulseLow) * 100 : 0;
+  const pullbackPct = impulseHigh > 0 ? ((impulseHigh - recentLow) / impulseHigh) * 100 : 100;
+  const closeNearHigh = recentHigh > 0 && last.close >= recentHigh * 0.982;
+  const pullbackVolume = volumeRatio(recent.slice(0, 6), first.slice(-8));
+  const reboundVolume = volumeRatio(recent.slice(-4), recent.slice(0, 6));
+  let score = 28;
+  if (impulsePct >= 6) score += 16;
+  if (pullbackPct <= 8) score += 22;
+  else if (pullbackPct <= 16) score += 12;
+  else if (pullbackPct > 28) score -= 24;
+  if (pullbackVolume === null || pullbackVolume <= 0.9) score += 10;
+  if (reboundVolume !== null && reboundVolume >= 1.15) score += 14;
+  if (closeNearHigh) score += 16;
+  if (last.close < recentLow * 1.015) score -= 16;
+  return Math.round(clamp(score));
+}
+
+function scoreRoundedBottomFromCandles(candles) {
+  const sample = candles.slice(-36);
+  if (sample.length < 18) return 0;
+  const first = sample.slice(0, 12);
+  const middle = sample.slice(12, 24);
+  const recent = sample.slice(24);
+  const firstClose = average(first.map((bar) => bar.close));
+  const middleClose = average(middle.map((bar) => bar.close));
+  const recentClose = average(recent.map((bar) => bar.close));
+  const middleLow = Math.min(...middle.map((bar) => bar.low));
+  const recentLow = Math.min(...recent.map((bar) => bar.low));
+  const volumeRecovery = volumeRatio(recent, middle);
+  const last = sample.at(-1);
+  let score = 26;
+  if (firstClose !== null && middleClose !== null && recentClose !== null && middleClose <= firstClose * 1.03 && recentClose >= middleClose * 1.015) score += 26;
+  if (recentLow >= middleLow * 0.99) score += 16;
+  if (volumeRecovery !== null && volumeRecovery >= 1.05) score += 14;
+  if (last.close >= Math.max(...middle.map((bar) => bar.high)) * 0.995) score += 14;
+  if (recentLow < middleLow * 0.97) score -= 24;
+  return Math.round(clamp(score));
+}
+
+function scoreVolatilityContractionFromCandles(candles) {
+  const sample = candles.slice(-24);
+  if (sample.length < 12) return 0;
+  const first = sample.slice(0, 8);
+  const middle = sample.slice(8, 16);
+  const recent = sample.slice(16);
+  const firstRange = average(first.map(candleRangePct));
+  const middleRange = average(middle.map(candleRangePct));
+  const recentRange = average(recent.map(candleRangePct));
+  const floor = Math.min(...sample.slice(0, -4).map((bar) => bar.low));
+  const last = sample.at(-1);
+  const priorHigh = Math.max(...sample.slice(0, -3).map((bar) => bar.high));
+  const volumeWake = volumeRatio(recent.slice(-3), sample.slice(-10, -3));
+  let score = 30;
+  if (firstRange !== null && middleRange !== null && recentRange !== null && recentRange <= middleRange * 0.9 && middleRange <= firstRange * 0.95) score += 28;
+  if (last.close >= floor * 1.01) score += 14;
+  if (last.close >= priorHigh * 0.975) score += 14;
+  if (volumeWake !== null && volumeWake >= 1.05) score += 12;
+  if (volumeWake !== null && volumeWake < 0.18) score -= 20;
+  if (last.close < floor * 0.995) score -= 22;
+  return Math.round(clamp(score));
+}
+
+function calculateChartPatternScore(bars) {
+  const candles = cleanPatternCandles(bars);
+  const emptyDetails = {
+    boxCompression: 0,
+    ascendingTriangle: 0,
+    pullbackBreakout: 0,
+    roundedBottom: 0,
+    volatilityContraction: 0,
+  };
+  if (candles.length < 12) {
+    return {
+      score: 0,
+      patternName: "데이터 부족",
+      status: "차트 유사도 데이터 부족",
+      details: emptyDetails,
+    };
+  }
+  const details = {
+    boxCompression: scoreBoxCompressionFromCandles(candles),
+    ascendingTriangle: scoreAscendingTriangleFromCandles(candles),
+    pullbackBreakout: scorePullbackBreakoutFromCandles(candles),
+    roundedBottom: scoreRoundedBottomFromCandles(candles),
+    volatilityContraction: scoreVolatilityContractionFromCandles(candles),
+  };
+  const labels = {
+    boxCompression: "박스권 압축",
+    ascendingTriangle: "저점 상승",
+    pullbackBreakout: "짧은 눌림",
+    roundedBottom: "둥근 바닥",
+    volatilityContraction: "변동성 축소",
+  };
+  const bestKey = Object.keys(details).sort((a, b) => details[b] - details[a])[0];
+  const bestScore = details[bestKey] ?? 0;
+  return {
+    score: Math.round(clamp(bestScore)),
+    patternName: bestScore >= 40 ? labels[bestKey] : "패턴 약함",
+    status: bestScore >= 40 ? "ok" : "패턴 판단 불가",
+    details,
+  };
+}
+
 function calculateCommonSignals(bars) {
   if (!Array.isArray(bars) || bars.length < 3) {
     return {
@@ -797,6 +1118,17 @@ function calculateCommonSignals(bars) {
       compressionScore: 50,
       vwapReclaimScore: 50,
       reSurgeSetupScore: 50,
+      chartPatternScore: 0,
+      patternSimilarityScore: 0,
+      bestPatternName: "데이터 부족",
+      chartPatternStatus: "차트 유사도 데이터 부족",
+      chartPatternDetails: {
+        boxCompression: 0,
+        ascendingTriangle: 0,
+        pullbackBreakout: 0,
+        roundedBottom: 0,
+        volatilityContraction: 0,
+      },
       commonSignalStatus: "데이터 부족",
     };
   }
@@ -811,6 +1143,7 @@ function calculateCommonSignals(bars) {
     vwapHoldScore: vwapHold.vwapHoldScore,
     vwapReclaimScore,
   });
+  const chartPattern = calculateChartPatternScore(bars);
   return {
     ...volumeAcceleration,
     higherLowScore,
@@ -818,6 +1151,11 @@ function calculateCommonSignals(bars) {
     compressionScore,
     vwapReclaimScore,
     reSurgeSetupScore,
+    chartPatternScore: chartPattern.score,
+    patternSimilarityScore: chartPattern.score,
+    bestPatternName: chartPattern.patternName,
+    chartPatternStatus: chartPattern.status,
+    chartPatternDetails: chartPattern.details,
     commonSignalStatus: "ok",
   };
 }
@@ -1389,6 +1727,18 @@ function isUnderOneScannerItem(item) {
 }
 
 function compareScannerItems(a, b) {
+  const groupDiff = selectionGroupRank(a.selectionGroup) - selectionGroupRank(b.selectionGroup);
+  if (groupDiff !== 0) return groupDiff;
+  const finalSelectionDiff = (num(b.finalSelectionScore) ?? -1) - (num(a.finalSelectionScore) ?? -1);
+  if (finalSelectionDiff !== 0) return finalSelectionDiff;
+  const entryDiff = (num(b.topPickFinalScore) ?? num(b.finalProbabilityScore) ?? 0) - (num(a.topPickFinalScore) ?? num(a.finalProbabilityScore) ?? 0);
+  if (entryDiff !== 0) return entryDiff;
+  const patternDiff = (num(b.chartPatternScore) ?? num(b.patternSimilarityScore) ?? 0) - (num(a.chartPatternScore) ?? num(a.patternSimilarityScore) ?? 0);
+  if (patternDiff !== 0) return patternDiff;
+  const chaseDiff = (num(a.topPickChaseRisk) ?? 100) - (num(b.topPickChaseRisk) ?? 100);
+  if (chaseDiff !== 0) return chaseDiff;
+  const rvolDiff = (num(b.relativeVolume ?? b.volumeRatio) ?? 0) - (num(a.relativeVolume ?? a.volumeRatio) ?? 0);
+  if (rvolDiff !== 0) return rvolDiff;
   const scoreDiff = (num(b.finalProbabilityScore) ?? 0) - (num(a.finalProbabilityScore) ?? 0);
   if (scoreDiff !== 0) return scoreDiff;
   const bVolume = Math.max(num(b.volume) ?? 0, num(b.preMarketVolume) ?? 0);
@@ -1712,6 +2062,17 @@ module.exports = async function handler(req, res) {
         const surgeAcceleration = calculateSurgeAccelerationScore(chartSnapshot.bars || [], normalizedItem, liveQuote, commonSignals);
         const earlyMomentumBonus = computeEarlyMomentumBonus(normalizedItem, quality, surgeAcceleration, liveQuote, commonSignals);
         const liquidityMomentumBonus = computeLiquidityMomentumBonus({ ...normalizedItem, ...compactObject(liveQuote) }, quality, surgeAcceleration);
+        const preliminarySetup = topPickSetupProfile(
+          { ...normalizedItem, ...compactObject(liveQuote), ...commonSignals },
+          liveQuote.price ?? normalizedItem.price ?? 0,
+          liveQuote.changePercent ?? normalizedItem.changePercent ?? 0,
+        );
+        const selectionScores = buildFinalSelectionScores(
+          { ...normalizedItem, ...compactObject(liveQuote), ...commonSignals },
+          preliminarySetup,
+          quality,
+          surgeAcceleration,
+        );
         const volumeAdjustedFinalScore = Math.round(clamp(
           boostedFinalScore * 0.58
           + quality.score * 0.22
@@ -1753,6 +2114,11 @@ module.exports = async function handler(req, res) {
           tradeValueKrw: quality.tradeValueKrw,
           earlyMomentumBonus,
           liquidityMomentumBonus,
+          quantitativeScore: selectionScores.quantitativeScore,
+          volumeConfirmationScore: selectionScores.volumeConfirmationScore,
+          finalSelectionScore: selectionScores.finalSelectionScore,
+          selectionGroup: selectionScores.selectionGroup,
+          statusBadge: selectionScores.statusBadge,
           scannerScore,
           finalProbabilityScore,
         };
@@ -1783,7 +2149,10 @@ module.exports = async function handler(req, res) {
         }
         const topPickEvaluation = evaluateTopPickForSnapshot(responseItem);
         const forbiddenPenalty = computeForbiddenPenalty(topPickEvaluation.topPickVerdict, topPickEvaluation.topPickChaseRisk);
-        const marketPrioritySortScore = finalProbabilityScore + earlyMomentumBonus + liquidityMomentumBonus - forbiddenPenalty;
+        const marketPrioritySortScore = (num(topPickEvaluation.finalSelectionScore ?? responseItem.finalSelectionScore) ?? finalProbabilityScore)
+          + earlyMomentumBonus
+          + liquidityMomentumBonus
+          - forbiddenPenalty;
 
         return {
           ...responseItem,
@@ -1809,14 +2178,20 @@ module.exports = async function handler(req, res) {
           ].filter(Boolean),
         };
       }))
-        .sort((a, b) => {
-          const aPrice = num(a.price) ?? num(a.preMarketPrice) ?? 0;
-          const bPrice = num(b.price) ?? num(b.preMarketPrice) ?? 0;
-          const sameDollarBucket = (aPrice < 1 && bPrice < 1) || (aPrice >= 1 && bPrice >= 1);
-          const sortDiff = (num(b.marketPrioritySortScore) ?? num(b.volumeQualitySortScore) ?? num(b.finalProbabilityScore) ?? 0)
-            - (num(a.marketPrioritySortScore) ?? num(a.volumeQualitySortScore) ?? num(a.finalProbabilityScore) ?? 0);
+      .sort((a, b) => {
+        const aPrice = num(a.price) ?? num(a.preMarketPrice) ?? 0;
+        const bPrice = num(b.price) ?? num(b.preMarketPrice) ?? 0;
+        const sameDollarBucket = (aPrice < 1 && bPrice < 1) || (aPrice >= 1 && bPrice >= 1);
+          const groupDiff = selectionGroupRank(a.selectionGroup) - selectionGroupRank(b.selectionGroup);
+          if (groupDiff !== 0) return groupDiff;
+          const sortDiff = (num(b.finalSelectionScore) ?? num(b.marketPrioritySortScore) ?? num(b.volumeQualitySortScore) ?? num(b.finalProbabilityScore) ?? 0)
+            - (num(a.finalSelectionScore) ?? num(a.marketPrioritySortScore) ?? num(a.volumeQualitySortScore) ?? num(a.finalProbabilityScore) ?? 0);
           if (sameDollarBucket && Math.abs(sortDiff) <= 3) {
-            return (num(b.volumeQualitySortScore) ?? 0) - (num(a.volumeQualitySortScore) ?? 0);
+            return ((num(b.topPickFinalScore) ?? 0) - (num(a.topPickFinalScore) ?? 0))
+              || ((num(b.chartPatternScore) ?? 0) - (num(a.chartPatternScore) ?? 0))
+              || ((num(a.topPickChaseRisk) ?? 100) - (num(b.topPickChaseRisk) ?? 100))
+              || ((num(b.relativeVolume ?? b.volumeRatio) ?? 0) - (num(a.relativeVolume ?? a.volumeRatio) ?? 0))
+              || ((num(b.volumeQualitySortScore) ?? 0) - (num(a.volumeQualitySortScore) ?? 0));
           }
           return sortDiff;
         });

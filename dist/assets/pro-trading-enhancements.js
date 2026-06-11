@@ -111,7 +111,9 @@ function resolveTopPickDisplayFields(scannerItem = {}, quote = null, renderPhase
   const hasQuote = Boolean(quote?.symbol);
   const displayPrice = hasQuote ? livePriceOf(quote) : null;
   const displayChange = hasQuote ? quoteChangePercent(quote, displayPrice) : null;
-  const displayVolume = hasQuote ? quoteDisplayVolume(quote) : null;
+  const displayVolume = hasQuote
+    ? (quoteDisplayVolume(quote) ?? candidateVolume)
+    : candidateVolume;
   const displayItem = displayQuoteFrom(scannerItem, quote);
   const finalDisplay = {
     price: displayPrice,
@@ -149,7 +151,6 @@ function displayVolumeText(volume) {
 }
 
 function displayRvolText(item = {}) {
-  if (!hasConfirmedVolume(item)) return "상대거래량 미확인";
   const rvol = rvolValue(item);
   return rvol === null ? "상대거래량 미확인" : `상대거래량 ${rvol.toFixed(1)}배`;
 }
@@ -158,9 +159,9 @@ function displayQuoteFrom(scannerItem = {}, quote = null) {
   if (!quote?.symbol) {
     return {
       ...scannerItem,
-      volume: null,
-      relativeVolume: null,
-      volumeRatio: null,
+      volume: toNumber(scannerItem.volume ?? scannerItem.preMarketVolume),
+      relativeVolume: toNumber(scannerItem.relativeVolume ?? scannerItem.volumeRatio),
+      volumeRatio: toNumber(scannerItem.volumeRatio ?? scannerItem.relativeVolume),
     };
   }
   const price = livePriceOf(quote);
@@ -171,13 +172,13 @@ function displayQuoteFrom(scannerItem = {}, quote = null) {
     symbol: scannerItem.symbol || quote.symbol,
     price,
     changePercent: quoteChangePercent(quote, price),
-    volume,
+    volume: volume ?? toNumber(scannerItem.volume ?? scannerItem.preMarketVolume),
     relativeVolume: confirmedVolume
       ? (toNumber(quote.relativeVolume) ?? toNumber(quote.volumeRatio))
-      : null,
+      : (toNumber(scannerItem.relativeVolume) ?? toNumber(scannerItem.volumeRatio)),
     volumeRatio: confirmedVolume
       ? (toNumber(quote.volumeRatio) ?? toNumber(quote.relativeVolume))
-      : null,
+      : (toNumber(scannerItem.volumeRatio) ?? toNumber(scannerItem.relativeVolume)),
     priceSource: quote.priceSource || scannerItem.priceSource,
     changeBasis: quote.changeBasis || scannerItem.changeBasis,
     volumeSource: quote.volumeSource || scannerItem.volumeSource,
@@ -756,6 +757,95 @@ function topPickSignalScore(item, price, volume, change) {
   return { signalBonus, volumeBonus, changeBonus, rvol: setup.rvol, setup };
 }
 
+function scoreBadgeLabel(score) {
+  const value = toNumber(score) ?? 0;
+  if (value >= 90) return "최우선";
+  if (value >= 75) return "매수 후보";
+  if (value >= 70) return "빠른 확인";
+  if (value >= 50) return "관찰";
+  return "제외 후보";
+}
+
+function patternBadgeLabel(item = {}, patternScore = null) {
+  const direct = String(item.bestPatternName || item.patternName || "").trim();
+  if (direct) return direct;
+  const score = toNumber(patternScore ?? item.chartPatternScore ?? item.patternSimilarityScore);
+  if (score === null || score <= 0) return "데이터 부족";
+  if (score < 40) return "패턴 약함";
+  const compression = toNumber(item.compressionScore) ?? 50;
+  const higherLow = toNumber(item.higherLowScore) ?? 50;
+  const resurge = toNumber(item.reSurgeSetupScore) ?? 50;
+  if (resurge >= compression && resurge >= higherLow) return "짧은 눌림";
+  if (higherLow >= compression) return "저점 상승";
+  return "박스권 압축";
+}
+
+function riskBadges(item = {}, metrics = {}) {
+  const badges = [];
+  const change = toNumber(metrics.change ?? item.changePercent ?? item.preMarketChangePercent) ?? 0;
+  const chaseRisk = toNumber(metrics.chaseRisk ?? item.topPickChaseRisk) ?? 0;
+  const finalScore = toNumber(metrics.finalSelectionScore ?? item.finalSelectionScore) ?? 0;
+  const patternScore = toNumber(metrics.chartPatternScore ?? item.chartPatternScore ?? item.patternSimilarityScore) ?? 0;
+  const rvol = rvolValue(item);
+  if (chaseRisk >= 80) badges.push("추격 위험");
+  if (finalScore < 50) badges.push("진입 부적합");
+  if (rvol === null) badges.push("거래량 미확인");
+  if (change >= 80) badges.push("과열");
+  if (change <= -20) badges.push("하락 구조");
+  if (patternScore < 40) badges.push("차트 구조 미흡");
+  if (toNumber(item?.technical?.upperWickRisk ?? item?.upperWickRisk) >= 70) badges.push("윗꼬리 주의");
+  return [...new Set(badges)].slice(0, 4);
+}
+
+function selectionGroupRank(group) {
+  if (group === "상단 후보") return 0;
+  if (group === "관찰 필요") return 1;
+  if (group === "차트 구조 미흡") return 2;
+  if (group === "진입 부적합") return 3;
+  if (group === "추격 위험") return 4;
+  return 2;
+}
+
+function calculateTopPickSelectionMetrics(item, setup, reasoning, signal, finalScore, chaseRisk, change) {
+  const chartPatternScore = Math.round(toNumber(item.chartPatternScore ?? item.patternSimilarityScore ?? finalScore) ?? 0);
+  const volumeConfirmationScore = Math.round(Math.max(0, Math.min(100,
+    (toNumber(reasoning.volumeQualityScore) ?? 50) * 0.55
+      + (toNumber(reasoning.surgeAccelerationScore) ?? 50) * 0.30
+      + ((signal.rvol ?? 0) >= 5 ? 86 : (signal.rvol ?? 0) >= 3 ? 74 : (signal.rvol ?? 0) >= 1.5 ? 58 : 30) * 0.15,
+  )));
+  const quantitativeScore = Math.round(toNumber(item.quantitativeScore) ?? Math.max(0, Math.min(100,
+    finalScore * 0.42
+      + (toNumber(item.finalProbabilityScore ?? item.scannerScore) ?? 50) * 0.18
+      + (toNumber(item.reSurgeSetupScore) ?? setup.resurge ?? 50) * 0.12
+      + (toNumber(item.higherLowScore) ?? setup.higherLow ?? 50) * 0.10
+      + (setup.vwapRecovering ? 78 : setup.vwapBelow ? 30 : 50) * 0.08
+      + (change >= 80 ? 18 : change >= 45 ? 42 : change >= 4 ? 86 : 52) * 0.05
+      + (100 - chaseRisk) * 0.05,
+  )));
+  const finalSelectionScore = Math.round(toNumber(item.finalSelectionScore) ?? Math.max(0, Math.min(100,
+    quantitativeScore * 0.50
+      + chartPatternScore * 0.25
+      + volumeConfirmationScore * 0.15
+      - chaseRisk * 0.10,
+  )));
+  const selectionGroup = item.selectionGroup
+    || (change >= 80 || chaseRisk >= 80 ? "추격 위험"
+      : finalSelectionScore < 50 ? "진입 부적합"
+        : chartPatternScore < 40 ? "차트 구조 미흡"
+          : "상단 후보");
+  return {
+    quantitativeScore,
+    chartPatternScore,
+    volumeConfirmationScore,
+    finalSelectionScore,
+    rvol: signal.rvol,
+    patternName: patternBadgeLabel(item, chartPatternScore),
+    statusBadge: item.statusBadge || scoreBadgeLabel(finalSelectionScore),
+    riskBadges: riskBadges(item, { change, chaseRisk, finalSelectionScore, chartPatternScore }),
+    selectionGroup,
+  };
+}
+
 function topPickReasoning(item, metrics) {
   const setup = metrics.setup ?? {};
   const price = metrics.price ?? livePriceOf(item) ?? 0;
@@ -942,6 +1032,12 @@ function ensureStyles() {
     .kbk-pro-top-head h3{margin:0;font-size:1.25rem;color:#0f172a}
     .kbk-pro-top-head p{margin:4px 0 0;color:#475569;font-size:.86rem}
     .kbk-pro-top-score{font-size:2rem;font-weight:950;color:#0f172a;line-height:1;text-align:right}
+    .kbk-pro-badges{display:flex;flex-wrap:wrap;gap:6px}
+    .kbk-badge{display:inline-flex;align-items:center;border-radius:999px;padding:5px 8px;font-size:.72rem;font-weight:900;line-height:1;border:1px solid rgba(15,23,42,.1);background:#f8fafc;color:#334155}
+    .kbk-badge.score{background:#ecfdf5;color:#047857;border-color:#86efac}
+    .kbk-badge.pattern{background:#eff6ff;color:#1d4ed8;border-color:#bfdbfe}
+    .kbk-badge.group{background:#f5f3ff;color:#6d28d9;border-color:#ddd6fe}
+    .kbk-badge.risk{background:#fff7ed;color:#c2410c;border-color:#fed7aa}
     .kbk-pro-top-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
     .kbk-pro-top-grid div{background:#f8fafc;border-radius:10px;padding:9px}
     .kbk-pro-top-grid span{display:block;color:#64748b;font-size:.76rem}
@@ -991,6 +1087,7 @@ function ensureStyles() {
       .terminal-layout{grid-template-columns:1fr!important}
       .candidate-table,.signal-table,.debug-table{min-width:760px!important}
       .kbk-pro-top-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .kbk-pro-top-score{font-size:1.65rem}
       .kbk-pro-top-meta{grid-template-columns:1fr}
       .kbk-pro-basis{grid-template-columns:1fr}
     }
@@ -1004,7 +1101,7 @@ function addRefreshShortcut() {
     button.id = "kbk-pro-refresh";
     button.className = "kbk-pro-refresh";
     button.type = "button";
-    button.textContent = "?덈줈怨좎묠 R";
+    button.textContent = "새로고침 R";
     button.addEventListener("click", () => refreshCurrentView());
     document.body.appendChild(button);
   }
@@ -1272,6 +1369,7 @@ async function renderTopPicksOnly(renderPhase = "initial") {
           fd = null;
         }
         const finalDecisionLabel = String(fd?.label ?? reasoning.decision ?? item?.topPickVerdict ?? "");
+        const selectionMetrics = calculateTopPickSelectionMetrics(item, setup, reasoning, signal, finalScore, chaseRisk, change);
         const displayMomentum = computeDisplayMomentumBonuses(item, {
           price,
           volume,
@@ -1279,8 +1377,8 @@ async function renderTopPicksOnly(renderPhase = "initial") {
           rvol: signal.rvol,
         }, reasoning, chaseRisk, finalDecisionLabel);
         const displaySortScore =
-          reasoning.priority * 35
-          + finalScore
+          selectionMetrics.finalSelectionScore
+          + Math.max(0, reasoning.priority - 1) * 4
           + displayMomentum.liquidityBonus
           + displayMomentum.earlyMomentumBonus
           - displayMomentum.forbiddenPenalty;
@@ -1297,11 +1395,17 @@ async function renderTopPicksOnly(renderPhase = "initial") {
           reasoning,
           chaseRisk,
           finalDecision: fd,
+          selectionMetrics,
           displaySortScore,
         };
       })
-      .filter((pick) => pick.finalScore >= 58 || pick.reasoning.priority >= 2)
-      .sort((a, b) => b.displaySortScore - a.displaySortScore || b.reasoning.priority - a.reasoning.priority || b.finalScore - a.finalScore)
+      .filter((pick) => pick.selectionMetrics.selectionGroup === "상단 후보" || pick.selectionMetrics.finalSelectionScore >= 50 || pick.reasoning.priority >= 2)
+      .sort((a, b) => selectionGroupRank(a.selectionMetrics.selectionGroup) - selectionGroupRank(b.selectionMetrics.selectionGroup)
+        || b.displaySortScore - a.displaySortScore
+        || b.finalScore - a.finalScore
+        || b.selectionMetrics.chartPatternScore - a.selectionMetrics.chartPatternScore
+        || a.chaseRisk - b.chaseRisk
+        || (b.selectionMetrics.rvol ?? 0) - (a.selectionMetrics.rvol ?? 0))
       .slice(0, 20);
       if (renderToken !== topPicksRenderToken) return;
       const latestQuotes = await latestQuotesBySymbol(items.map((pick) => pick.item.symbol));
@@ -1318,19 +1422,29 @@ async function renderTopPicksOnly(renderPhase = "initial") {
         <div>
           <p class="section-kicker">Integrated Picks</p>
           <h2>통합 최종 후보</h2>
-          <p class="section-copy">실시간 단타 후보, 급등 감시, 매집/패턴 점수를 함께 보고 과열 위험은 감점해 우선순위를 둡니다.</p>
+          <p class="section-copy">최종 선별 점수, 신규 진입 적합도, 차트 모양 유사도, 거래량 확증을 함께 보고 과열 위험은 아래 그룹으로 내립니다.</p>
         </div>
         <div class="hero-scoreboard">
           <div class="score-card"><span>후보</span><strong>${items.length}</strong></div>
-          <div class="score-card"><span>기준</span><strong>초입 우선</strong></div>
+          <div class="score-card"><span>정렬</span><strong>최종 선별</strong></div>
         </div>
       </section>
-      ${displayItems.length ? displayItems.map(({ item, displayItem, displayPrice, displayChange, displayVolume, surge, risk, pattern, finalScore, reasoning, chaseRisk, finalDecision: fd }) => `
+      <section class="kbk-pro-alert-box">
+        <strong>텔레그램 알림 조건</strong><br>
+        최종 선별 점수 80점 이상 · 신규 진입 적합도 60점 이상 · 차트 모양 유사도 70점 이상 · 추격 위험 60점 이하 · 상대거래량 2배 이상
+      </section>
+      ${displayItems.length ? displayItems.map(({ item, displayItem, displayPrice, displayChange, displayVolume, surge, risk, pattern, finalScore, reasoning, chaseRisk, finalDecision: fd, selectionMetrics }) => `
         <article class="kbk-pro-top-card" data-symbol="${textEscape(item.symbol)}">
           ${fd ? renderFinalDecisionHeroHtml(fd, textEscape) : ""}
           <div class="kbk-pro-top-head">
             <div><h3>${textEscape(item.symbol)}</h3><p>${textEscape(item.name || item.symbol)}</p></div>
-            <div class="kbk-pro-top-score">${finalScore}</div>
+            <div class="kbk-pro-top-score">${selectionMetrics.finalSelectionScore}</div>
+          </div>
+          <div class="kbk-pro-badges">
+            <span class="kbk-badge score">${textEscape(selectionMetrics.statusBadge)}</span>
+            <span class="kbk-badge pattern">${textEscape(selectionMetrics.patternName)}</span>
+            <span class="kbk-badge group">${textEscape(selectionMetrics.selectionGroup)}</span>
+            ${selectionMetrics.riskBadges.map((badge) => `<span class="kbk-badge risk">${textEscape(badge)}</span>`).join("")}
           </div>
           <div class="price-row">
             <strong>${displayPrice !== null ? topPickKrwPrice(displayPrice) : "-"}</strong>
@@ -1340,10 +1454,14 @@ async function renderTopPicksOnly(renderPhase = "initial") {
           </div>
           ${sessionDebugHtml(displayItem)}
           <div class="kbk-pro-top-grid">
-            <div><span>급등 감시</span><b>${surge}점</b></div>
-            <div><span>거래량 품질</span><b>${reasoning.volumeQualityScore ?? "-"}점</b></div>
-            <div><span>수급 가속</span><b>${reasoning.surgeAccelerationScore ?? "-"}점</b></div>
+            <div><span>최종 선별</span><b>${selectionMetrics.finalSelectionScore}점</b></div>
+            <div><span>신규 진입</span><b>${finalScore}점</b></div>
+            <div><span>차트 유사도</span><b>${selectionMetrics.chartPatternScore}점</b></div>
             <div><span>추격 위험</span><b>${chaseRisk}점</b></div>
+            <div><span>상대거래량</span><b>${displayRvolText(displayItem).replace("상대거래량 ", "")}</b></div>
+            <div><span>대표 패턴</span><b>${textEscape(selectionMetrics.patternName)}</b></div>
+            <div><span>거래량 확증</span><b>${selectionMetrics.volumeConfirmationScore}점</b></div>
+            <div><span>상태</span><b>${textEscape(selectionMetrics.statusBadge)}</b></div>
           </div>
           <div class="kbk-pro-top-meta" style="grid-template-columns:1fr">
             <div><span>선정 사유</span><p>${reasoning.reasons.map(textEscape).join(" · ")}</p>
@@ -1403,7 +1521,11 @@ function clarifyEmptyAccumulation() {
   const note = document.createElement("section");
   note.id = "kbk-accumulation-empty-note";
   note.className = "kbk-empty-note";
-  note.textContent = "현재 조건을 통과한 매집/급등 직전/돌파 후보가 없습니다. 데이터 로딩 오류가 아니라 지금 시점의 필터를 만족할 종목이 없다는 뜻입니다.";
+  note.innerHTML = `
+    <strong>현재 조건을 충족하는 종목이 없습니다.</strong><br>
+    조건이 너무 엄격하거나 현재 시장에서 매집 신호가 약합니다.<br>
+    최근 감지 후보가 있으면 아래에 표시됩니다.
+  `;
   hero.insertAdjacentElement("afterend", note);
 }
 
@@ -1896,6 +2018,7 @@ async function renderBacktestExpectation() {
   const box = document.createElement("section");
   box.id = "kbk-pro-expectancy";
   box.className = "kbk-pro-alert-box";
+<<<<<<< HEAD
   box.textContent = "스캔 스냅샷 기반 백테스트 통계를 불러오는 중입니다.";
   target.prepend(box);
   try {
@@ -1949,6 +2072,13 @@ async function renderBacktestExpectation() {
   } catch (error) {
     box.textContent = `스냅샷 백테스트 통계 계산 실패: ${error.message}`;
   }
+=======
+  box.innerHTML = `
+    <strong>백테스트 데이터 준비 중입니다.</strong><br>
+    현재는 실시간 스캐너 기준으로 후보를 선별합니다.
+  `;
+  target.prepend(box);
+>>>>>>> ad5b40f (Add final selection scoring with chart pattern similarity)
 }
 
 function boot() {
