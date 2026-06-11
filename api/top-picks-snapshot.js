@@ -55,7 +55,12 @@ function normalizeItems(items, limit) {
     .map((item, index) => ({
       rank: index + 1,
       symbol: item.symbol,
+      scanTime: null,
+      category: item.category ?? item.stage ?? "top-picks",
       verdict: item.topPickVerdict ?? item.verdict ?? null,
+      actionSignal: item.actionSignal ?? item.decision ?? item.topPickVerdict ?? item.verdict ?? null,
+      decision: item.decision ?? item.topPickVerdict ?? item.verdict ?? null,
+      score: num(item.topPickFinalScore ?? item.finalProbabilityScore ?? item.scannerScore),
       finalScore: num(item.topPickFinalScore ?? item.finalScore),
       displayFinalScore: num(item.topPickDisplayFinalScore ?? item.displayFinalScore),
       chaseRisk: num(item.topPickChaseRisk ?? item.chaseRisk),
@@ -63,9 +68,14 @@ function normalizeItems(items, limit) {
       verdictReasonCodes: Array.isArray(item.topPickVerdictReasonCodes) ? item.topPickVerdictReasonCodes : [],
       rsi: num(item?.rsi ?? item?.technical?.rsi),
       rvol: num(item.relativeVolume ?? item.volumeRatio),
+      vwapStatus: item?.technical?.vwapState ?? item?.vwapState ?? (item.aboveVwap === true ? "VWAP 위" : item.aboveVwap === false ? "VWAP 아래" : null),
       vwapState: item?.technical?.vwapState ?? item?.vwapState ?? null,
       oneMinuteTrend: item?.oneMinuteTrend ?? item?.technical?.oneMinuteTrend ?? null,
       entryPrice: num(item.price ?? item.preMarketPrice ?? item.regularMarketPrice),
+      priceAtScan: num(item.price ?? item.preMarketPrice ?? item.regularMarketPrice),
+      changePercentAtScan: num(item.changePercent ?? item.preMarketChangePercent),
+      volume: num(item.volume ?? item.preMarketVolume ?? item.regularMarketVolume),
+      source: item.source ?? item.sourceTag ?? "scanner",
     }));
 }
 
@@ -105,10 +115,11 @@ async function handler(req, res) {
       snapshotId,
       capturedAt,
       sourceUpdatedAt,
+      source: payload?.data?.source ?? "scanner",
       status: "pending",
       resolveAfter: addMinutes(capturedAt, 30),
       notes,
-      items,
+      items: items.map((item) => ({ ...item, scanTime: capturedAt })),
     };
 
     const summary = await saveSnapshot(snapshot);

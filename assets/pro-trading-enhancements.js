@@ -1896,23 +1896,58 @@ async function renderBacktestExpectation() {
   const box = document.createElement("section");
   box.id = "kbk-pro-expectancy";
   box.className = "kbk-pro-alert-box";
-  box.textContent = "백테스트/기대값 통계를 계산하는 중입니다.";
+  box.textContent = "스캔 스냅샷 기반 백테스트 통계를 불러오는 중입니다.";
   target.prepend(box);
   try {
-    const payload = await fetchJson("/api/scanner");
-    const items = (payload.items || []).filter((item) => item?.included !== false);
-    const sample = items.slice(0, 80);
-    const high = sample.filter((item) => Number(item.finalProbabilityScore ?? item.scannerScore ?? 0) >= 75);
-    const avgScore = sample.reduce((sum, item) => sum + Number(item.finalProbabilityScore ?? item.scannerScore ?? 0), 0) / Math.max(sample.length, 1);
-    const avgMove = sample.reduce((sum, item) => sum + Number(mainChangePercent(item) ?? 0), 0) / Math.max(sample.length, 1);
-    const risk = sample.reduce((sum, item) => sum + Number(item.riskScore ?? 50), 0) / Math.max(sample.length, 1);
+    let summary = await fetchJson("/api/backtest/summary");
+    if (!Number(summary.evaluatedCount || 0)) {
+      await fetch("/api/top-picks-snapshot", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ count: 13 }),
+      }).catch(() => null);
+      summary = await fetchJson("/api/backtest/summary");
+    }
+    const bands = Array.isArray(summary.scoreBands) ? summary.scoreBands : [];
+    const recent = Array.isArray(summary.recentResults) ? summary.recentResults.slice(0, 8) : [];
+    const bandRows = bands.map((band) => `
+      <tr>
+        <td>${band.scoreRange}</td>
+        <td>${compact(band.sampleCount)}</td>
+        <td>${pct(band.avgReturnNow)}</td>
+        <td>${band.hitRatePlus5 === null ? "-" : pct(band.hitRatePlus5)}</td>
+        <td>${band.hitRatePlus10 === null ? "-" : pct(band.hitRatePlus10)}</td>
+        <td>${band.failRateMinus10 === null ? "-" : pct(band.failRateMinus10)}</td>
+      </tr>
+    `).join("");
+    const resultRows = recent.map((item) => `
+      <tr>
+        <td><b>${item.symbol || "-"}</b></td>
+        <td>${item.score ?? "-"}</td>
+        <td>${item.actionSignal || item.decision || "-"}</td>
+        <td>${money(item.priceAtScan)}</td>
+        <td>${money(item.priceNow)}</td>
+        <td>${pct(item.returnNow)}</td>
+      </tr>
+    `).join("");
     box.innerHTML = `
-      <strong>현재 후보군 기대값 요약</strong><br>
-      샘플 ${sample.length}건 · 75점 이상 ${high.length}건 · 평균 점수 ${Math.round(avgScore)}점 · 평균 상승률 ${pct(avgMove)} · 평균 위험 ${Math.round(risk)}점<br>
-      실제 백테스트는 아래 스캔 기록이 쌓이면 백테스트 테이블에서 검증됩니다. 지금 표시는 현재 후보군의 조건 강도 요약입니다.
+      <strong>스캔 스냅샷 백테스트 요약</strong><br>
+      평가 완료 ${compact(summary.evaluatedCount)}건 · 저장 스냅샷 ${compact(summary.snapshotCount)}개 · 평균 현재 수익률 ${pct(summary.avgReturnNow)}
+      <div class="table-shell" style="margin-top:12px">
+        <table class="backtest-table">
+          <thead><tr><th>점수 구간</th><th>건수</th><th>평균 현재 수익률</th><th>+5% 적중률</th><th>+10% 적중률</th><th>-10% 실패율</th></tr></thead>
+          <tbody>${bandRows || `<tr><td colspan="6">아직 평가 가능한 스냅샷이 없습니다.</td></tr>`}</tbody>
+        </table>
+      </div>
+      <div class="table-shell" style="margin-top:12px">
+        <table class="backtest-table">
+          <thead><tr><th>종목</th><th>점수</th><th>신호</th><th>스캔가</th><th>현재가</th><th>현재 수익률</th></tr></thead>
+          <tbody>${resultRows || `<tr><td colspan="6">최근 스캔 결과가 없습니다.</td></tr>`}</tbody>
+        </table>
+      </div>
     `;
   } catch (error) {
-    box.textContent = `백테스트/기대값 통계 계산 실패: ${error.message}`;
+    box.textContent = `스냅샷 백테스트 통계 계산 실패: ${error.message}`;
   }
 }
 
