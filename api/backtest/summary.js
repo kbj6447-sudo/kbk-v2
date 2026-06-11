@@ -2,7 +2,7 @@ const snapshotsHandler = require("./snapshots");
 const {
   summarizeByScoreBand,
   average,
-} = require("../lib/backtest-snapshot-utils");
+} = require("../../lib/backtest-snapshot-utils");
 
 function makeMockRes() {
   return {

@@ -1,7 +1,8 @@
 {
     "version": 2,
     "builds": [
-          { "src": "api/**/*.js", "use": "@vercel/node" },
+          { "src": "api/*.js", "use": "@vercel/node" },
+          { "src": "api/backtest/*.js", "use": "@vercel/node" },
           { "src": "legacy/**", "use": "@vercel/static" },
           { "src": "assets/**", "use": "@vercel/static" },
           { "src": "dist/**", "use": "@vercel/static" }
@@ -13,6 +14,7 @@
           { "src": "/api/history", "dest": "/api/history.js" },
           { "src": "/api/exchange", "dest": "/api/exchange.js" },
           { "src": "/api/pro-alert-scan", "dest": "/api/pro-alert-scan.js" },
+          { "src": "/api/backtest/(.*)", "dest": "/api/backtest/$1.js" },
           { "src": "/legacy/(.*)", "dest": "/legacy/$1" },
           { "src": "/assets/(.*)", "dest": "/assets/$1" },
           { "src": "/dist/(.*)", "dest": "/dist/$1" },

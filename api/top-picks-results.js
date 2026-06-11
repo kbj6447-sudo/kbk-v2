@@ -2,7 +2,7 @@ const {
   ensureStore,
   listSnapshots,
   loadSnapshot,
-} = require("./lib/top-picks-snapshot-store");
+} = require("../lib/top-picks-snapshot-store");
 
 async function handler(req, res) {
   if (req.method !== "GET") {

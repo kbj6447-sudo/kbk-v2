@@ -4,7 +4,7 @@ const {
   saveSnapshot,
   loadSnapshot,
   listPendingSnapshots,
-} = require("./lib/top-picks-snapshot-store");
+} = require("../lib/top-picks-snapshot-store");
 
 function num(value) {
   const n = Number(value);

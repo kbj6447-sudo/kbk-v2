@@ -3,13 +3,13 @@ const {
   ensureStore,
   listSnapshots,
   loadSnapshot,
-} = require("../lib/top-picks-snapshot-store");
+} = require("../../lib/top-picks-snapshot-store");
 const {
   num,
   normalizeSnapshotItem,
   attachCurrentResult,
   mapWithLimit,
-} = require("../lib/backtest-snapshot-utils");
+} = require("../../lib/backtest-snapshot-utils");
 
 function makeMockRes() {
   return {
