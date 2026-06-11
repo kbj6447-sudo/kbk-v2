@@ -238,7 +238,7 @@ function livePriceOf(item) {
 }
 
 function rvolValue(item) {
-  return toNumber(item?.volumeRatio ?? item?.relativeVolume);
+  return toNumber(item?.rvol ?? item?.volumeRatio ?? item?.relativeVolume);
 }
 
 function mainChangePercent(item, priceOverride = null) {
@@ -785,11 +785,13 @@ function riskBadges(item = {}, metrics = {}) {
   const change = toNumber(metrics.change ?? item.changePercent ?? item.preMarketChangePercent) ?? 0;
   const chaseRisk = toNumber(metrics.chaseRisk ?? item.topPickChaseRisk) ?? 0;
   const finalScore = toNumber(metrics.finalSelectionScore ?? item.finalSelectionScore) ?? 0;
+  const entrySuitability = toNumber(metrics.entrySuitability ?? item.entrySuitability ?? item.topPickFinalScore) ?? finalScore;
   const patternScore = toNumber(metrics.chartPatternScore ?? item.chartPatternScore ?? item.patternSimilarityScore) ?? 0;
   const rvol = rvolValue(item);
+  const volume = Math.max(toNumber(item.volume) ?? 0, toNumber(item.preMarketVolume) ?? 0, toNumber(item.regularMarketVolume) ?? 0);
   if (chaseRisk >= 80) badges.push("추격 위험");
-  if (finalScore < 50) badges.push("진입 부적합");
-  if (rvol === null) badges.push("거래량 미확인");
+  if (entrySuitability < 30) badges.push("진입 부적합");
+  if (rvol === null && volume <= 0) badges.push("거래량 미확인");
   if (change >= 80) badges.push("과열");
   if (change <= -20) badges.push("하락 구조");
   if (patternScore < 40) badges.push("차트 구조 미흡");
@@ -799,19 +801,23 @@ function riskBadges(item = {}, metrics = {}) {
 
 function selectionGroupRank(group) {
   if (group === "상단 후보") return 0;
-  if (group === "관찰 필요") return 1;
-  if (group === "차트 구조 미흡") return 2;
-  if (group === "진입 부적합") return 3;
-  if (group === "추격 위험") return 4;
+  if (group === "거래량 미확인") return 1;
+  if (group === "관찰 필요") return 2;
+  if (group === "차트 구조 미흡") return 3;
+  if (group === "진입 부적합") return 4;
+  if (group === "추격 위험") return 5;
   return 2;
 }
 
 function calculateTopPickSelectionMetrics(item, setup, reasoning, signal, finalScore, chaseRisk, change) {
+  const entrySuitability = Math.round(toNumber(item.entrySuitability ?? item.topPickFinalScore) ?? finalScore);
   const chartPatternScore = Math.round(toNumber(item.chartPatternScore ?? item.patternSimilarityScore ?? finalScore) ?? 0);
+  const rvol = toNumber(item.rvol) ?? signal.rvol;
+  const volume = Math.max(toNumber(item.volume) ?? 0, toNumber(item.preMarketVolume) ?? 0, toNumber(item.regularMarketVolume) ?? 0);
   const volumeConfirmationScore = Math.round(Math.max(0, Math.min(100,
     (toNumber(reasoning.volumeQualityScore) ?? 50) * 0.55
       + (toNumber(reasoning.surgeAccelerationScore) ?? 50) * 0.30
-      + ((signal.rvol ?? 0) >= 5 ? 86 : (signal.rvol ?? 0) >= 3 ? 74 : (signal.rvol ?? 0) >= 1.5 ? 58 : 30) * 0.15,
+      + ((rvol ?? 0) >= 5 ? 86 : (rvol ?? 0) >= 3 ? 74 : (rvol ?? 0) >= 1.5 ? 58 : 30) * 0.15,
   )));
   const quantitativeScore = Math.round(toNumber(item.quantitativeScore) ?? Math.max(0, Math.min(100,
     finalScore * 0.42
@@ -830,18 +836,21 @@ function calculateTopPickSelectionMetrics(item, setup, reasoning, signal, finalS
   )));
   const selectionGroup = item.selectionGroup
     || (change >= 80 || chaseRisk >= 80 ? "추격 위험"
-      : finalSelectionScore < 50 ? "진입 부적합"
+      : entrySuitability < 30 ? "진입 부적합"
         : chartPatternScore < 40 ? "차트 구조 미흡"
-          : "상단 후보");
+          : rvol === null && volume <= 0 ? "거래량 미확인"
+            : finalSelectionScore < 50 ? "관찰 필요"
+              : "상단 후보");
   return {
     quantitativeScore,
     chartPatternScore,
     volumeConfirmationScore,
     finalSelectionScore,
-    rvol: signal.rvol,
+    entrySuitability,
+    rvol,
     patternName: patternBadgeLabel(item, chartPatternScore),
     statusBadge: item.statusBadge || scoreBadgeLabel(finalSelectionScore),
-    riskBadges: riskBadges(item, { change, chaseRisk, finalSelectionScore, chartPatternScore }),
+    riskBadges: riskBadges(item, { change, chaseRisk, finalSelectionScore, entrySuitability, chartPatternScore }),
     selectionGroup,
   };
 }
@@ -1402,7 +1411,7 @@ async function renderTopPicksOnly(renderPhase = "initial") {
       .filter((pick) => pick.selectionMetrics.selectionGroup === "상단 후보" || pick.selectionMetrics.finalSelectionScore >= 50 || pick.reasoning.priority >= 2)
       .sort((a, b) => selectionGroupRank(a.selectionMetrics.selectionGroup) - selectionGroupRank(b.selectionMetrics.selectionGroup)
         || b.displaySortScore - a.displaySortScore
-        || b.finalScore - a.finalScore
+        || b.selectionMetrics.entrySuitability - a.selectionMetrics.entrySuitability
         || b.selectionMetrics.chartPatternScore - a.selectionMetrics.chartPatternScore
         || a.chaseRisk - b.chaseRisk
         || (b.selectionMetrics.rvol ?? 0) - (a.selectionMetrics.rvol ?? 0))
@@ -1455,7 +1464,7 @@ async function renderTopPicksOnly(renderPhase = "initial") {
           ${sessionDebugHtml(displayItem)}
           <div class="kbk-pro-top-grid">
             <div><span>최종 선별</span><b>${selectionMetrics.finalSelectionScore}점</b></div>
-            <div><span>신규 진입</span><b>${finalScore}점</b></div>
+            <div><span>신규 진입</span><b>${selectionMetrics.entrySuitability}점</b></div>
             <div><span>차트 유사도</span><b>${selectionMetrics.chartPatternScore}점</b></div>
             <div><span>추격 위험</span><b>${chaseRisk}점</b></div>
             <div><span>상대거래량</span><b>${displayRvolText(displayItem).replace("상대거래량 ", "")}</b></div>
@@ -2018,7 +2027,6 @@ async function renderBacktestExpectation() {
   const box = document.createElement("section");
   box.id = "kbk-pro-expectancy";
   box.className = "kbk-pro-alert-box";
-<<<<<<< HEAD
   box.textContent = "스캔 스냅샷 기반 백테스트 통계를 불러오는 중입니다.";
   target.prepend(box);
   try {
@@ -2072,13 +2080,6 @@ async function renderBacktestExpectation() {
   } catch (error) {
     box.textContent = `스냅샷 백테스트 통계 계산 실패: ${error.message}`;
   }
-=======
-  box.innerHTML = `
-    <strong>백테스트 데이터 준비 중입니다.</strong><br>
-    현재는 실시간 스캐너 기준으로 후보를 선별합니다.
-  `;
-  target.prepend(box);
->>>>>>> ad5b40f (Add final selection scoring with chart pattern similarity)
 }
 
 function boot() {

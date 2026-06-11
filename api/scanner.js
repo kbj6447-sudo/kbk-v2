@@ -608,23 +608,28 @@ function finalSelectionBadge(score) {
 function selectionGroupRank(group) {
   const label = String(group || "");
   if (label === "상단 후보") return 0;
-  if (label === "관찰 필요") return 1;
-  if (label === "차트 구조 미흡") return 2;
-  if (label === "진입 부적합") return 3;
-  if (label === "추격 위험") return 4;
+  if (label === "거래량 미확인") return 1;
+  if (label === "관찰 필요") return 2;
+  if (label === "차트 구조 미흡") return 3;
+  if (label === "진입 부적합") return 4;
+  if (label === "추격 위험") return 5;
   return 2;
 }
 
-function classifySelectionGroup(item, finalSelectionScore, chartPatternScore, chaseRisk, setup = {}) {
+function classifySelectionGroup(item, finalSelectionScore, chartPatternScore, chaseRisk, setup = {}, entrySuitability = null) {
   const change = num(item?.changePercent ?? item?.preMarketChangePercent) ?? 0;
+  const rvol = scannerTopPickRvol(item);
+  const volume = Math.max(num(item?.volume) ?? 0, num(item?.preMarketVolume) ?? 0, num(item?.regularMarketVolume) ?? 0);
   if (change >= 80 || chaseRisk >= 80 || setup.overheated) return "추격 위험";
-  if (finalSelectionScore < 50) return "진입 부적합";
+  if ((num(entrySuitability) ?? 50) < 30) return "진입 부적합";
   if (chartPatternScore < 40) return "차트 구조 미흡";
+  if (rvol === null && volume <= 0) return "거래량 미확인";
+  if (finalSelectionScore < 50) return "관찰 필요";
   if (change <= -20 && !setup.lowRecovery && !setup.vwapRecovering) return "관찰 필요";
   return "상단 후보";
 }
 
-function buildFinalSelectionScores(item, setup = {}, quality = {}, surgeAcceleration = {}) {
+function buildFinalSelectionScores(item, setup = {}, quality = {}, surgeAcceleration = {}, entrySuitability = null) {
   const chaseRisk = computeTopPickChaseRisk(
     item,
     setup,
@@ -640,7 +645,7 @@ function buildFinalSelectionScores(item, setup = {}, quality = {}, surgeAccelera
       + volumeConfirmationScore * 0.15
       - chaseRisk * 0.10,
   ));
-  const selectionGroup = classifySelectionGroup(item, finalSelectionScore, chartPatternScore, chaseRisk, setup);
+  const selectionGroup = classifySelectionGroup(item, finalSelectionScore, chartPatternScore, chaseRisk, setup, entrySuitability);
   return {
     quantitativeScore,
     chartPatternScore,
@@ -663,10 +668,11 @@ function evaluateTopPickForSnapshot(item) {
   const baseScore = surge * 0.55 + pattern * 0.2 + signal.volumeBonus + signal.changeBonus - risk * 0.12;
   const setup = signal.setup;
   const chaseRisk = computeTopPickChaseRisk(item, setup, change, risk);
+  const entrySuitability = Math.round(clamp(baseScore + signal.signalBonus));
   const selectionScores = buildFinalSelectionScores(item, setup, { score: item?.volumeQualityScore }, {
     surgeAccelerationScore: item?.surgeAccelerationScore,
-  });
-  const finalScore = selectionScores.finalSelectionScore || Math.round(clamp(baseScore + signal.signalBonus));
+  }, entrySuitability);
+  const finalScore = selectionScores.finalSelectionScore;
   const reasonCodes = [];
 
   if (setup.overheated) reasonCodes.push("overheated");
@@ -687,17 +693,17 @@ function evaluateTopPickForSnapshot(item) {
 
   return {
     topPickVerdict: verdict,
-    topPickFinalScore: finalScore,
+    topPickFinalScore: entrySuitability,
     topPickDisplayFinalScore: finalScore,
     topPickChaseRisk: chaseRisk,
     topPickVerdictReasonCodes: reasonCodes,
     topPickGrade: computeTopPickGrade(finalScore),
     quantitativeScore: selectionScores.quantitativeScore,
     chartPatternScore: selectionScores.chartPatternScore,
-    patternName: item.bestPatternName ?? item.patternName ?? null,
+    patternName: item.bestPatternName ?? item.patternName ?? (selectionScores.chartPatternScore <= 0 ? "데이터 부족" : "패턴 약함"),
     volumeConfirmationScore: selectionScores.volumeConfirmationScore,
     finalSelectionScore: selectionScores.finalSelectionScore,
-    entrySuitability: finalScore,
+    entrySuitability,
     chaseRisk,
     rvol: scannerTopPickRvol(item),
     selectionGroup: selectionScores.selectionGroup,
@@ -1731,13 +1737,13 @@ function compareScannerItems(a, b) {
   if (groupDiff !== 0) return groupDiff;
   const finalSelectionDiff = (num(b.finalSelectionScore) ?? -1) - (num(a.finalSelectionScore) ?? -1);
   if (finalSelectionDiff !== 0) return finalSelectionDiff;
-  const entryDiff = (num(b.topPickFinalScore) ?? num(b.finalProbabilityScore) ?? 0) - (num(a.topPickFinalScore) ?? num(a.finalProbabilityScore) ?? 0);
+  const entryDiff = (num(b.entrySuitability ?? b.topPickFinalScore) ?? num(b.finalProbabilityScore) ?? 0) - (num(a.entrySuitability ?? a.topPickFinalScore) ?? num(a.finalProbabilityScore) ?? 0);
   if (entryDiff !== 0) return entryDiff;
   const patternDiff = (num(b.chartPatternScore) ?? num(b.patternSimilarityScore) ?? 0) - (num(a.chartPatternScore) ?? num(a.patternSimilarityScore) ?? 0);
   if (patternDiff !== 0) return patternDiff;
-  const chaseDiff = (num(a.topPickChaseRisk) ?? 100) - (num(b.topPickChaseRisk) ?? 100);
+  const chaseDiff = (num(a.chaseRisk ?? a.topPickChaseRisk) ?? 100) - (num(b.chaseRisk ?? b.topPickChaseRisk) ?? 100);
   if (chaseDiff !== 0) return chaseDiff;
-  const rvolDiff = (num(b.relativeVolume ?? b.volumeRatio) ?? 0) - (num(a.relativeVolume ?? a.volumeRatio) ?? 0);
+  const rvolDiff = (num(b.rvol ?? b.relativeVolume ?? b.volumeRatio) ?? 0) - (num(a.rvol ?? a.relativeVolume ?? a.volumeRatio) ?? 0);
   if (rvolDiff !== 0) return rvolDiff;
   const scoreDiff = (num(b.finalProbabilityScore) ?? 0) - (num(a.finalProbabilityScore) ?? 0);
   if (scoreDiff !== 0) return scoreDiff;
@@ -2179,21 +2185,14 @@ module.exports = async function handler(req, res) {
         };
       }))
       .sort((a, b) => {
-        const aPrice = num(a.price) ?? num(a.preMarketPrice) ?? 0;
-        const bPrice = num(b.price) ?? num(b.preMarketPrice) ?? 0;
-        const sameDollarBucket = (aPrice < 1 && bPrice < 1) || (aPrice >= 1 && bPrice >= 1);
-          const groupDiff = selectionGroupRank(a.selectionGroup) - selectionGroupRank(b.selectionGroup);
-          if (groupDiff !== 0) return groupDiff;
-          const sortDiff = (num(b.finalSelectionScore) ?? num(b.marketPrioritySortScore) ?? num(b.volumeQualitySortScore) ?? num(b.finalProbabilityScore) ?? 0)
-            - (num(a.finalSelectionScore) ?? num(a.marketPrioritySortScore) ?? num(a.volumeQualitySortScore) ?? num(a.finalProbabilityScore) ?? 0);
-          if (sameDollarBucket && Math.abs(sortDiff) <= 3) {
-            return ((num(b.topPickFinalScore) ?? 0) - (num(a.topPickFinalScore) ?? 0))
-              || ((num(b.chartPatternScore) ?? 0) - (num(a.chartPatternScore) ?? 0))
-              || ((num(a.topPickChaseRisk) ?? 100) - (num(b.topPickChaseRisk) ?? 100))
-              || ((num(b.relativeVolume ?? b.volumeRatio) ?? 0) - (num(a.relativeVolume ?? a.volumeRatio) ?? 0))
-              || ((num(b.volumeQualitySortScore) ?? 0) - (num(a.volumeQualitySortScore) ?? 0));
-          }
-          return sortDiff;
+        const groupDiff = selectionGroupRank(a.selectionGroup) - selectionGroupRank(b.selectionGroup);
+        if (groupDiff !== 0) return groupDiff;
+        return ((num(b.finalSelectionScore) ?? 0) - (num(a.finalSelectionScore) ?? 0))
+          || ((num(b.entrySuitability ?? b.topPickFinalScore) ?? 0) - (num(a.entrySuitability ?? a.topPickFinalScore) ?? 0))
+          || ((num(b.chartPatternScore) ?? 0) - (num(a.chartPatternScore) ?? 0))
+          || ((num(a.chaseRisk ?? a.topPickChaseRisk) ?? 100) - (num(b.chaseRisk ?? b.topPickChaseRisk) ?? 100))
+          || ((num(b.rvol ?? b.relativeVolume ?? b.volumeRatio) ?? 0) - (num(a.rvol ?? a.relativeVolume ?? a.volumeRatio) ?? 0))
+          || ((num(b.changePercent ?? b.preMarketChangePercent) ?? 0) - (num(a.changePercent ?? a.preMarketChangePercent) ?? 0));
         });
       logScannerElapsed("volume profile", metrics.volumeProfileMs, {
         requestId,
