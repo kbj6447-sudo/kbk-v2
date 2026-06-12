@@ -1,6 +1,11 @@
 const quoteHandler = require("./quote");
 const historyHandler = require("./history");
 const ENRICH_SYMBOL_LIMIT = 30;
+const SCANNER_SUCCESS_TTL_MS = 120 * 1000;
+const SCANNER_FAILURE_TTL_MS = 30 * 1000;
+let scannerSuccessCache = null;
+let scannerFailureCache = null;
+let scannerInFlightPromise = null;
 
 function formatScannerDetails(details = {}) {
   return Object.entries(details)
@@ -1954,7 +1959,13 @@ async function fetchBaseScannerPayload() {
   };
 }
 
-module.exports = async function handler(req, res) {
+function sendCachedScannerResponse(res, status, payload, cacheState) {
+  res.setHeader("cache-control", "no-store");
+  res.setHeader("x-kbk-scanner-cache", cacheState);
+  res.status(status).json(payload);
+}
+
+async function buildScannerResponse(req) {
   const requestStartedAt = Date.now();
   const requestId = headerValue(req.headers, "x-request-id") || makeRequestId("scanner");
   console.log(`[SCANNER] start requestId=${requestId}`);
@@ -2204,23 +2215,68 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    res.setHeader("cache-control", "no-store");
     logScannerStep("completed", requestStartedAt, {
       requestId,
       status: 200,
       enrichLimit: ENRICH_SYMBOL_LIMIT,
     });
     console.log(`[SCANNER] end requestId=${requestId} elapsed=${Date.now() - requestStartedAt}ms status=200`);
-    res.status(200).json(payload);
+    return { status: 200, payload };
   } catch (error) {
     logScannerStep("completed", requestStartedAt, {
       requestId,
       status: 502,
     });
     console.log(`[SCANNER] end requestId=${requestId} elapsed=${Date.now() - requestStartedAt}ms status=502`);
-    res.status(502).json({
-      ok: false,
-      message: error instanceof Error ? error.message : "scanner proxy failed",
-    });
+    return {
+      status: 502,
+      payload: {
+        ok: false,
+        message: error instanceof Error ? error.message : "scanner proxy failed",
+      },
+    };
   }
+}
+
+module.exports = async function handler(req, res) {
+  const now = Date.now();
+  if (scannerSuccessCache && scannerSuccessCache.expiresAt > now) {
+    sendCachedScannerResponse(res, 200, scannerSuccessCache.payload, "hit");
+    return;
+  }
+  if (scannerFailureCache && scannerFailureCache.expiresAt > now) {
+    sendCachedScannerResponse(res, scannerFailureCache.status, scannerFailureCache.payload, "cooldown");
+    return;
+  }
+
+  if (!scannerInFlightPromise) {
+    scannerInFlightPromise = buildScannerResponse(req)
+      .then((result) => {
+        if (result.status >= 200 && result.status < 300) {
+          scannerSuccessCache = {
+            expiresAt: Date.now() + SCANNER_SUCCESS_TTL_MS,
+            payload: result.payload,
+          };
+          scannerFailureCache = null;
+        } else {
+          scannerFailureCache = {
+            expiresAt: Date.now() + SCANNER_FAILURE_TTL_MS,
+            status: result.status,
+            payload: result.payload,
+          };
+        }
+        return result;
+      })
+      .finally(() => {
+        scannerInFlightPromise = null;
+      });
+  }
+
+  const result = await scannerInFlightPromise;
+  sendCachedScannerResponse(
+    res,
+    result.status,
+    result.payload,
+    result.status >= 200 && result.status < 300 ? "miss" : "error",
+  );
 };

@@ -1315,12 +1315,9 @@ async function renderTopPicksOnly(renderPhase = "initial") {
   panel.innerHTML = `<section class="kbk-route-note">통합 최종 후보를 계산하는 중입니다.</section>`;
   const renderPromise = (async () => {
     try {
-      if (typeof window.__kbkClearScannerCache === "function") {
-        window.__kbkClearScannerCache();
-      }
-      const payload = await fetch("/api/scanner", { cache: "no-store" }).then((res) => res.json());
+      const payload = await fetchJson("/api/scanner");
       if (renderToken !== topPicksRenderToken) return;
-      const items = (payload?.data?.items || [])
+      const items = (payload?.items || payload?.data?.items || [])
       .filter((item) => item?.symbol && item.included !== false)
       .map((item) => {
         const price = livePriceOf(item) ?? 0;
@@ -1544,11 +1541,74 @@ function toNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+const API_CACHE_RULES = [
+  { prefix: "/api/scanner", ttlMs: 120 * 1000, cooldownMs: 60 * 1000, message: "스캐너 데이터를 잠시 후 다시 시도해주세요." },
+  { prefix: "/api/history", ttlMs: 5 * 60 * 1000, cooldownMs: 60 * 1000, message: "차트 데이터를 잠시 후 다시 시도해주세요." },
+];
+const apiResponseCache = new Map();
+const apiRequestInflight = new Map();
+const apiFailureCooldown = new Map();
+
+function apiCacheConfig(url) {
+  const path = String(url || "").split("?")[0];
+  return API_CACHE_RULES.find((rule) => path === rule.prefix) || null;
+}
+
+function apiCacheKey(url) {
+  const absolute = new URL(url, window.location.origin);
+  return `${absolute.pathname}${absolute.search}`;
+}
+
 async function fetchJson(url) {
-  const response = await fetch(url, { cache: "no-store" });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload?.ok === false) throw new Error(payload?.message || `API ${response.status}`);
-  return payload.data || payload;
+  const config = apiCacheConfig(url);
+  const key = config ? apiCacheKey(url) : null;
+  const now = Date.now();
+  if (config && key) {
+    const cooldown = apiFailureCooldown.get(key);
+    if (cooldown && cooldown.until > now) {
+      throw new Error(cooldown.message);
+    }
+    const cached = apiResponseCache.get(key);
+    if (cached && cached.expiresAt > now) {
+      return cached.payload;
+    }
+    if (apiRequestInflight.has(key)) {
+      return apiRequestInflight.get(key);
+    }
+  }
+
+  const request = (async () => {
+    const response = await fetch(url, { cache: "no-store" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.ok === false) {
+      const message = payload?.message || config?.message || `API ${response.status}`;
+      if (config && key) {
+        apiFailureCooldown.set(key, {
+          until: Date.now() + config.cooldownMs,
+          message,
+        });
+      }
+      throw new Error(message);
+    }
+    const data = payload.data || payload;
+    if (config && key) {
+      apiResponseCache.set(key, {
+        payload: data,
+        expiresAt: Date.now() + config.ttlMs,
+      });
+      apiFailureCooldown.delete(key);
+    }
+    return data;
+  })();
+
+  if (!config || !key) {
+    return request;
+  }
+
+  apiRequestInflight.set(key, request);
+  return request.finally(() => {
+    apiRequestInflight.delete(key);
+  });
 }
 
 function normalizeBars(payload) {

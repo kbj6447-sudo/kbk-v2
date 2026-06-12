@@ -619,11 +619,73 @@ function ensureShell() {
   return shell;
 }
 
+const API_CACHE_RULES = [
+  { prefix: "/api/scanner", ttlMs: 120 * 1000, cooldownMs: 60 * 1000, message: "스캐너 데이터를 잠시 후 다시 시도해주세요." },
+  { prefix: "/api/history", ttlMs: 5 * 60 * 1000, cooldownMs: 60 * 1000, message: "차트 데이터를 잠시 후 다시 시도해주세요." },
+];
+const apiResponseCache = new Map();
+const apiRequestInflight = new Map();
+const apiFailureCooldown = new Map();
+
+function apiCacheConfig(url) {
+  const path = String(url || "").split("?")[0];
+  return API_CACHE_RULES.find((rule) => path === rule.prefix) || null;
+}
+
+function apiCacheKey(url) {
+  const absolute = new URL(url, window.location.origin);
+  return `${absolute.pathname}${absolute.search}`;
+}
+
 async function fetchJson(url) {
-  const res = await fetch(url, { cache: "no-store" });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || json.ok === false) throw new Error(json.message || `API error ${res.status}`);
-  return json;
+  const config = apiCacheConfig(url);
+  const key = config ? apiCacheKey(url) : null;
+  const now = Date.now();
+  if (config && key) {
+    const cooldown = apiFailureCooldown.get(key);
+    if (cooldown && cooldown.until > now) {
+      throw new Error(cooldown.message);
+    }
+    const cached = apiResponseCache.get(key);
+    if (cached && cached.expiresAt > now) {
+      return cached.payload;
+    }
+    if (apiRequestInflight.has(key)) {
+      return apiRequestInflight.get(key);
+    }
+  }
+
+  const request = (async () => {
+    const res = await fetch(url, { cache: "no-store" });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || json.ok === false) {
+      const message = json.message || config?.message || `API error ${res.status}`;
+      if (config && key) {
+        apiFailureCooldown.set(key, {
+          until: Date.now() + config.cooldownMs,
+          message,
+        });
+      }
+      throw new Error(message);
+    }
+    if (config && key) {
+      apiResponseCache.set(key, {
+        payload: json,
+        expiresAt: Date.now() + config.ttlMs,
+      });
+      apiFailureCooldown.delete(key);
+    }
+    return json;
+  })();
+
+  if (!config || !key) {
+    return request;
+  }
+
+  apiRequestInflight.set(key, request);
+  return request.finally(() => {
+    apiRequestInflight.delete(key);
+  });
 }
 
 async function refreshDetail(symbol, loading = false) {
@@ -1527,9 +1589,6 @@ async function loadTopPicks() {
   const renderToken = ++topPicksRenderToken;
   renderTopPickLoading();
   topPicksLoadPromise = (async () => {
-    if (typeof window.__kbkClearScannerCache === "function") {
-      window.__kbkClearScannerCache();
-    }
     const [payload, exchangePayload] = await Promise.all([
       fetchJson("/api/scanner"),
       fetchJson("/api/exchange").catch(() => null),
