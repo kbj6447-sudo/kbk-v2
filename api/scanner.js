@@ -4,9 +4,110 @@ const ENRICH_SYMBOL_LIMIT = 30;
 const PRE_MOVE_CANDIDATE_LIMIT = 30;
 const SCANNER_SUCCESS_TTL_MS = 120 * 1000;
 const SCANNER_FAILURE_TTL_MS = 30 * 1000;
-let scannerSuccessCache = null;
-let scannerFailureCache = null;
-let scannerInFlightPromise = null;
+const SCANNER_ITEM_LIMIT = 120;
+const SCANNER_SHORT_TERM_LIMIT = 30;
+const SCANNER_UNDER_ONE_LIMIT = 30;
+const SCANNER_OVER_ONE_LIMIT = 30;
+const SCANNER_ACCUMULATION_LIMIT = 30;
+const SCANNER_PRE_MOVE_LIMIT = 30;
+const SCANNER_TOP_PICKS_LIMIT = 20;
+const scannerSuccessCacheByMode = {
+  default: null,
+  debug: null,
+};
+const scannerFailureCacheByMode = {
+  default: null,
+  debug: null,
+};
+const scannerInFlightPromiseByMode = {
+  default: null,
+  debug: null,
+};
+
+function sanitizeScannerReasonList(reasons) {
+  if (!Array.isArray(reasons)) return [];
+  return reasons
+    .map((reason) => String(reason ?? "").trim())
+    .filter(Boolean)
+    .map((reason) => (reason.length > 120 ? reason.slice(0, 120) : reason))
+    .slice(0, 3);
+}
+
+function sanitizeScannerItem(item, { debug = false } = {}) {
+  if (!item || typeof item !== "object") return null;
+  const sanitized = {
+    symbol: item.symbol ?? null,
+    name: item.name ?? null,
+    price: item.price ?? null,
+    preMarketPrice: item.preMarketPrice ?? null,
+    regularMarketPrice: item.regularMarketPrice ?? null,
+    previousClose: item.previousClose ?? null,
+    changePercent: item.changePercent ?? null,
+    preMarketChangePercent: item.preMarketChangePercent ?? null,
+    volume: item.volume ?? null,
+    regularMarketVolume: item.regularMarketVolume ?? null,
+    relativeVolume: item.relativeVolume ?? null,
+    averageVolume: item.averageVolume ?? null,
+    marketCap: item.marketCap ?? null,
+    exchange: item.exchange ?? null,
+    currency: item.currency ?? null,
+    marketState: item.marketState ?? null,
+    stage: item.stage ?? null,
+    stageLabel: item.stageLabel ?? item.stageLabelKo ?? null,
+    stageLabelKo: item.stageLabelKo ?? null,
+    riskLabelKo: item.riskLabelKo ?? null,
+    scannerScore: item.scannerScore ?? null,
+    finalProbabilityScore: item.finalProbabilityScore ?? null,
+    finalSelectionScore: item.finalSelectionScore ?? null,
+    marketPrioritySortScore: item.marketPrioritySortScore ?? null,
+    volumeQualitySortScore: item.volumeQualitySortScore ?? null,
+    changePenalty: item.changePenalty ?? null,
+    isPreSurgeCandidate: item.isPreSurgeCandidate === true,
+    isChasingRisk: item.isChasingRisk === true,
+    isOverheated: item.isOverheated === true,
+    preMoveScore: item.preMoveScore ?? null,
+    preMoveStage: item.preMoveStage ?? null,
+    preMoveLabelKo: item.preMoveLabelKo ?? null,
+    preMoveReasons: sanitizeScannerReasonList(item.preMoveReasons),
+    selectionReasons: sanitizeScannerReasonList(item.selectionReasons),
+  };
+  if (debug) {
+    sanitized.debugQuoteSource = item.debugQuoteSource ?? null;
+    sanitized.debugHistorySource = item.debugHistorySource ?? null;
+    sanitized.debugFallbackReason = item.debugFallbackReason ?? null;
+    sanitized.chartPatternDetails = item.chartPatternDetails ?? null;
+    sanitized.topPickRejectedReasons = Array.isArray(item.topPickRejectedReasons) ? item.topPickRejectedReasons : [];
+    sanitized.topPickVerdictReasonCodes = Array.isArray(item.topPickVerdictReasonCodes) ? item.topPickVerdictReasonCodes : [];
+  }
+  return sanitized;
+}
+
+function sanitizeScannerList(list, limit, options) {
+  if (!Array.isArray(list)) return list;
+  return list
+    .map((item) => sanitizeScannerItem(item, options))
+    .filter((item) => item && item.symbol)
+    .slice(0, limit);
+}
+
+function sanitizeScannerPayload(payload, { debug = false } = {}) {
+  if (!payload || typeof payload !== "object") return payload;
+  if (!payload.data || typeof payload.data !== "object") return payload;
+  const options = { debug };
+  payload.data.items = sanitizeScannerList(payload.data.items, SCANNER_ITEM_LIMIT, options);
+  payload.data.shortTermCandidates = sanitizeScannerList(payload.data.shortTermCandidates, SCANNER_SHORT_TERM_LIMIT, options);
+  payload.data.underOneCandidates = sanitizeScannerList(payload.data.underOneCandidates, SCANNER_UNDER_ONE_LIMIT, options);
+  payload.data.overOneCandidates = sanitizeScannerList(payload.data.overOneCandidates, SCANNER_OVER_ONE_LIMIT, options);
+  payload.data.accumulationCandidates = sanitizeScannerList(payload.data.accumulationCandidates, SCANNER_ACCUMULATION_LIMIT, options);
+  payload.data.preMoveCandidates = sanitizeScannerList(payload.data.preMoveCandidates, SCANNER_PRE_MOVE_LIMIT, options);
+  payload.data.topPicks = sanitizeScannerList(payload.data.topPicks, SCANNER_TOP_PICKS_LIMIT, options);
+  return payload;
+}
+
+function isDebugScannerRequest(req) {
+  const requestUrl = new URL(req?.url || "/api/scanner", "http://localhost");
+  return requestUrl.searchParams.get("debug") === "1";
+}
 
 function formatScannerDetails(details = {}) {
   return Object.entries(details)
@@ -2292,11 +2393,10 @@ function sendCachedScannerResponse(res, status, payload, cacheState) {
   res.status(status).json(payload);
 }
 
-async function buildScannerResponse(req) {
+async function buildScannerResponse(req, { includeDebug: includeDebugOption } = {}) {
   const requestStartedAt = Date.now();
   const headers = req?.headers || {};
-  const requestUrl = new URL(req?.url || "/api/scanner", "http://localhost");
-  const includeDebug = requestUrl.searchParams.get("debug") === "1";
+  const includeDebug = includeDebugOption === true || (includeDebugOption !== false && isDebugScannerRequest(req));
   const requestId = headerValue(headers, "x-request-id") || makeRequestId("scanner");
   console.log(`[SCANNER] start requestId=${requestId}`);
   try {
@@ -2555,6 +2655,7 @@ async function buildScannerResponse(req) {
 
       payload.data.preMoveCandidates = buildPreMoveCandidates(payload.data.items);
     }
+    sanitizeScannerPayload(payload, { debug: includeDebug });
     logScannerStep("completed", requestStartedAt, {
       requestId,
       status: 200,
@@ -2579,27 +2680,30 @@ async function buildScannerResponse(req) {
 }
 
 module.exports = async function handler(req, res) {
+  const modeKey = isDebugScannerRequest(req) ? "debug" : "default";
   const now = Date.now();
-  if (scannerSuccessCache && scannerSuccessCache.expiresAt > now) {
-    sendCachedScannerResponse(res, 200, scannerSuccessCache.payload, "hit");
+  const successCache = scannerSuccessCacheByMode[modeKey];
+  if (successCache && successCache.expiresAt > now) {
+    sendCachedScannerResponse(res, 200, successCache.payload, "hit");
     return;
   }
-  if (scannerFailureCache && scannerFailureCache.expiresAt > now) {
-    sendCachedScannerResponse(res, scannerFailureCache.status, scannerFailureCache.payload, "cooldown");
+  const failureCache = scannerFailureCacheByMode[modeKey];
+  if (failureCache && failureCache.expiresAt > now) {
+    sendCachedScannerResponse(res, failureCache.status, failureCache.payload, "cooldown");
     return;
   }
 
-  if (!scannerInFlightPromise) {
-    scannerInFlightPromise = buildScannerResponse(req)
+  if (!scannerInFlightPromiseByMode[modeKey]) {
+    scannerInFlightPromiseByMode[modeKey] = buildScannerResponse(req, { includeDebug: modeKey === "debug" })
       .then((result) => {
         if (result.status >= 200 && result.status < 300) {
-          scannerSuccessCache = {
+          scannerSuccessCacheByMode[modeKey] = {
             expiresAt: Date.now() + SCANNER_SUCCESS_TTL_MS,
             payload: result.payload,
           };
-          scannerFailureCache = null;
+          scannerFailureCacheByMode[modeKey] = null;
         } else {
-          scannerFailureCache = {
+          scannerFailureCacheByMode[modeKey] = {
             expiresAt: Date.now() + SCANNER_FAILURE_TTL_MS,
             status: result.status,
             payload: result.payload,
@@ -2608,11 +2712,11 @@ module.exports = async function handler(req, res) {
         return result;
       })
       .finally(() => {
-        scannerInFlightPromise = null;
+        scannerInFlightPromiseByMode[modeKey] = null;
       });
   }
 
-  const result = await scannerInFlightPromise;
+  const result = await scannerInFlightPromiseByMode[modeKey];
   sendCachedScannerResponse(
     res,
     result.status,

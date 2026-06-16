@@ -8,13 +8,13 @@
   var SCANNER_CACHE_TTL_MS = 120 * 1000;
   var SCANNER_STALE_MS = 30 * 60 * 1000;
   var FORCE_REFRESH_WINDOW_MS = 2500;
-  var SCANNER_CACHE_KEY = "kbk:scanner:lastResponse";
-  var SCANNER_CACHE_UPDATED_AT_KEY = "kbk:scanner:lastUpdatedAt";
+  var SCANNER_CACHE_KEY_BASE = "kbk:scanner:lastResponse";
+  var SCANNER_CACHE_UPDATED_AT_KEY_BASE = "kbk:scanner:lastUpdatedAt";
   var SCANNER_FORCE_UNTIL_KEY = "kbk:scanner:forceUntil";
   var FORCE_REFRESH_LABELS = ["새로고침", "전체 분석", "감시 갱신", "Refresh"];
   var originalFetch = window.fetch.bind(window);
-  var cachedEntry = null;
-  var inFlightEntryPromise = null;
+  var cachedEntries = { default: null, debug: null };
+  var inFlightEntryPromises = { default: null, debug: null };
   var forceRefreshUntil = readPersistedForceUntil();
   var fetchStats = window.__kbkFetchStats || {
     scanner: 0,
@@ -82,10 +82,24 @@
     return Number.isFinite(cachedAt) && cachedAt > 0 && (now() - cachedAt) <= SCANNER_STALE_MS;
   }
 
-  function clearPersistedCache() {
+  function scannerModeKey(input) {
+    var url = scannerUrl(input);
+    if (!url) return "default";
+    return url.searchParams.get("debug") === "1" ? "debug" : "default";
+  }
+
+  function scannerCacheKey(modeKey) {
+    return SCANNER_CACHE_KEY_BASE + ":" + modeKey;
+  }
+
+  function scannerCacheUpdatedAtKey(modeKey) {
+    return SCANNER_CACHE_UPDATED_AT_KEY_BASE + ":" + modeKey;
+  }
+
+  function clearPersistedCache(modeKey) {
     try {
-      localStorage.removeItem(SCANNER_CACHE_KEY);
-      localStorage.removeItem(SCANNER_CACHE_UPDATED_AT_KEY);
+      localStorage.removeItem(scannerCacheKey(modeKey));
+      localStorage.removeItem(scannerCacheUpdatedAtKey(modeKey));
     } catch (_error) {}
   }
 
@@ -107,24 +121,24 @@
     };
   }
 
-  function setCachedEntry(entry) {
-    cachedEntry = entry;
+  function setCachedEntry(entry, modeKey) {
+    cachedEntries[modeKey] = entry;
     try {
-      localStorage.setItem(SCANNER_CACHE_KEY, entry.body);
-      localStorage.setItem(SCANNER_CACHE_UPDATED_AT_KEY, String(entry.cachedAt));
+      localStorage.setItem(scannerCacheKey(modeKey), entry.body);
+      localStorage.setItem(scannerCacheUpdatedAtKey(modeKey), String(entry.cachedAt));
     } catch (_error) {}
   }
 
-  function readPersistedCache() {
+  function readPersistedCache(modeKey) {
     try {
-      var body = localStorage.getItem(SCANNER_CACHE_KEY) || "";
-      var cachedAt = Number(localStorage.getItem(SCANNER_CACHE_UPDATED_AT_KEY) || 0);
+      var body = localStorage.getItem(scannerCacheKey(modeKey)) || "";
+      var cachedAt = Number(localStorage.getItem(scannerCacheUpdatedAtKey(modeKey)) || 0);
       if (!body || !isCacheAgeValid(cachedAt)) {
-        clearPersistedCache();
+        clearPersistedCache(modeKey);
         return null;
       }
-      cachedEntry = createEntry(body, 200, "OK", null, cachedAt);
-      return cachedEntry;
+      cachedEntries[modeKey] = createEntry(body, 200, "OK", null, cachedAt);
+      return cachedEntries[modeKey];
     } catch (_error) {
       return null;
     }
@@ -138,7 +152,7 @@
     });
   }
 
-  async function fetchAndCache(input, init) {
+  async function fetchAndCache(input, init, modeKey) {
     fetchStats.scannerNetwork += 1;
     var response = await originalFetch(input, init);
     var body = await response.clone().text();
@@ -150,7 +164,7 @@
 
     var entry = createEntry(body, response.status, response.statusText, headers, now());
     if (response.ok && body) {
-      setCachedEntry(entry);
+      setCachedEntry(entry, modeKey);
     }
 
     return entry;
@@ -192,9 +206,12 @@
   };
 
   window.__kbkClearScannerCache = function clearScannerCache() {
-    cachedEntry = null;
-    inFlightEntryPromise = null;
-    clearPersistedCache();
+    cachedEntries.default = null;
+    cachedEntries.debug = null;
+    inFlightEntryPromises.default = null;
+    inFlightEntryPromises.debug = null;
+    clearPersistedCache("default");
+    clearPersistedCache("debug");
     markForceRefresh();
   };
 
@@ -209,12 +226,15 @@
 
   window.__kbkGetSharedScannerData = function getSharedScannerData(options) {
     var force = Boolean(options && options.force);
+    var modeKey = "default";
     if (force) {
       markForceRefresh();
     }
 
+    var cachedEntry = cachedEntries[modeKey];
     if (!cachedEntry || !isCacheAgeValid(cachedEntry.cachedAt)) {
-      cachedEntry = readPersistedCache();
+      cachedEntry = readPersistedCache(modeKey);
+      cachedEntries[modeKey] = cachedEntry;
     }
 
     var age = cachedEntry ? now() - cachedEntry.cachedAt : Infinity;
@@ -222,15 +242,15 @@
       return Promise.resolve(parseEntryBody(cachedEntry));
     }
 
-    if (!inFlightEntryPromise) {
-      inFlightEntryPromise = fetchAndCache("/api/scanner", { cache: "default" })
+    if (!inFlightEntryPromises[modeKey]) {
+      inFlightEntryPromises[modeKey] = fetchAndCache("/api/scanner", { cache: "default" }, modeKey)
         .finally(function clearInFlight() {
-          inFlightEntryPromise = null;
+          inFlightEntryPromises[modeKey] = null;
           persistForceUntil(0);
         });
     }
 
-    return inFlightEntryPromise.then(function toData(entry) {
+    return inFlightEntryPromises[modeKey].then(function toData(entry) {
       return parseEntryBody(entry);
     });
   };
@@ -245,9 +265,12 @@
       return originalFetch(input, init);
     }
 
+    var modeKey = scannerModeKey(input);
+    var cachedEntry = cachedEntries[modeKey];
     var force = shouldForceRefresh() || requestBypassesCache(input, init);
     if (!cachedEntry || !isCacheAgeValid(cachedEntry.cachedAt)) {
-      cachedEntry = readPersistedCache();
+      cachedEntry = readPersistedCache(modeKey);
+      cachedEntries[modeKey] = cachedEntry;
     }
 
     var age = cachedEntry ? now() - cachedEntry.cachedAt : Infinity;
@@ -257,20 +280,20 @@
       return Promise.resolve(responseFromEntry(cachedEntry));
     }
 
-    if (!force && cachedEntry && age <= SCANNER_STALE_MS && inFlightEntryPromise) {
+    if (!force && cachedEntry && age <= SCANNER_STALE_MS && inFlightEntryPromises[modeKey]) {
       fetchStats.scannerCacheHits += 1;
       return Promise.resolve(responseFromEntry(cachedEntry));
     }
 
-    if (!inFlightEntryPromise) {
-      inFlightEntryPromise = fetchAndCache(input, init)
+    if (!inFlightEntryPromises[modeKey]) {
+      inFlightEntryPromises[modeKey] = fetchAndCache(input, init, modeKey)
         .finally(function clearInFlight() {
-          inFlightEntryPromise = null;
+          inFlightEntryPromises[modeKey] = null;
           persistForceUntil(0);
         });
     }
 
-    return inFlightEntryPromise.then(function buildResponse(entry) {
+    return inFlightEntryPromises[modeKey].then(function buildResponse(entry) {
       return responseFromEntry(entry);
     });
   };
