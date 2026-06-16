@@ -2,6 +2,13 @@
   "/backtest": "backtest-panel",
   "/ai-analysis": "debug-panel",
 };
+const KBK_RENDER_SOURCE_LIMIT = 50;
+const KBK_TOP_PICKS_RENDER_LIMIT = 20;
+const KBK_ACCUMULATION_RENDER_LIMIT = 30;
+const KBK_TABLE_RENDER_LIMIT = 50;
+let accumulationPageFilterInFlight = false;
+let candidateTableFilterInFlight = false;
+let stageAwareRefreshTimer = null;
 
 function ready(fn) {
   if (document.readyState === "loading") {
@@ -31,6 +38,26 @@ function pct(n) {
   const value = Number(n);
   if (!Number.isFinite(value)) return "-";
   return `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
+}
+
+function scheduleStageAwareRefresh(delayMs = 180) {
+  if (stageAwareRefreshTimer) window.clearTimeout(stageAwareRefreshTimer);
+  stageAwareRefreshTimer = window.setTimeout(() => {
+    stageAwareRefreshTimer = null;
+    applyStageAwareAccumulationPage();
+    applyStageAwareCandidateTable();
+  }, delayMs);
+}
+
+function scannerPayloadItems(payload, preferredKey = "items", limit = KBK_RENDER_SOURCE_LIMIT) {
+  const data = payload?.data && typeof payload.data === "object" && !Array.isArray(payload.data)
+    ? payload.data
+    : null;
+  const preferred = data?.[preferredKey] ?? payload?.[preferredKey];
+  const fallback = data?.items ?? payload?.items ?? [];
+  return (Array.isArray(preferred) ? preferred : Array.isArray(fallback) ? fallback : [])
+    .filter((item) => item?.symbol && item.included !== false)
+    .slice(0, limit);
 }
 
 function compact(n) {
@@ -1368,8 +1395,8 @@ async function renderTopPicksOnly(renderPhase = "initial") {
     try {
       const payload = await fetchJson("/api/scanner");
       if (renderToken !== topPicksRenderToken) return;
-      const items = (payload?.items || payload?.data?.items || [])
-      .filter((item) => item?.symbol && item.included !== false)
+      const sourceItems = scannerPayloadItems(payload, "topPicks", KBK_RENDER_SOURCE_LIMIT);
+      const items = sourceItems
       .map((item) => {
         const price = livePriceOf(item) ?? 0;
         const change = Number(mainChangePercent(item) ?? 0);
@@ -1468,7 +1495,7 @@ async function renderTopPicksOnly(renderPhase = "initial") {
         || b.selectionMetrics.chartPatternScore - a.selectionMetrics.chartPatternScore
         || a.chaseRisk - b.chaseRisk
         || (b.selectionMetrics.rvol ?? 0) - (a.selectionMetrics.rvol ?? 0))
-      .slice(0, 20);
+      .slice(0, KBK_TOP_PICKS_RENDER_LIMIT);
       if (renderToken !== topPicksRenderToken) return;
       const latestQuotes = await latestQuotesBySymbol(items.map((pick) => pick.item.symbol));
       if (renderToken !== topPicksRenderToken) return;
@@ -2212,6 +2239,16 @@ function stageAwareAccumulationAllowed(item) {
     && ["ACCUMULATION", "PRE_SURGE", "SURGE_PRECURSOR", "SURGE PRECURSOR"].includes(stageMeta.stage);
 }
 
+function removeDisallowedAccumulationSections() {
+  if (!accumulationRouteActive()) return;
+  document.querySelectorAll(".accumulation-page section").forEach((section) => {
+    const text = section.textContent || "";
+    if (section.classList.contains("scanner-section") && /^\s*추격매수 위험 종목/.test(text)) {
+      section.remove();
+    }
+  });
+}
+
 function rootScannerRouteActive() {
   return String(window.location.pathname || "") === "/";
 }
@@ -2221,111 +2258,145 @@ function candidateRowSymbol(row) {
   return String(symbolCell?.textContent || "").trim().split(/\s+/)[0].toUpperCase();
 }
 
+function realtimeCandidateItems(payload, limit = KBK_TOP_PICKS_RENDER_LIMIT + 10) {
+  const data = payload?.data && typeof payload.data === "object" && !Array.isArray(payload.data)
+    ? payload.data
+    : payload;
+  const shortTerm = Array.isArray(data?.shortTermCandidates) ? data.shortTermCandidates : [];
+  if (shortTerm.length) return shortTerm.slice(0, limit);
+
+  const fallbackItems = Array.isArray(data?.items) ? data.items : [];
+  return fallbackItems
+    .filter((item) => item?.symbol && item.included !== false)
+    .filter((item) => item.isOverheated !== true)
+    .sort((a, b) => (toNumber(b.scannerScore) ?? toNumber(b.finalProbabilityScore) ?? 0) - (toNumber(a.scannerScore) ?? toNumber(a.finalProbabilityScore) ?? 0))
+    .slice(0, limit);
+}
+
 async function applyStageAwareAccumulationPage() {
   if (!accumulationRouteActive()) return;
+  if (accumulationPageFilterInFlight) return;
+  removeDisallowedAccumulationSections();
   const cards = Array.from(document.querySelectorAll("article.stock-card"));
   if (!cards.length) return;
-  // TODO: Move this filter upstream into the accumulation route source array so excluded hot names are never rendered, not just hidden after mount.
+  accumulationPageFilterInFlight = true;
 
-  let payload = null;
   try {
-    payload = typeof window.__kbkGetSharedScannerData === "function"
+    const payload = typeof window.__kbkGetSharedScannerData === "function"
       ? await window.__kbkGetSharedScannerData()
       : await fetchJson("/api/scanner");
+
+    const items = scannerPayloadItems(payload, "accumulationCandidates", KBK_ACCUMULATION_RENDER_LIMIT);
+    const itemMap = new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
+    let visibleCount = 0;
+
+    for (const card of cards) {
+      const symbol = String(card.querySelector("h3")?.textContent || "").trim().toUpperCase();
+      const item = itemMap.get(symbol);
+      if (!item || /CHASING_RISK|OVERHEATED/.test(card.textContent || "")) {
+        card.remove();
+        continue;
+      }
+
+      if (!stageAwareAccumulationAllowed(item) || visibleCount >= KBK_ACCUMULATION_RENDER_LIMIT) {
+        card.remove();
+        continue;
+      }
+
+      visibleCount += 1;
+      card.style.display = "";
+      const meta = stageMetaOf(item);
+      const badge = card.querySelector(".accent-badge");
+      if (badge) badge.textContent = meta.stageLabelKo || item.stageLabelKo || meta.stage;
+
+      const note = card.querySelector(".stock-note");
+      if (note) {
+        note.dataset.kbkOriginalNote = note.dataset.kbkOriginalNote || note.textContent || "";
+        note.textContent = meta.riskLabelKo && meta.riskLabelKo !== "중립"
+          ? `${meta.riskLabelKo} · ${note.dataset.kbkOriginalNote}`
+          : note.dataset.kbkOriginalNote;
+      }
+    }
+
+    const summaryCards = Array.from(document.querySelectorAll(".accumulation-page .hero-scoreboard .score-card strong"));
+    if (summaryCards[0]) summaryCards[0].textContent = String(visibleCount);
+    removeDisallowedAccumulationSections();
   } catch {
-    return;
+    // Keep the page interactive if the shared scanner payload is unavailable.
+  } finally {
+    accumulationPageFilterInFlight = false;
   }
-
-  const items = Array.isArray(payload?.data?.items) ? payload.data.items : Array.isArray(payload?.items) ? payload.items : [];
-  const itemMap = new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
-  let visibleCount = 0;
-
-  for (const card of cards) {
-    const symbol = String(card.querySelector("h3")?.textContent || "").trim().toUpperCase();
-    const item = itemMap.get(symbol);
-    if (!item) continue;
-
-    if (!stageAwareAccumulationAllowed(item)) {
-      card.style.display = "none";
-      continue;
-    }
-
-    visibleCount += 1;
-    card.style.display = "";
-    const meta = stageMetaOf(item);
-    const badge = card.querySelector(".accent-badge");
-    if (badge) badge.textContent = meta.stageLabelKo || item.stageLabelKo || meta.stage;
-
-    const note = card.querySelector(".stock-note");
-    if (note) {
-      note.dataset.kbkOriginalNote = note.dataset.kbkOriginalNote || note.textContent || "";
-      note.textContent = meta.riskLabelKo && meta.riskLabelKo !== "중립"
-        ? `${meta.riskLabelKo} · ${note.dataset.kbkOriginalNote}`
-        : note.dataset.kbkOriginalNote;
-    }
-  }
-
-  const summaryCards = Array.from(document.querySelectorAll(".accumulation-page .hero-scoreboard .score-card strong"));
-  if (summaryCards[0]) summaryCards[0].textContent = String(visibleCount);
 }
 
 async function applyStageAwareCandidateTable() {
   if (!rootScannerRouteActive()) return;
+  if (candidateTableFilterInFlight) return;
   const table = document.querySelector(".candidate-table");
   if (!table) return;
+  candidateTableFilterInFlight = true;
 
-  let payload = null;
   try {
-    payload = typeof window.__kbkGetSharedScannerData === "function"
+    const payload = typeof window.__kbkGetSharedScannerData === "function"
       ? await window.__kbkGetSharedScannerData()
       : await fetchJson("/api/scanner");
+
+    const items = realtimeCandidateItems(payload, 30);
+    const itemMap = new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
+    if (!itemMap.size) return;
+    const ranking = new Map(items
+      .slice()
+      .sort((a, b) => (toNumber(b.finalSelectionScore) ?? toNumber(b.finalProbabilityScore) ?? 0) - (toNumber(a.finalSelectionScore) ?? toNumber(a.finalProbabilityScore) ?? 0))
+      .map((item, index) => [String(item.symbol).toUpperCase(), index]));
+
+    const rows = Array.from(table.querySelectorAll("tr"));
+    if (rows.length <= 1) return;
+    const headerRow = rows[0];
+    const bodyRows = rows.slice(1);
+
+    for (const row of bodyRows) {
+      const symbol = candidateRowSymbol(row);
+      const item = itemMap.get(symbol);
+      if (!item) {
+        // Realtime candidates are rendered by the main scanner app. Do not remove
+        // unmatched rows here; otherwise a lightweight payload can blank the table.
+        continue;
+      }
+      const meta = stageMetaOf(item);
+      const cells = row.querySelectorAll("td");
+      const scoreCell = cells[cells.length - 2];
+      const statusCell = cells[cells.length - 1];
+
+      row.dataset.kbkRank = String(ranking.get(symbol) ?? 9999);
+      row.dataset.kbkStage = meta.stage;
+
+      if (scoreCell && toNumber(item.finalSelectionScore) !== null) {
+        scoreCell.textContent = String(Math.round(toNumber(item.finalSelectionScore)));
+      }
+      if (statusCell) {
+        statusCell.textContent = meta.isOverheated
+          ? "과열"
+          : meta.isChasingRisk
+            ? "추격 위험"
+            : meta.stageLabelKo || meta.stage;
+        statusCell.title = meta.riskLabelKo || "";
+      }
+    }
+
+    const sortedRows = bodyRows
+      .filter((row) => row.isConnected)
+      .sort((a, b) => Number(a.dataset.kbkRank || 9999) - Number(b.dataset.kbkRank || 9999));
+    sortedRows.forEach((row, index) => {
+      if (index >= 30) return;
+      table.appendChild(row);
+    });
+
+    if (headerRow.parentElement === table) {
+      table.insertBefore(headerRow, table.firstChild);
+    }
   } catch {
-    return;
-  }
-
-  const items = Array.isArray(payload?.data?.items) ? payload.data.items : Array.isArray(payload?.items) ? payload.items : [];
-  const itemMap = new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
-  const ranking = new Map(items
-    .slice()
-    .sort((a, b) => (toNumber(b.finalSelectionScore) ?? toNumber(b.finalProbabilityScore) ?? 0) - (toNumber(a.finalSelectionScore) ?? toNumber(a.finalProbabilityScore) ?? 0))
-    .map((item, index) => [String(item.symbol).toUpperCase(), index]));
-
-  const rows = Array.from(table.querySelectorAll("tr"));
-  if (rows.length <= 1) return;
-  const headerRow = rows[0];
-  const bodyRows = rows.slice(1);
-
-  for (const row of bodyRows) {
-    const symbol = candidateRowSymbol(row);
-    const item = itemMap.get(symbol);
-    if (!item) continue;
-    const meta = stageMetaOf(item);
-    const cells = row.querySelectorAll("td");
-    const scoreCell = cells[cells.length - 2];
-    const statusCell = cells[cells.length - 1];
-
-    row.dataset.kbkRank = String(ranking.get(symbol) ?? 9999);
-    row.dataset.kbkStage = meta.stage;
-
-    if (scoreCell && toNumber(item.finalSelectionScore) !== null) {
-      scoreCell.textContent = String(Math.round(toNumber(item.finalSelectionScore)));
-    }
-    if (statusCell) {
-      statusCell.textContent = meta.isOverheated
-        ? "과열"
-        : meta.isChasingRisk
-          ? "추격 위험"
-          : meta.stageLabelKo || meta.stage;
-      statusCell.title = meta.riskLabelKo || "";
-    }
-  }
-
-  bodyRows
-    .sort((a, b) => Number(a.dataset.kbkRank || 9999) - Number(b.dataset.kbkRank || 9999))
-    .forEach((row) => table.appendChild(row));
-
-  if (headerRow.parentElement === table) {
-    table.insertBefore(headerRow, table.firstChild);
+    // A failed refresh should not block interaction with the scanner table.
+  } finally {
+    candidateTableFilterInFlight = false;
   }
 }
 
@@ -2337,8 +2408,7 @@ function boot() {
   clarifyEmptyAccumulation();
   patchFloatingPointText();
   ensureExchangeRateStatus();
-  window.setTimeout(applyStageAwareAccumulationPage, 200);
-  window.setTimeout(applyStageAwareCandidateTable, 350);
+  window.setTimeout(scheduleStageAwareRefresh, 200);
 
   const observer = new MutationObserver(() => {
     patchFloatingPointText();
@@ -2348,8 +2418,7 @@ function boot() {
     if (document.getElementById("exchange-rate") && !window.__kbkExchangeState) {
       ensureExchangeRateStatus();
     }
-    applyStageAwareAccumulationPage();
-    applyStageAwareCandidateTable();
+    scheduleStageAwareRefresh();
   });
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
   window.addEventListener("popstate", handleRoute);

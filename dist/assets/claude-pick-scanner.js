@@ -7,6 +7,8 @@
 (function() {
   'use strict';
 
+  const CLAUDE_PICK_SOURCE_LIMIT = 50;
+
   function num(value) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
@@ -25,6 +27,15 @@
     const price = num(usd);
     if (price === null) return '-';
     return `$${price.toFixed(price >= 10 ? 2 : 4)}`;
+  }
+
+  function claudePickStageAllowed(item) {
+    const stage = String(item.stage || '').toUpperCase().replace(/-/g, '_');
+    const changePct = num(item.changePercent) ?? 0;
+    return changePct <= 10
+      && item.isChasingRisk !== true
+      && item.isOverheated !== true
+      && ['ACCUMULATION', 'PRE_SURGE', 'SURGE_PRECURSOR', 'SURGE PRECURSOR'].includes(stage);
   }
 
   // ---- 클로드픽 점수 계산 알고리즘 ----
@@ -63,7 +74,7 @@
     else if (changePct >= 50) priceScore = 22;
     else if (changePct >= 20) priceScore = 18;
     else if (changePct >= 5) priceScore = 14;
-    const stageScore = stage === 'PRE-SURGE' ? 18 : stage === 'EARLY SURGE' ? 13 : stage === 'ACCUMULATION' ? 10 : 0;
+    const stageScore = stage === 'PRE-SURGE' || stage === 'PRE_SURGE' ? 18 : stage === 'EARLY SURGE' ? 13 : stage === 'ACCUMULATION' ? 10 : 0;
     const vwapScore = aboveVwap ? 8 : nearVwap ? 4 : 0;
     const trendScore = trend === 'up' ? 8 : 0;
     const accelerationBonus = volumeAcceleration >= 70 ? 10 : volumeAcceleration >= 55 ? 6 : 0;
@@ -95,7 +106,9 @@
     const krw = usdKrw || 1500;
 
     const scored = items
+      .slice(0, CLAUDE_PICK_SOURCE_LIMIT)
       .filter(item => item.symbol && item.included !== false)
+      .filter(claudePickStageAllowed)
       .map(item => {
         const sc = calcClaudeScore(item);
         const rvol = item.relativeVolume ?? item.volumeRatio ?? 0;
@@ -305,7 +318,7 @@
         fetch('/api/exchange', { cache: 'no-store' }).then(r => r.json()).catch(() => null)
       ]);
 
-      const items = scanRes?.data?.items ?? [];
+      const items = scanRes?.data?.accumulationCandidates ?? scanRes?.data?.items ?? scanRes?.items ?? [];
       const usdKrw = exRes?.data?.usdKrw ?? exRes?.data ?? 1500;
 
       panelEl.innerHTML = buildClaudePickPanel(items, usdKrw);
