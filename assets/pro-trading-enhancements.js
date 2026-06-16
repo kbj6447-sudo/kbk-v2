@@ -1086,6 +1086,24 @@ function ensureStyles() {
     .kbk-pro-fast-hold{background:#fffbeb;border-color:#fbbf24}
     .kbk-pro-fast-hold span,.kbk-pro-fast-hold strong{color:#d97706}
     .kbk-pro-alert-box{background:#ecfeff;border:1px solid rgba(14,116,144,.24);border-radius:12px;padding:12px 14px;color:#155e75;margin:12px 0;font-weight:800;line-height:1.5}
+    .kbk-pre-move-section{display:grid;gap:12px;margin:12px 0 16px}
+    .kbk-pre-move-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;background:linear-gradient(135deg,#ecfeff,#eff6ff);border:1px solid rgba(37,99,235,.14);border-radius:16px;padding:16px 18px}
+    .kbk-pre-move-head h3{margin:4px 0 6px;color:#0f172a;font-size:1.2rem}
+    .kbk-pre-move-head p{margin:0;color:#475569;font-size:.84rem;line-height:1.5}
+    .kbk-pre-move-count{display:inline-flex;align-items:center;justify-content:center;min-width:72px;background:#0f172a;color:#fff;border-radius:999px;padding:10px 14px;font-size:1.15rem;font-weight:950}
+    .kbk-pre-move-grid{display:grid;grid-template-columns:repeat(3,minmax(240px,1fr));gap:10px}
+    .kbk-pre-move-card{background:#fff;border:1px solid rgba(15,23,42,.12);border-radius:14px;padding:14px;display:grid;gap:10px;box-shadow:0 10px 28px rgba(15,23,42,.08)}
+    .kbk-pre-move-card h4{margin:0;color:#0f172a;font-size:1.15rem}
+    .kbk-pre-move-card p{margin:0;color:#475569;font-size:.84rem}
+    .kbk-pre-move-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+    .kbk-pre-move-metrics div{background:#f8fafc;border-radius:10px;padding:8px 9px}
+    .kbk-pre-move-metrics span{display:block;color:#64748b;font-size:.74rem;font-weight:800}
+    .kbk-pre-move-metrics b{display:block;color:#0f172a;margin-top:4px}
+    .kbk-pre-move-badges{display:flex;flex-wrap:wrap;gap:6px}
+    .kbk-pre-move-badge{display:inline-flex;align-items:center;border-radius:999px;padding:5px 8px;font-size:.72rem;font-weight:900;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe}
+    .kbk-pre-move-badge.stage{background:#ecfdf5;color:#047857;border-color:#86efac}
+    .kbk-pre-move-badge.risk{background:#fff7ed;color:#c2410c;border-color:#fed7aa}
+    .kbk-pre-move-reasons{margin:0;padding-left:18px;color:#334155;font-size:.8rem;font-weight:800;line-height:1.5}
     #kbk-pro-top-picks{display:grid;gap:12px}
     .kbk-pro-top-card{background:#fff;border:1px solid rgba(15,23,42,.12);border-radius:12px;padding:13px;display:grid;gap:9px;box-shadow:0 10px 28px rgba(15,23,42,.08)}
     .kbk-pro-top-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
@@ -1146,6 +1164,7 @@ function ensureStyles() {
       .stock-grid,.weight-guide,.hero-scoreboard,.metric-grid{grid-template-columns:1fr!important}
       .terminal-layout{grid-template-columns:1fr!important}
       .candidate-table,.signal-table,.debug-table{min-width:760px!important}
+      .kbk-pre-move-grid{grid-template-columns:1fr}
       .kbk-pro-top-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
       .kbk-pro-top-score{font-size:1.65rem}
       .kbk-pro-top-meta{grid-template-columns:1fr}
@@ -1557,6 +1576,9 @@ window.__kbkRenderTopPicksOnly = renderTopPicksOnly;
 
 function handleRoute() {
   const path = window.location.pathname;
+  if (!accumulationRouteActive()) {
+    removePreMoveSection();
+  }
   if (path === "/top-picks" || window.location.hash === "#top-picks") {
     if (!suppressTopPicksHashRoute) {
       renderTopPicksOnly("initial");
@@ -2203,6 +2225,87 @@ function accumulationRouteActive() {
   return path === "/scanner/accumulation" || path === "/accumulation";
 }
 
+function preMoveCandidatesFromPayload(payload) {
+  const raw = Array.isArray(payload?.data?.preMoveCandidates)
+    ? payload.data.preMoveCandidates
+    : Array.isArray(payload?.preMoveCandidates)
+      ? payload.preMoveCandidates
+      : [];
+  return raw
+    .filter((item) => item?.symbol)
+    .filter((item) => toNumber(item.changePercent) === null || toNumber(item.changePercent) <= 10)
+    .filter((item) => item?.isChasingRisk !== true && item?.isOverheated !== true)
+    .filter((item) => !["CHASING_RISK", "OVERHEATED"].includes(String(item?.stage || "")))
+    .slice(0, 30);
+}
+
+function removePreMoveSection() {
+  document.getElementById("kbk-pre-move-section")?.remove();
+}
+
+function renderPreMoveSection(payload) {
+  if (!accumulationRouteActive()) {
+    removePreMoveSection();
+    return;
+  }
+
+  const hero = document.querySelector(".accumulation-hero");
+  const host = document.querySelector(".accumulation-page")
+    || hero?.parentElement
+    || document.querySelector(".page-panel:not(.hidden-panel)");
+  if (!host) return;
+
+  let section = document.getElementById("kbk-pre-move-section");
+  if (!section) {
+    section = document.createElement("section");
+    section.id = "kbk-pre-move-section";
+    section.className = "kbk-pre-move-section";
+    if (hero?.parentElement) {
+      hero.insertAdjacentElement("afterend", section);
+    } else {
+      host.prepend(section);
+    }
+  }
+
+  const candidates = preMoveCandidatesFromPayload(payload);
+  section.innerHTML = `
+    <div class="kbk-pre-move-head">
+      <div>
+        <p class="section-kicker">Pre-Move Scanner</p>
+        <h3>오르기 전 후보</h3>
+        <p>상승률은 아직 낮고 거래량만 먼저 예열되는 종목을 우선으로 정리했습니다. 과열/추격 위험 종목은 여기서 제외합니다.</p>
+      </div>
+      <span class="kbk-pre-move-count">${candidates.length}</span>
+    </div>
+    ${candidates.length ? `
+      <div class="kbk-pre-move-grid">
+        ${candidates.map((item) => `
+          <article class="kbk-pre-move-card" data-symbol="${textEscape(item.symbol)}">
+            <div>
+              <h4>${textEscape(item.symbol)}</h4>
+              <p>${textEscape(item.name || item.symbol)}</p>
+            </div>
+            <div class="kbk-pre-move-badges">
+              <span class="kbk-pre-move-badge stage">${textEscape(item.preMoveLabelKo || "오르기 전 후보")}</span>
+              <span class="kbk-pre-move-badge">${textEscape(item.stageLabelKo || item.stage || "중립")}</span>
+              <span class="kbk-pre-move-badge risk">${textEscape(item.riskLabelKo || "중립")}</span>
+            </div>
+            <div class="kbk-pre-move-metrics">
+              <div><span>현재가</span><b>${toNumber(item.price) !== null ? wonMoney(item.price) : "-"}</b></div>
+              <div><span>등락률</span><b>${toNumber(item.changePercent) !== null ? pct(item.changePercent) : "-"}</b></div>
+              <div><span>상대거래량</span><b>${toNumber(item.relativeVolume) !== null ? `${Number(item.relativeVolume).toFixed(1)}배` : "-"}</b></div>
+              <div><span>Pre-Move 점수</span><b>${toNumber(item.preMoveScore) !== null ? `${Math.round(Number(item.preMoveScore))}점` : "-"}</b></div>
+            </div>
+            <ul class="kbk-pre-move-reasons">
+              ${(Array.isArray(item.preMoveReasons) ? item.preMoveReasons : []).slice(0, 3).map((reason) => `<li>${textEscape(reason)}</li>`).join("")}
+            </ul>
+          </article>
+        `).join("")}
+      </div>
+    ` : `<section class="kbk-empty-note">현재 조건을 통과한 오르기 전 후보가 없습니다. 잠시 후 다시 확인해 주세요.</section>`}
+  `;
+}
+
 function stageAwareAccumulationAllowed(item) {
   if (!item) return false;
   const stageMeta = stageMetaOf(item);
@@ -2223,8 +2326,6 @@ function candidateRowSymbol(row) {
 
 async function applyStageAwareAccumulationPage() {
   if (!accumulationRouteActive()) return;
-  const cards = Array.from(document.querySelectorAll("article.stock-card"));
-  if (!cards.length) return;
   // TODO: Move this filter upstream into the accumulation route source array so excluded hot names are never rendered, not just hidden after mount.
 
   let payload = null;
@@ -2236,6 +2337,10 @@ async function applyStageAwareAccumulationPage() {
     return;
   }
 
+  renderPreMoveSection(payload);
+
+  const cards = Array.from(document.querySelectorAll("article.stock-card"));
+  if (!cards.length) return;
   const items = Array.isArray(payload?.data?.items) ? payload.data.items : Array.isArray(payload?.items) ? payload.items : [];
   const itemMap = new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
   let visibleCount = 0;

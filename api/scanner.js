@@ -1,6 +1,7 @@
 const quoteHandler = require("./quote");
 const historyHandler = require("./history");
 const ENRICH_SYMBOL_LIMIT = 30;
+const PRE_MOVE_CANDIDATE_LIMIT = 30;
 const SCANNER_SUCCESS_TTL_MS = 120 * 1000;
 const SCANNER_FAILURE_TTL_MS = 30 * 1000;
 let scannerSuccessCache = null;
@@ -803,6 +804,241 @@ function evaluateTopPickForSnapshot(item) {
     statusBadge: selectionScores.statusBadge,
     changePenalty,
   };
+}
+
+function preMoveLabelKo(stage) {
+  const labels = {
+    COMPRESSION_BUILD: "가격 압축 예열",
+    VWAP_RECLAIM: "VWAP 회복 예열",
+    PRE_MOVE_READY: "급등 전 준비",
+    QUIET_ACCUMULATION: "조용한 매집",
+  };
+  return labels[stage] || "오르기 전 후보";
+}
+
+function scannerItemPrice(item) {
+  return num(item?.price)
+    ?? num(item?.normalizedLivePriceUsd)
+    ?? num(item?.preMarketPrice)
+    ?? num(item?.postMarketPrice)
+    ?? num(item?.regularMarketPrice);
+}
+
+function scannerItemVolume(item) {
+  return Math.max(
+    num(item?.volume) ?? 0,
+    num(item?.preMarketVolume) ?? 0,
+    num(item?.regularMarketVolume) ?? 0,
+    num(item?.postMarketVolume) ?? 0,
+  );
+}
+
+function scannerItemRelativeVolume(item) {
+  return num(item?.relativeVolume) ?? num(item?.volumeRatio) ?? num(item?.rvol);
+}
+
+function scannerItemVwap(item) {
+  return num(item?.vwap) ?? num(item?.technical?.vwap);
+}
+
+function vwapDistancePercent(item) {
+  const price = scannerItemPrice(item);
+  const vwap = scannerItemVwap(item);
+  if (price === null || vwap === null || vwap <= 0) return null;
+  return ((price - vwap) / vwap) * 100;
+}
+
+function compressionSignalScore(item) {
+  const direct = num(item?.compressionScore)
+    ?? num(item?.boxCompression)
+    ?? num(item?.volatilityContraction)
+    ?? num(item?.technical?.compressionScore)
+    ?? num(item?.technical?.boxCompression)
+    ?? num(item?.technical?.volatilityContraction);
+  if (direct !== null) return clamp(direct);
+
+  const price = scannerItemPrice(item);
+  const dayHigh = num(item?.dayHigh) ?? num(item?.regularMarketDayHigh);
+  const dayLow = num(item?.dayLow) ?? num(item?.regularMarketDayLow);
+  if (price !== null && dayHigh !== null && dayLow !== null && price > 0 && dayHigh >= dayLow) {
+    const rangePercent = ((dayHigh - dayLow) / price) * 100;
+    if (rangePercent <= 3) return 88;
+    if (rangePercent <= 5) return 76;
+    if (rangePercent <= 8) return 62;
+    if (rangePercent <= 12) return 48;
+    return 34;
+  }
+
+  return 50;
+}
+
+function higherLowSignalScore(item) {
+  return clamp(
+    num(item?.higherLowScore)
+    ?? num(item?.technical?.higherLowScore)
+    ?? 50,
+  );
+}
+
+function preMovePriceScore(change) {
+  if (change <= 0) return 23;
+  if (change <= 1.5) return 25;
+  if (change <= 3) return 22;
+  if (change <= 5) return 16;
+  if (change <= 8) return 10;
+  return 0;
+}
+
+function preMoveVolumeWarmupScore(relativeVolume) {
+  if (relativeVolume < 1.2) return 0;
+  if (relativeVolume <= 1.8) return 18;
+  if (relativeVolume <= 2.8) return 25;
+  if (relativeVolume <= 4) return 22;
+  if (relativeVolume <= 6) return 14;
+  if (relativeVolume <= 8) return 6;
+  return 0;
+}
+
+function preMoveVwapScore(item, distancePercent) {
+  const state = String(item?.vwapState ?? item?.technical?.vwapState ?? "").toLowerCase();
+  const aboveVwap = item?.aboveVwap === true || state === "above" || (distancePercent !== null && distancePercent >= 0);
+  const nearVwap = state === "near" || (distancePercent !== null && distancePercent >= -2 && distancePercent <= 3);
+  const reclaimScore = num(item?.vwapReclaimScore) ?? num(item?.technical?.vwapReclaimScore) ?? 0;
+  if (aboveVwap && nearVwap) return 20;
+  if (nearVwap || reclaimScore >= 65) return 18;
+  if (aboveVwap) return 15;
+  if (distancePercent !== null && distancePercent >= -3 && distancePercent <= 4) return 12;
+  return 5;
+}
+
+function preMoveStageOf(item, change, relativeVolume, compressionScore, distancePercent) {
+  const state = String(item?.vwapState ?? item?.technical?.vwapState ?? "").toLowerCase();
+  const aboveVwap = item?.aboveVwap === true || state === "above" || (distancePercent !== null && distancePercent >= 0);
+  const nearVwap = state === "near" || (distancePercent !== null && distancePercent >= -2 && distancePercent <= 3);
+  if (change <= 3 && compressionScore >= 68) return "COMPRESSION_BUILD";
+  if (nearVwap || aboveVwap || (num(item?.vwapReclaimScore) ?? num(item?.technical?.vwapReclaimScore) ?? 0) >= 60) {
+    return "VWAP_RECLAIM";
+  }
+  if (relativeVolume >= 1.5 && relativeVolume <= 4 && change <= 5) return "PRE_MOVE_READY";
+  return "QUIET_ACCUMULATION";
+}
+
+function buildPreMoveReasons(item, metrics = {}) {
+  const reasons = [];
+  const change = num(metrics.changePercent) ?? 0;
+  const relativeVolume = num(metrics.relativeVolume) ?? 0;
+  const compressionScore = num(metrics.compressionScore) ?? 0;
+  const higherLowScore = num(metrics.higherLowScore) ?? 0;
+  const distancePercent = num(metrics.vwapDistancePercent);
+  const stage = String(metrics.preMoveStage || "");
+
+  if (change <= 3) reasons.push(`상승률 ${change.toFixed(1)}%로 아직 초기 구간`);
+  else reasons.push(`상승률 ${change.toFixed(1)}%로 과열 전 구간 유지`);
+
+  if (relativeVolume >= 1.2) reasons.push(`상대거래량 ${relativeVolume.toFixed(1)}배로 거래량 예열`);
+  if (stage === "COMPRESSION_BUILD" || compressionScore >= 68) reasons.push(`압축 점수 ${Math.round(compressionScore)}점으로 박스권 응축`);
+  if (stage === "VWAP_RECLAIM" || (distancePercent !== null && distancePercent >= -2 && distancePercent <= 3)) {
+    reasons.push(distancePercent !== null ? `VWAP 대비 ${distancePercent >= 0 ? "+" : ""}${distancePercent.toFixed(1)}% 구간` : "VWAP 근처에서 회복 시도");
+  }
+  if (higherLowScore >= 60) reasons.push(`Higher Low ${Math.round(higherLowScore)}점`);
+
+  return reasons.slice(0, 3);
+}
+
+function buildPreMoveCandidate(item) {
+  if (!item || !item.symbol) return null;
+
+  const change = num(item.changePercent) ?? num(item.preMarketChangePercent);
+  const price = scannerItemPrice(item);
+  const volume = scannerItemVolume(item);
+  const relativeVolume = scannerItemRelativeVolume(item);
+  const stage = String(item.stage || "");
+  const riskScore = num(item.riskScore) ?? 50;
+
+  if (change === null || price === null || price <= 0) return null;
+  if (!Number.isFinite(volume) || volume <= 0) return null;
+  if (relativeVolume === null || !Number.isFinite(relativeVolume)) return null;
+  if (change < -3 || change > 8) return null;
+  if (change > 10) return null;
+  if (relativeVolume < 1.2 || relativeVolume > 6) return null;
+  if (item.isOverheated === true || item.isChasingRisk === true) return null;
+  if (stage === "OVERHEATED" || stage === "CHASING_RISK") return null;
+
+  const allowedStage = stage === "PRE_SURGE" || stage === "ACCUMULATION" || stage === "NEUTRAL";
+  if (!allowedStage) return null;
+  if (stage === "NEUTRAL" && (num(item.scannerScore) ?? 0) < 45) return null;
+
+  const distancePercent = vwapDistancePercent(item);
+  const compressionScore = compressionSignalScore(item);
+  const higherLowScore = higherLowSignalScore(item);
+  const priceScore = preMovePriceScore(change);
+  const volumeScore = preMoveVolumeWarmupScore(relativeVolume);
+  const vwapScore = preMoveVwapScore(item, distancePercent);
+  const compressionPoints = Math.round((compressionScore / 100) * 15);
+  const higherLowPoints = Math.round((higherLowScore / 100) * 10);
+  const stageBonus = stage === "PRE_SURGE" ? 6 : stage === "ACCUMULATION" ? 4 : 2;
+  let penalty = 0;
+  if (change > 8) penalty += 15;
+  if (relativeVolume > 8) penalty += 10;
+  if (riskScore >= 80) penalty += 15;
+  else if (riskScore >= 70) penalty += 10;
+  else if (riskScore >= 60) penalty += 5;
+
+  const preMoveScore = Math.round(clamp(
+    priceScore
+      + volumeScore
+      + vwapScore
+      + compressionPoints
+      + higherLowPoints
+      + stageBonus
+      - penalty,
+  ));
+
+  if (preMoveScore < 45) return null;
+
+  const preMoveStage = preMoveStageOf(item, change, relativeVolume, compressionScore, distancePercent);
+  const preMoveLabel = preMoveLabelKo(preMoveStage);
+  const reasons = buildPreMoveReasons(item, {
+    changePercent: change,
+    relativeVolume,
+    compressionScore,
+    higherLowScore,
+    vwapDistancePercent: distancePercent,
+    preMoveStage,
+  });
+
+  return {
+    symbol: item.symbol,
+    name: item.name || item.symbol,
+    price,
+    changePercent: change,
+    volume,
+    relativeVolume,
+    stage,
+    stageLabelKo: item.stageLabelKo || stageLabelKo(stage),
+    riskLabelKo: item.riskLabelKo || riskLabelKo(stage),
+    preMoveScore,
+    preMoveStage,
+    preMoveLabelKo: preMoveLabel,
+    preMoveReasons: reasons,
+    scannerScore: num(item.scannerScore) ?? 0,
+    finalSelectionScore: num(item.finalSelectionScore) ?? 0,
+    isPreSurgeCandidate: item.isPreSurgeCandidate === true,
+    isChasingRisk: item.isChasingRisk === true,
+    isOverheated: item.isOverheated === true,
+  };
+}
+
+function buildPreMoveCandidates(items = []) {
+  return items
+    .map(buildPreMoveCandidate)
+    .filter(Boolean)
+    .sort((a, b) => (num(b.preMoveScore) ?? 0) - (num(a.preMoveScore) ?? 0)
+      || (num(b.scannerScore) ?? 0) - (num(a.scannerScore) ?? 0)
+      || (num(b.finalSelectionScore) ?? 0) - (num(a.finalSelectionScore) ?? 0)
+      || (num(a.changePercent) ?? 0) - (num(b.changePercent) ?? 0)
+      || (num(a.relativeVolume) ?? 0) - (num(b.relativeVolume) ?? 0))
+    .slice(0, PRE_MOVE_CANDIDATE_LIMIT);
 }
 
 function buildVwapEvaluations(bars, lookback = 30) {
@@ -2059,6 +2295,8 @@ function sendCachedScannerResponse(res, status, payload, cacheState) {
 async function buildScannerResponse(req) {
   const requestStartedAt = Date.now();
   const headers = req?.headers || {};
+  const requestUrl = new URL(req?.url || "/api/scanner", "http://localhost");
+  const includeDebug = requestUrl.searchParams.get("debug") === "1";
   const requestId = headerValue(headers, "x-request-id") || makeRequestId("scanner");
   console.log(`[SCANNER] start requestId=${requestId}`);
   try {
@@ -2284,9 +2522,11 @@ async function buildScannerResponse(req) {
             localHistorySnapshot?.historySource === "kis-daymarket-bars" ? "kis-local-history" : null,
             rankAuxiliaryScore > 0 ? "common-signal-rank-boost" : null,
           ].filter(Boolean))],
-          debugQuoteSource,
-          debugHistorySource,
-          debugFallbackReason: debugFallback,
+          ...(includeDebug ? {
+            debugQuoteSource,
+            debugHistorySource,
+            debugFallbackReason: debugFallback,
+          } : {}),
           selectionReasons: [
             ...(Array.isArray(normalizedItem.selectionReasons) ? normalizedItem.selectionReasons : []),
             rankAuxiliaryScore > 0 ? `Common signal boost +${rankAuxiliaryScore}` : null,
@@ -2312,6 +2552,8 @@ async function buildScannerResponse(req) {
         requestId,
         items: payload.data.items.length,
       });
+
+      payload.data.preMoveCandidates = buildPreMoveCandidates(payload.data.items);
     }
     logScannerStep("completed", requestStartedAt, {
       requestId,

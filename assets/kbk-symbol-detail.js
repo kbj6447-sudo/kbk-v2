@@ -57,7 +57,7 @@ function usdText(value) {
   return `$${n.toFixed(n >= 10 ? 2 : 4)}`;
 }
 
-function levelText(value, fallback = "?곗씠??遺議?) {
+function levelText(value, fallback = "데이터 부족") {
   const n = positiveNum(value);
   return n === null ? fallback : usdText(n);
 }
@@ -65,7 +65,7 @@ function levelText(value, fallback = "?곗씠??遺議?) {
 function krwText(value) {
   const n = num(value);
   if (n === null) return "-";
-  return `${fmt.format(Math.round(n * usdKrw))}??;
+  return `${fmt.format(Math.round(n * usdKrw))}원`;
 }
 
 function pricePairText(value) {
@@ -150,12 +150,12 @@ function vwapValue(quote) {
 
 function vwapState(quote) {
   const state = String(quote?.technical?.vwapState ?? quote?.vwapState ?? "").toLowerCase();
-  if (state === "above" || quote?.aboveVwap === true) return "VWAP ??;
-  if (state === "below" || quote?.aboveVwap === false) return "VWAP ?꾨옒";
+  if (state === "above" || quote?.aboveVwap === true) return "VWAP 위";
+  if (state === "below" || quote?.aboveVwap === false) return "VWAP 아래";
   const price = priceUsd(quote);
   const vwap = vwapValue(quote);
-  if (price !== null && vwap !== null) return price >= vwap ? "VWAP ?? : "VWAP ?꾨옒";
-  return "VWAP ?湲?;
+  if (price !== null && vwap !== null) return price >= vwap ? "VWAP 위" : "VWAP 아래";
+  return "VWAP 대기";
 }
 
 function trendLabel(quote) {
@@ -341,7 +341,7 @@ function localReSurgeSetupScore(bars, higherLowScore, vwapHoldScore, vwapReclaim
 
 function higherLowLabel(score) {
   const value = num(score);
-  if (value === null) return "?곗씠??遺議?;
+  if (value === null) return "데이터 부족";
   if (value >= 90) return "媛뺥븿";
   if (value >= 70) return "蹂댄넻";
   if (value >= 40) return "以묐┰";
@@ -350,15 +350,15 @@ function higherLowLabel(score) {
 
 function vwapHoldText(minutes) {
   const value = num(minutes);
-  return value === null ? "?곗씠??遺議? : `${Math.round(value)}遺?;
+  return value === null ? "데이터 부족" : `${Math.round(value)}분`;
 }
 
 function strengthLabel(score) {
   const value = num(score);
-  if (value === null) return "?곗씠??遺議?;
+  if (value === null) return "데이터 부족";
   if (value >= 90) return "媛뺥븿";
   if (value >= 70) return "?묓샇";
-  if (value >= 40) return "愿李?;
+  if (value >= 40) return "관찰";
   return "?쏀븿";
 }
 
@@ -387,7 +387,7 @@ function analyzeSignal(quote, bars) {
   const vwapReclaimScore = num(quote?.vwapReclaimScore) ?? localVwapReclaimScore(bars, vwapHoldMinutes);
   const reSurgeSetupScore = num(quote?.reSurgeSetupScore) ?? localReSurgeSetupScore(bars, higherLowScore, vwapHoldScore, vwapReclaimScore);
 
-  let action = "愿李????뚮┝ ?湲?;
+  let action = "관찰 후 알림 대기";
   let tone = "neutral";
   let reason = "嫄곕옒?됯낵 媛寃?援ъ“??媛먯떆??留뚰븯吏留? ?ㅼ젣 吏꾩엯 ?꾩뿉???뚮┝ ???ъ?吏? VWAP 諛섏쓳???ㅼ떆 ?뺤씤?댁빞 ?⑸땲??";
 
@@ -395,12 +395,12 @@ function analyzeSignal(quote, bars) {
     action = "?좉퇋 吏꾩엯 由ъ뒪???믪쓬";
     tone = "danger";
     reason = "?뱀씪 ?곸듅瑜??먮뒗 由ъ뒪???먯닔媛 ?믪븘 異붽꺽 留ㅼ닔蹂대떎 ?뚮┝怨?吏吏 ?뺤씤???곗꽑?낅땲??";
-  } else if (trend === "?곸듅" && vwap === "VWAP ?? && probability >= 65 && risk < 65) {
+  } else if (trend === "?곸듅" && vwap === "VWAP 위" && probability >= 65 && risk < 65) {
     action = "?⑦? 愿???꾨낫";
     tone = "strong";
     reason = "?곸듅 ?먮쫫怨?VWAP ?곗쐞媛 媛숈씠 ?≫? ?덉뼱, 吏곸쟾 怨좎젏 ?뚰뙆 ?먮뒗 吏㏃? ?뚮┝ ???ъ긽?뱀쓣 ?뺤씤???꾨낫?낅땲??";
-  } else if (vwap === "VWAP ?꾨옒") {
-    action = "VWAP ?뚮났 ?湲?;
+  } else if (vwap === "VWAP 아래") {
+    action = "VWAP 회복 대기";
     tone = "wait";
     reason = "?꾩옱??VWAP ?꾨옒?쇱꽌 諛붾줈 ?곕씪媛湲곕낫???뚮났 ???좎??섎뒗吏 蹂대뒗 履쎌씠 ?덉쟾?⑸땲??";
   } else if (pattern >= 70 && probability >= 55) {
@@ -409,7 +409,7 @@ function analyzeSignal(quote, bars) {
     reason = "?좎궗 湲됰벑 ?⑦꽩怨??뺣쪧 ?먯닔???댁븘 ?덉쑝?? 泥닿껐 媛뺣룄? 諛뺤뒪沅??뚰뙆瑜?異붽?濡??뺤씤?댁빞 ?⑸땲??";
   }
 
-  const position = closePosition === null ? "?꾩튂 ?뺤씤 以? : closePosition >= 75 ? "?곷떒沅? : closePosition >= 45 ? "諛뺤뒪沅?以묒븰" : "?섎떒沅?;
+  const position = closePosition === null ? "위치 확인 중" : closePosition >= 75 ? "상단권" : closePosition >= 45 ? "박스권 중앙" : "하단권";
   const stopLine = support !== null ? support * 0.985 : null;
   const entryBase = resistance ?? price;
   const entryLine = entryBase !== null ? entryBase * (resistance !== null ? 1.002 : 1) : null;
@@ -496,7 +496,7 @@ function chartSvg(bars, signal) {
       <path class="kbk-chart-area" d="${area}"></path>
       <path class="kbk-chart-line" d="${path}"></path>
       ${level(signal.support, "kbk-line-support", "吏吏")}
-      ${level(signal.resistance, "kbk-line-resistance", "???)}
+      ${level(signal.resistance, "kbk-line-resistance", "저항")}
       ${level(vwapValue(lastQuote), "kbk-line-vwap", "VWAP")}
     </svg>
   `;
@@ -506,8 +506,8 @@ function detailHtml(quote, bars, loading = false) {
   const signal = analyzeSignal(quote, bars);
   const price = signal.price;
   const krw = pricePairText(price);
-  const scoreText = signal.probability === null ? "怨꾩궛以? : Math.round(signal.probability);
-  const badge = signal.tone === "danger" ? "?꾪뿕" : signal.tone === "strong" ? "愿?? : signal.tone === "wait" ? "?湲? : "媛먯떆";
+  const scoreText = signal.probability === null ? "계산중" : Math.round(signal.probability);
+  const badge = signal.tone === "danger" ? "위험" : signal.tone === "strong" ? "관심" : signal.tone === "wait" ? "대기" : "감시";
 
   return `
     <div class="kbk-detail-head">
@@ -541,14 +541,14 @@ function detailHtml(quote, bars, loading = false) {
       </div>
       <div class="kbk-signal-grid">
         <div><span>?꾩옱 ?꾩튂</span><strong>${esc(signal.position)}</strong><small>諛뺤뒪沅????꾩튂</small></div>
-        <div><span>Higher Lows</span><strong>${esc(signal.higherLowLabel)}</strong><small>${Math.round(signal.higherLowScore)}??/small></div>
-        <div><span>VWAP ?좎?</span><strong>${esc(vwapHoldText(signal.vwapHoldMinutes))}</strong><small>${Math.round(signal.vwapHoldScore)}??/small></div>
-        <div><span>?ъ긽??以鍮꾨룄</span><strong>${Math.round(signal.reSurgeSetupScore)}??/strong><small>${esc(strengthLabel(signal.reSurgeSetupScore))}</small></div>
-        <div><span>諛뺤뒪 ?뺤텞瑜?/span><strong>${Math.round(signal.compressionScore)}??/strong><small>?뚰뙆 ???뺤텞</small></div>
-        <div><span>VWAP ?ы깉??/span><strong>${esc(strengthLabel(signal.vwapReclaimScore))}</strong><small>${Math.round(signal.vwapReclaimScore)}??/small></div>
-        <div><span>吏꾩엯 ?뺤씤??/span><strong>${levelText(signal.entryLine, "怨꾩궛以?)}</strong><small>?뚰뙆/?ъ?吏 ?뺤씤</small></div>
-        <div><span>?먯젅 湲곗???/span><strong>${levelText(signal.stopLine, "?곗씠??遺議?)}</strong><small>吏吏 ?댄깉 ??二쇱쓽</small></div>
-        <div><span>1李??듭젅 李멸퀬</span><strong>${levelText(signal.profitLine, "怨꾩궛以?)}</strong><small>?④린 +3% 湲곗?</small></div>
+        <div><span>Higher Lows</span><strong>${esc(signal.higherLowLabel)}</strong><small>${Math.round(signal.higherLowScore)}점</small></div>
+        <div><span>VWAP 유지</span><strong>${esc(vwapHoldText(signal.vwapHoldMinutes))}</strong><small>${Math.round(signal.vwapHoldScore)}점</small></div>
+        <div><span>재상승 준비도</span><strong>${Math.round(signal.reSurgeSetupScore)}점</strong><small>${esc(strengthLabel(signal.reSurgeSetupScore))}</small></div>
+        <div><span>박스 압축률</span><strong>${Math.round(signal.compressionScore)}점</strong><small>돌파 전 압축</small></div>
+        <div><span>VWAP 회복</span><strong>${esc(strengthLabel(signal.vwapReclaimScore))}</strong><small>${Math.round(signal.vwapReclaimScore)}점</small></div>
+        <div><span>진입 확인</span><strong>${levelText(signal.entryLine, "계산중")}</strong><small>돌파/지지 확인</small></div>
+        <div><span>아래 기준선</span><strong>${levelText(signal.stopLine, "데이터 부족")}</strong><small>지지 이탈 시 주의</small></div>
+        <div><span>1차 수익 참고</span><strong>${levelText(signal.profitLine, "계산중")}</strong><small>단기 +3% 기준</small></div>
       </div>
       ${chartSvg(bars, signal)}
     </section>
@@ -1023,7 +1023,7 @@ function buildTopPickExplainSections(item, pick, volumeQuality, surgeAcceleratio
     }
   }
 
-  const vwapGood = String(pick?.vwap ?? "").includes("??) || String(pick?.vwap ?? "").includes("洹쇱쿂");
+  const vwapGood = String(pick?.vwap ?? "").includes("위") || String(pick?.vwap ?? "").includes("near") || String(pick?.vwap ?? "").includes("근처");
   const reclaim = itemField(item, "vwapReclaimScore") ?? 50;
   const compression = itemField(item, "compressionScore") ?? 50;
   if (vwapGood) technicalLines.push("VWAP ???좎?");
@@ -1160,7 +1160,7 @@ function scoreTopPick(item) {
   const sourceTags = item?.sourceTags ?? [];
   const storyTags = item?.storyTags ?? [];
 
-  const vwapGood = vwap.includes("??) || vwap.includes("near") || vwap.includes("洹쇱쿂");
+  const vwapGood = vwap.includes("위") || vwap.includes("near") || vwap.includes("근처");
   const trendGood = trend === "?곸듅";
   const setupBias = setupBiasOf(item, price, change, rvol, vwapGood, trendGood);
   const stageMeta = stageMetaOf(item, change);
@@ -1229,8 +1229,8 @@ function scoreTopPick(item) {
   else if (chaseRisk >= 80) verdict = "怨쇱뿴 二쇱쓽 ?꾨낫";
 
   if (setupBias.overheated || setupBias.highFailed || setupBias.extremeRvolWeak || chaseRisk >= 82) verdict = "吏꾩엯 湲덉?";
-  else if (finalScore >= 76 && setupBias.strongEarlySignal && chaseRisk < 68) verdict = "留ㅼ닔 媛??;
-  else verdict = "愿李?;
+  else if (finalScore >= 76 && setupBias.strongEarlySignal && chaseRisk < 68) verdict = "매수 가능";
+  else verdict = "관찰";
 
   const reasons = [];
   const verdictReasonCodes = [];
@@ -1660,7 +1660,7 @@ async function loadTopPicks() {
       .filter((item) => item?.symbol && item.included !== false)
       .map(scoreTopPick)
       .filter((pick) => pick.change >= 3)
-      .filter((pick) => pick.vwap.includes("??) || pick.vwap.includes("洹쇱쿂"))
+      .filter((pick) => pick.vwap.includes("위") || pick.vwap.includes("근처"))
       .filter((pick) => pick.trend === "?곸듅")
       .filter((pick) => pick.volume >= 500_000 || pick.rvol >= 3)
       .filter((pick) => !pick.setupBias?.underDollarLowRvol || pick.setupBias?.strongEarlySignal)
