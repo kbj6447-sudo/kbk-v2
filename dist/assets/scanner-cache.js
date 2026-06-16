@@ -12,6 +12,9 @@
   var SCANNER_CACHE_UPDATED_AT_KEY = "kbk:scanner:lastUpdatedAt";
   var SCANNER_FORCE_UNTIL_KEY = "kbk:scanner:forceUntil";
   var FORCE_REFRESH_LABELS = ["새로고침", "전체 분석", "감시 갱신", "Refresh"];
+  var SCANNER_ITEM_LIMIT = 120;
+  var SCANNER_TOP_PICK_LIMIT = 20;
+  var SCANNER_BUCKET_LIMIT = 30;
   var originalFetch = window.fetch.bind(window);
   var cachedEntry = null;
   var inFlightEntryPromise = null;
@@ -68,6 +71,12 @@
     return method === "GET";
   }
 
+  function isFullScannerRequest(input) {
+    var url = scannerUrl(input);
+    if (!url) return false;
+    return url.searchParams.has("debug") || url.searchParams.has("full");
+  }
+
   function apiKind(input) {
     var url = scannerUrl(input);
     if (!url || url.origin !== window.location.origin) return "";
@@ -107,7 +116,129 @@
     };
   }
 
+  function compactReasons(reasons) {
+    return (Array.isArray(reasons) ? reasons : [])
+      .filter(function validReason(reason) {
+        return typeof reason === "string" && reason.trim();
+      })
+      .map(function trimReason(reason) {
+        return reason.length > 120 ? reason.slice(0, 117) + "..." : reason;
+      })
+      .slice(0, 3);
+  }
+
+  function sanitizeScannerItem(item) {
+    if (!item || typeof item !== "object") return item;
+    return {
+      symbol: item.symbol,
+      name: item.name,
+      price: item.price,
+      changePercent: item.changePercent,
+      volume: item.volume,
+      relativeVolume: item.relativeVolume ?? item.volumeRatio,
+      stage: item.stage,
+      stageLabelKo: item.stageLabelKo,
+      riskLabelKo: item.riskLabelKo,
+      scannerScore: item.scannerScore,
+      finalProbabilityScore: item.finalProbabilityScore,
+      finalSelectionScore: item.finalSelectionScore,
+      marketPrioritySortScore: item.marketPrioritySortScore,
+      changePenalty: item.changePenalty,
+      isPreSurgeCandidate: item.isPreSurgeCandidate,
+      isChasingRisk: item.isChasingRisk,
+      isOverheated: item.isOverheated,
+      selectionReasons: compactReasons(item.selectionReasons),
+      included: item.included,
+      volumeRatio: item.volumeRatio ?? item.relativeVolume,
+      rvol: item.rvol ?? item.relativeVolume ?? item.volumeRatio,
+      preMarketVolume: item.preMarketVolume,
+      regularMarketVolume: item.regularMarketVolume,
+      postMarketVolume: item.postMarketVolume,
+      previousClose: item.previousClose,
+      regularMarketPreviousClose: item.regularMarketPreviousClose,
+      preMarketPrice: item.preMarketPrice,
+      regularMarketPrice: item.regularMarketPrice,
+      postMarketPrice: item.postMarketPrice,
+      priceSource: item.priceSource,
+      volumeSource: item.volumeSource,
+      changeBasis: item.changeBasis,
+      sessionType: item.sessionType,
+      dataReliability: item.dataReliability,
+      dataReliabilityLabel: item.dataReliabilityLabel,
+      riskScore: item.riskScore,
+      surgePrecursorScore: item.surgePrecursorScore,
+      momentumExpansionScore: item.momentumExpansionScore,
+      patternSimilarityScore: item.patternSimilarityScore,
+      chartPatternScore: item.chartPatternScore,
+      patternName: item.patternName,
+      bestPatternName: item.bestPatternName,
+      entrySuitability: item.entrySuitability,
+      topPickFinalScore: item.topPickFinalScore,
+      topPickDisplayFinalScore: item.topPickDisplayFinalScore,
+      topPickChaseRisk: item.topPickChaseRisk,
+      topPickVerdict: item.topPickVerdict,
+      topPickGrade: item.topPickGrade,
+      quantitativeScore: item.quantitativeScore,
+      volumeConfirmationScore: item.volumeConfirmationScore,
+      selectionGroup: item.selectionGroup,
+      statusBadge: item.statusBadge,
+      volumeQualityScore: item.volumeQualityScore,
+      surgeAccelerationScore: item.surgeAccelerationScore,
+      volumeAccelerationScore: item.volumeAccelerationScore,
+      higherLowScore: item.higherLowScore,
+      vwapHoldScore: item.vwapHoldScore,
+      vwapReclaimScore: item.vwapReclaimScore,
+      reSurgeSetupScore: item.reSurgeSetupScore,
+      vwap: item.vwap,
+      vwapState: item.vwapState,
+      aboveVwap: item.aboveVwap,
+      oneMinuteTrend: item.oneMinuteTrend,
+      rsi: item.rsi,
+      dayHigh: item.dayHigh ?? item.regularMarketDayHigh,
+      dayLow: item.dayLow ?? item.regularMarketDayLow,
+      sourceTags: Array.isArray(item.sourceTags) ? item.sourceTags.slice(0, 5) : undefined,
+    };
+  }
+
+  function limitItems(items, limit) {
+    return (Array.isArray(items) ? items : [])
+      .slice(0, limit)
+      .map(sanitizeScannerItem);
+  }
+
+  function normalizeScannerPayload(payload) {
+    if (!payload || typeof payload !== "object") return payload;
+    var data = payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)
+      ? payload.data
+      : null;
+    var items = Array.isArray(data?.items) ? data.items : Array.isArray(payload.items) ? payload.items : [];
+    if (!data && !items.length) return payload;
+    var normalizedData = data ? { ...data } : {};
+    normalizedData.items = limitItems(items, SCANNER_ITEM_LIMIT);
+    if (Array.isArray(data?.topPicks)) normalizedData.topPicks = limitItems(data.topPicks, SCANNER_TOP_PICK_LIMIT);
+    if (Array.isArray(data?.shortTermCandidates)) normalizedData.shortTermCandidates = limitItems(data.shortTermCandidates, SCANNER_BUCKET_LIMIT);
+    if (Array.isArray(data?.underOneCandidates)) normalizedData.underOneCandidates = limitItems(data.underOneCandidates, SCANNER_BUCKET_LIMIT);
+    if (Array.isArray(data?.overOneCandidates)) normalizedData.overOneCandidates = limitItems(data.overOneCandidates, SCANNER_BUCKET_LIMIT);
+    if (Array.isArray(data?.accumulationCandidates)) normalizedData.accumulationCandidates = limitItems(data.accumulationCandidates, SCANNER_BUCKET_LIMIT);
+    return {
+      ...payload,
+      data: normalizedData,
+      items: Array.isArray(payload.items) ? limitItems(payload.items, SCANNER_ITEM_LIMIT) : payload.items,
+      topPicks: Array.isArray(payload.topPicks) ? limitItems(payload.topPicks, SCANNER_TOP_PICK_LIMIT) : payload.topPicks,
+      candidates: Array.isArray(payload.candidates) ? limitItems(payload.candidates, SCANNER_ITEM_LIMIT) : payload.candidates,
+    };
+  }
+
+  function normalizeScannerBody(body) {
+    try {
+      return JSON.stringify(normalizeScannerPayload(JSON.parse(body)));
+    } catch (_error) {
+      return body;
+    }
+  }
+
   function setCachedEntry(entry) {
+    entry.body = normalizeScannerBody(entry.body);
     cachedEntry = entry;
     try {
       localStorage.setItem(SCANNER_CACHE_KEY, entry.body);
@@ -123,6 +254,7 @@
         clearPersistedCache();
         return null;
       }
+      body = normalizeScannerBody(body);
       cachedEntry = createEntry(body, 200, "OK", null, cachedAt);
       return cachedEntry;
     } catch (_error) {
@@ -148,7 +280,7 @@
       headers[key] = value;
     });
 
-    var entry = createEntry(body, response.status, response.statusText, headers, now());
+    var entry = createEntry(normalizeScannerBody(body), response.status, response.statusText, headers, now());
     if (response.ok && body) {
       setCachedEntry(entry);
     }
@@ -158,7 +290,7 @@
 
   function parseEntryBody(entry) {
     try {
-      return entry ? JSON.parse(entry.body) : null;
+      return entry ? normalizeScannerPayload(JSON.parse(entry.body)) : null;
     } catch (_error) {
       return null;
     }
@@ -242,6 +374,10 @@
     }
 
     if (!isScannerRequest(input, init)) {
+      return originalFetch(input, init);
+    }
+
+    if (isFullScannerRequest(input)) {
       return originalFetch(input, init);
     }
 

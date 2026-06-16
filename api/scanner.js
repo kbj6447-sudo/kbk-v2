@@ -3,6 +3,12 @@ const historyHandler = require("./history");
 const ENRICH_SYMBOL_LIMIT = 30;
 const SCANNER_SUCCESS_TTL_MS = 120 * 1000;
 const SCANNER_FAILURE_TTL_MS = 30 * 1000;
+const DEFAULT_SCANNER_ITEM_LIMIT = 120;
+const DEFAULT_SHORT_TERM_LIMIT = 30;
+const DEFAULT_UNDER_ONE_LIMIT = 30;
+const DEFAULT_OVER_ONE_LIMIT = 30;
+const DEFAULT_ACCUMULATION_LIMIT = 30;
+const DEFAULT_TOP_PICK_LIMIT = 20;
 let scannerSuccessCache = null;
 let scannerFailureCache = null;
 let scannerInFlightPromise = null;
@@ -30,6 +36,38 @@ function makeRequestId(prefix) {
 function headerValue(headers, name) {
   if (!headers) return "";
   return headers[name] || headers[name.toLowerCase()] || headers[name.toUpperCase()] || "";
+}
+
+function requestUrl(req) {
+  const host = headerValue(req?.headers || {}, "host") || "localhost";
+  try {
+    return new URL(req?.url || "/api/scanner", `https://${host}`);
+  } catch {
+    return new URL("/api/scanner", `https://${host}`);
+  }
+}
+
+function queryFlag(searchParams, name) {
+  const value = String(searchParams.get(name) || "").toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+function scannerResponseOptions(req) {
+  const url = requestUrl(req);
+  const debug = queryFlag(url.searchParams, "debug");
+  return {
+    debug,
+    full: debug || queryFlag(url.searchParams, "full"),
+  };
+}
+
+function assertNotSelfScannerUpstream(req) {
+  const upstream = String(process.env.KBK_SCANNER_UPSTREAM || "").trim();
+  if (!upstream) return;
+  const host = headerValue(req?.headers || {}, "host");
+  if (host && upstream.includes(host)) {
+    throw new Error("Refusing to call self as scanner upstream");
+  }
 }
 
 function num(value) {
@@ -1890,6 +1928,199 @@ function selectBalancedScannerItems(rawItems, limit = BASE_SCANNER_ITEM_LIMIT) {
   return selected;
 }
 
+function shortSelectionReasons(reasons) {
+  return (Array.isArray(reasons) ? reasons : [])
+    .filter((reason) => typeof reason === "string" && reason.trim())
+    .map((reason) => reason.length > 120 ? `${reason.slice(0, 117)}...` : reason)
+    .slice(0, 3);
+}
+
+function sanitizeScannerItem(item, { debug = false } = {}) {
+  if (!item || typeof item !== "object") return item;
+  const base = {
+    symbol: item.symbol,
+    name: item.name,
+    price: item.price,
+    changePercent: item.changePercent,
+    volume: item.volume,
+    relativeVolume: item.relativeVolume ?? item.volumeRatio,
+    stage: item.stage,
+    stageLabelKo: item.stageLabelKo,
+    riskLabelKo: item.riskLabelKo,
+    scannerScore: item.scannerScore,
+    finalProbabilityScore: item.finalProbabilityScore,
+    finalSelectionScore: item.finalSelectionScore,
+    marketPrioritySortScore: item.marketPrioritySortScore,
+    changePenalty: item.changePenalty,
+    isPreSurgeCandidate: item.isPreSurgeCandidate,
+    isChasingRisk: item.isChasingRisk,
+    isOverheated: item.isOverheated,
+    selectionReasons: shortSelectionReasons(item.selectionReasons),
+    // Lightweight scalar fields still used by the existing front-end rankers.
+    included: item.included,
+    volumeRatio: item.volumeRatio ?? item.relativeVolume,
+    rvol: item.rvol ?? item.relativeVolume ?? item.volumeRatio,
+    preMarketVolume: item.preMarketVolume,
+    regularMarketVolume: item.regularMarketVolume,
+    postMarketVolume: item.postMarketVolume,
+    previousClose: item.previousClose,
+    regularMarketPreviousClose: item.regularMarketPreviousClose,
+    preMarketPrice: item.preMarketPrice,
+    regularMarketPrice: item.regularMarketPrice,
+    postMarketPrice: item.postMarketPrice,
+    priceSource: item.priceSource,
+    volumeSource: item.volumeSource,
+    changeBasis: item.changeBasis,
+    sessionType: item.sessionType,
+    dataReliability: item.dataReliability,
+    dataReliabilityLabel: item.dataReliabilityLabel,
+    riskScore: item.riskScore,
+    surgePrecursorScore: item.surgePrecursorScore,
+    momentumExpansionScore: item.momentumExpansionScore,
+    patternSimilarityScore: item.patternSimilarityScore,
+    chartPatternScore: item.chartPatternScore,
+    patternName: item.patternName,
+    bestPatternName: item.bestPatternName,
+    entrySuitability: item.entrySuitability,
+    topPickFinalScore: item.topPickFinalScore,
+    topPickDisplayFinalScore: item.topPickDisplayFinalScore,
+    topPickChaseRisk: item.topPickChaseRisk,
+    topPickVerdict: item.topPickVerdict,
+    topPickGrade: item.topPickGrade,
+    quantitativeScore: item.quantitativeScore,
+    volumeConfirmationScore: item.volumeConfirmationScore,
+    selectionGroup: item.selectionGroup,
+    statusBadge: item.statusBadge,
+    volumeQualityScore: item.volumeQualityScore,
+    surgeAccelerationScore: item.surgeAccelerationScore,
+    volumeAccelerationScore: item.volumeAccelerationScore,
+    higherLowScore: item.higherLowScore,
+    vwapHoldScore: item.vwapHoldScore,
+    vwapReclaimScore: item.vwapReclaimScore,
+    reSurgeSetupScore: item.reSurgeSetupScore,
+    vwap: item.vwap,
+    vwapState: item.vwapState,
+    aboveVwap: item.aboveVwap,
+    oneMinuteTrend: item.oneMinuteTrend,
+    rsi: item.rsi,
+    dayHigh: item.dayHigh ?? item.regularMarketDayHigh,
+    dayLow: item.dayLow ?? item.regularMarketDayLow,
+    sourceTags: Array.isArray(item.sourceTags) ? item.sourceTags.slice(0, 5) : undefined,
+  };
+
+  if (debug) {
+    return {
+      ...base,
+      chartPatternDetails: item.chartPatternDetails,
+      topPickRejectedReasons: item.topPickRejectedReasons,
+      topPickVerdictReasonCodes: item.topPickVerdictReasonCodes,
+      chartPatternStatus: item.chartPatternStatus,
+      commonSignalStatus: item.commonSignalStatus,
+      debugQuoteSource: item.debugQuoteSource,
+      debugHistorySource: item.debugHistorySource,
+      debugFallbackReason: item.debugFallbackReason,
+    };
+  }
+
+  return base;
+}
+
+function limitAndSanitize(items, limit, options) {
+  return (Array.isArray(items) ? items : [])
+    .slice(0, limit)
+    .map((item) => sanitizeScannerItem(item, options));
+}
+
+function byFinalSelectionScore(items) {
+  return [...(Array.isArray(items) ? items : [])].sort(compareScannerItems);
+}
+
+function stageIsAccumulationCandidate(item) {
+  const stageMeta = buildStageMetadata(item);
+  const stage = String(item?.stage || stageMeta.stage || "").toUpperCase();
+  const change = num(item?.changePercent ?? item?.preMarketChangePercent) ?? 0;
+  return stageMeta.isPreSurgeCandidate === true
+    && change <= 10
+    && ["ACCUMULATION", "PRE_SURGE", "SURGE_PRECURSOR", "SURGE PRECURSOR"].includes(stage);
+}
+
+function buildTopPickItems(items) {
+  return byFinalSelectionScore(items)
+    .filter((item) => item?.symbol && item.included !== false)
+    .filter((item) => item.isPreSurgeCandidate === true || !item.isOverheated);
+}
+
+function buildDefaultItems(items) {
+  const sorted = byFinalSelectionScore(items);
+  const selected = [];
+  const seen = new Set();
+  const addGroup = (groupItems, limit) => {
+    for (const item of groupItems.slice(0, limit)) {
+      const symbol = String(item?.symbol || "").toUpperCase();
+      if (!symbol || seen.has(symbol)) continue;
+      selected.push(item);
+      seen.add(symbol);
+    }
+  };
+
+  addGroup(sorted, DEFAULT_SHORT_TERM_LIMIT);
+  addGroup([...sorted].filter(isUnderOneScannerItem).sort(compareUnderOneScannerItems), DEFAULT_UNDER_ONE_LIMIT);
+  addGroup(sorted.filter((item) => !isUnderOneScannerItem(item)), DEFAULT_OVER_ONE_LIMIT);
+  addGroup(sorted.filter(stageIsAccumulationCandidate), DEFAULT_ACCUMULATION_LIMIT);
+  addGroup(sorted, DEFAULT_SCANNER_ITEM_LIMIT);
+
+  return selected.slice(0, DEFAULT_SCANNER_ITEM_LIMIT).sort(compareScannerItems);
+}
+
+function shapeScannerPayloadForRequest(payload, req) {
+  if (!payload?.data || !Array.isArray(payload.data.items)) return payload;
+  const options = scannerResponseOptions(req);
+  const sourceItems = payload.data.items;
+  const responseItems = options.full ? sourceItems : buildDefaultItems(sourceItems);
+  const sorted = byFinalSelectionScore(sourceItems);
+  const topPickItems = buildTopPickItems(sourceItems);
+  const underOneItems = [...sourceItems].filter(isUnderOneScannerItem).sort(compareUnderOneScannerItems);
+  const overOneItems = sorted.filter((item) => !isUnderOneScannerItem(item));
+  const accumulationItems = sorted.filter(stageIsAccumulationCandidate);
+
+  return {
+    ...payload,
+    data: {
+      ...payload.data,
+      responseLimits: options.full ? {
+        full: true,
+        debug: options.debug,
+      } : {
+        items: DEFAULT_SCANNER_ITEM_LIMIT,
+        shortTermCandidates: DEFAULT_SHORT_TERM_LIMIT,
+        underOneCandidates: DEFAULT_UNDER_ONE_LIMIT,
+        overOneCandidates: DEFAULT_OVER_ONE_LIMIT,
+        accumulationCandidates: DEFAULT_ACCUMULATION_LIMIT,
+        topPicks: DEFAULT_TOP_PICK_LIMIT,
+      },
+      items: limitAndSanitize(responseItems, options.full ? sourceItems.length : DEFAULT_SCANNER_ITEM_LIMIT, options),
+      shortTermCandidates: limitAndSanitize(sorted, options.full ? sorted.length : DEFAULT_SHORT_TERM_LIMIT, options),
+      underOneCandidates: limitAndSanitize(underOneItems, options.full ? underOneItems.length : DEFAULT_UNDER_ONE_LIMIT, options),
+      overOneCandidates: limitAndSanitize(overOneItems, options.full ? overOneItems.length : DEFAULT_OVER_ONE_LIMIT, options),
+      accumulationCandidates: limitAndSanitize(accumulationItems, options.full ? accumulationItems.length : DEFAULT_ACCUMULATION_LIMIT, options),
+      topPicks: limitAndSanitize(topPickItems, options.full ? topPickItems.length : DEFAULT_TOP_PICK_LIMIT, options),
+    },
+  };
+}
+
+function scannerFailurePayload(error) {
+  const message = error instanceof Error ? error.message : "scanner failed";
+  return {
+    ok: false,
+    error: "scanner_failed",
+    message,
+    items: [],
+    data: [],
+    candidates: [],
+    topPicks: [],
+  };
+}
+
 function inferVolumeSourceFromQuote(quote) {
   const marketState = String(quote?.marketState || "").toUpperCase();
   const preVol = num(quote?.preMarketVolume);
@@ -2062,6 +2293,7 @@ async function buildScannerResponse(req) {
   const requestId = headerValue(headers, "x-request-id") || makeRequestId("scanner");
   console.log(`[SCANNER] start requestId=${requestId}`);
   try {
+    assertNotSelfScannerUpstream(req);
     const baseStartedAt = Date.now();
     const payload = await fetchBaseScannerPayload();
     const upstreamItems = Array.isArray(payload?.data?.items) ? payload.data.items.length : 0;
@@ -2328,10 +2560,7 @@ async function buildScannerResponse(req) {
     console.log(`[SCANNER] end requestId=${requestId} elapsed=${Date.now() - requestStartedAt}ms status=502`);
     return {
       status: 502,
-      payload: {
-        ok: false,
-        message: error instanceof Error ? error.message : "scanner proxy failed",
-      },
+      payload: scannerFailurePayload(error),
     };
   }
 }
@@ -2339,7 +2568,7 @@ async function buildScannerResponse(req) {
 module.exports = async function handler(req, res) {
   const now = Date.now();
   if (scannerSuccessCache && scannerSuccessCache.expiresAt > now) {
-    sendCachedScannerResponse(res, 200, scannerSuccessCache.payload, "hit");
+    sendCachedScannerResponse(res, 200, shapeScannerPayloadForRequest(scannerSuccessCache.payload, req), "hit");
     return;
   }
   if (scannerFailureCache && scannerFailureCache.expiresAt > now) {
@@ -2374,7 +2603,7 @@ module.exports = async function handler(req, res) {
   sendCachedScannerResponse(
     res,
     result.status,
-    result.payload,
+    result.status >= 200 && result.status < 300 ? shapeScannerPayloadForRequest(result.payload, req) : result.payload,
     result.status >= 200 && result.status < 300 ? "miss" : "error",
   );
 };

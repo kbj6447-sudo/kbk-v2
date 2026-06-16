@@ -4,6 +4,7 @@
 } from "./final-decision.js";
 
 const POLL_MS = 3000;
+const TOP_PICK_SOURCE_LIMIT = 50;
 
 let selectedSymbol = null;
 let pollTimer = null;
@@ -1650,7 +1651,8 @@ async function loadTopPicks() {
       fetchJson("/api/exchange").catch(() => null),
     ]);
     usdKrw = num(exchangePayload?.rate) ?? num(exchangePayload?.usdKrw) ?? num(exchangePayload?.data?.rate) ?? usdKrw;
-    const items = payload?.data?.items ?? payload?.items ?? [];
+    const items = (payload?.topPicks ?? payload?.data?.topPicks ?? payload?.data?.items ?? payload?.items ?? [])
+      .slice(0, TOP_PICK_SOURCE_LIMIT);
     const rankPicks = (a, b) => (a.stageMeta?.isChasingRisk ? 1 : 0) - (b.stageMeta?.isChasingRisk ? 1 : 0)
       || (a.stageMeta?.isOverheated ? 1 : 0) - (b.stageMeta?.isOverheated ? 1 : 0)
       || (b.setupBias?.strongEarlySignal ? 1 : 0) - (a.setupBias?.strongEarlySignal ? 1 : 0)
