@@ -656,7 +656,7 @@ async function fetchJson(url) {
   }
 
   const request = (async () => {
-    const res = await fetch(url, { cache: "no-store" });
+    const res = await fetch(url, scannerFetchOptions(url));
     const json = await res.json().catch(() => ({}));
     if (!res.ok || json.ok === false) {
       const message = json.message || config?.message || `API error ${res.status}`;
@@ -857,6 +857,49 @@ function clampScore(value, min = 0, max = 100) {
 
 function relativeVolumeOf(item) {
   return num(item?.relativeVolume) ?? num(item?.volumeRatio) ?? 1;
+}
+
+function getChangePenalty(changePercent) {
+  const change = num(changePercent);
+  if (change === null) return 0;
+  if (change >= 80) return 70;
+  if (change >= 50) return 55;
+  if (change >= 25) return 40;
+  if (change >= 15) return 28;
+  if (change >= 10) return 20;
+  if (change >= 8) return 12;
+  if (change >= 5) return 5;
+  return 0;
+}
+
+function classifyStageByMove({ changePercent, relativeVolume, rsi }) {
+  const change = num(changePercent) ?? 0;
+  const rvol = num(relativeVolume) ?? 0;
+  const safeRsi = num(rsi) ?? 50;
+  if (change >= 80 || safeRsi >= 95) return "OVERHEATED";
+  if (change >= 25) return "CHASING_RISK";
+  if (change >= 15) return "MOMENTUM_EXPANSION";
+  if (change >= 8) return "EARLY_BREAKOUT";
+  if (change >= -3 && change <= 8 && rvol >= 1.5) return "PRE_SURGE";
+  if (change >= -5 && change <= 5 && rvol >= 1.1) return "ACCUMULATION";
+  return "NEUTRAL";
+}
+
+function stageMetaOf(item, changeOverride = null) {
+  const change = num(changeOverride) ?? changePct(item) ?? 0;
+  const relativeVolume = relativeVolumeOf(item);
+  const rsi = num(item?.rsi) ?? num(item?.technical?.rsi) ?? 50;
+  const stage = String(item?.stage || classifyStageByMove({ changePercent: change, relativeVolume, rsi }));
+  const changePenalty = num(item?.changePenalty) ?? getChangePenalty(change);
+  const isPreSurgeCandidate = item?.isPreSurgeCandidate === true
+    || ((stage === "ACCUMULATION" || stage === "PRE_SURGE") && change <= 10);
+  const isChasingRisk = item?.isChasingRisk === true || stage === "CHASING_RISK" || stage === "OVERHEATED";
+  const isOverheated = item?.isOverheated === true || stage === "OVERHEATED";
+  return { stage, changePenalty, isPreSurgeCandidate, isChasingRisk, isOverheated };
+}
+
+function scannerFetchOptions(url) {
+  return String(url || "").includes("/api/scanner") ? { cache: "default" } : { cache: "no-store" };
 }
 
 function itemField(item, key) {
@@ -1120,6 +1163,7 @@ function scoreTopPick(item) {
   const vwapGood = vwap.includes("??) || vwap.includes("near") || vwap.includes("洹쇱쿂");
   const trendGood = trend === "?곸듅";
   const setupBias = setupBiasOf(item, price, change, rvol, vwapGood, trendGood);
+  const stageMeta = stageMetaOf(item, change);
   const volumeGood = volume >= 1_000_000 || rvol >= 3;
   const lowPriceBonus = price > 0 && price <= 8 ? 6 : 0;
   const sweetChange = change >= 4 && change <= 35 ? 20 : change > 35 && change <= 60 ? 6 : change > 60 ? -18 : change >= 1 ? 10 : 0;
@@ -1134,6 +1178,7 @@ function scoreTopPick(item) {
       + lowPriceBonus
       + setupBias.earlyBonus * 0.55
       - setupBias.riskPenalty * 0.65
+      - stageMeta.changePenalty
   );
 
   const surgeScore = clampScore(
@@ -1144,6 +1189,7 @@ function scoreTopPick(item) {
       + (volume >= 10_000_000 ? 10 : volume >= 2_000_000 ? 6 : 0)
       + setupBias.earlyBonus * 0.35
       - setupBias.riskPenalty * 0.45
+      - stageMeta.changePenalty
   );
 
   const setupScore = clampScore(
@@ -1156,6 +1202,7 @@ function scoreTopPick(item) {
       - (risk >= 75 ? 12 : risk >= 60 ? 6 : 0)
       + setupBias.earlyBonus * 0.65
       - setupBias.riskPenalty * 0.75
+      - stageMeta.changePenalty
   );
 
   const chaseRisk = clampScore(
@@ -1166,7 +1213,15 @@ function scoreTopPick(item) {
       + setupBias.riskPenalty * 0.8
   );
   const safetyScore = clampScore(100 - chaseRisk);
-  const finalScore = Math.round(clampScore(scalpScore * 0.38 + surgeScore * 0.27 + setupScore * 0.25 + safetyScore * 0.10 + setupBias.earlyBonus * 0.2 - setupBias.riskPenalty * 0.25));
+  const finalScore = Math.round(clampScore(
+    scalpScore * 0.38
+    + surgeScore * 0.27
+    + setupScore * 0.25
+    + safetyScore * 0.10
+    + setupBias.earlyBonus * 0.2
+    - setupBias.riskPenalty * 0.25
+    - stageMeta.changePenalty * 0.35
+  ));
 
   let verdict = "愿李??꾨낫";
   if (finalScore >= 78 && chaseRisk < 62) verdict = "理쒖슦???⑦? ?꾨낫";
@@ -1209,6 +1264,7 @@ function scoreTopPick(item) {
     rvol,
     vwap,
     trend,
+    stageMeta,
     scalpScore: Math.round(scalpScore),
     surgeScore: Math.round(surgeScore),
     setupScore: Math.round(setupScore),
@@ -1595,6 +1651,11 @@ async function loadTopPicks() {
     ]);
     usdKrw = num(exchangePayload?.rate) ?? num(exchangePayload?.usdKrw) ?? num(exchangePayload?.data?.rate) ?? usdKrw;
     const items = payload?.data?.items ?? payload?.items ?? [];
+    const rankPicks = (a, b) => (a.stageMeta?.isChasingRisk ? 1 : 0) - (b.stageMeta?.isChasingRisk ? 1 : 0)
+      || (a.stageMeta?.isOverheated ? 1 : 0) - (b.stageMeta?.isOverheated ? 1 : 0)
+      || (b.setupBias?.strongEarlySignal ? 1 : 0) - (a.setupBias?.strongEarlySignal ? 1 : 0)
+      || b.finalScore - a.finalScore
+      || a.chaseRisk - b.chaseRisk;
     const scored = items
       .filter((item) => item?.symbol && item.included !== false)
       .map(scoreTopPick)
@@ -1605,7 +1666,7 @@ async function loadTopPicks() {
       .filter((pick) => !pick.setupBias?.underDollarLowRvol || pick.setupBias?.strongEarlySignal)
       .filter((pick) => pick.chaseRisk < 85)
       .filter((pick) => pick.finalScore >= 62 || pick.scalpScore >= 72 || pick.surgeScore >= 72)
-      .sort((a, b) => (b.setupBias?.strongEarlySignal ? 1 : 0) - (a.setupBias?.strongEarlySignal ? 1 : 0) || b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk)
+      .sort(rankPicks)
       .slice(0, 20);
     if (scored.length < 20) {
       const seen = new Set(scored.map((pick) => pick.symbol));
@@ -1617,9 +1678,9 @@ async function loadTopPicks() {
         .filter((pick) => pick.volume >= 300_000 || pick.rvol >= 3 || pick.setupBias?.strongEarlySignal)
         .filter((pick) => !pick.setupBias?.underDollarLowRvol || pick.setupBias?.strongEarlySignal)
         .filter((pick) => pick.chaseRisk < 92)
-        .sort((a, b) => (b.setupBias?.strongEarlySignal ? 1 : 0) - (a.setupBias?.strongEarlySignal ? 1 : 0) || b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk);
+        .sort(rankPicks);
       scored.push(...supplemental.slice(0, 20 - scored.length));
-      scored.sort((a, b) => (b.setupBias?.strongEarlySignal ? 1 : 0) - (a.setupBias?.strongEarlySignal ? 1 : 0) || b.finalScore - a.finalScore || a.chaseRisk - b.chaseRisk);
+      scored.sort(rankPicks);
     }
     if (!isTopPicksActive() || renderToken !== topPicksRenderToken) return;
     const hydrated = await hydrateTopPicksWithLatestQuotes(scored.slice(0, 20));

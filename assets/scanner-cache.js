@@ -5,7 +5,7 @@
 
   window.__kbkScannerCacheInstalled = true;
 
-  var SCANNER_CACHE_TTL_MS = 45 * 1000;
+  var SCANNER_CACHE_TTL_MS = 120 * 1000;
   var SCANNER_STALE_MS = 30 * 60 * 1000;
   var FORCE_REFRESH_WINDOW_MS = 2500;
   var SCANNER_CACHE_KEY = "kbk:scanner:lastResponse";
@@ -16,6 +16,16 @@
   var cachedEntry = null;
   var inFlightEntryPromise = null;
   var forceRefreshUntil = readPersistedForceUntil();
+  var fetchStats = window.__kbkFetchStats || {
+    scanner: 0,
+    scannerNetwork: 0,
+    scannerCacheHits: 0,
+    history: 0,
+    quote: 0,
+    exchange: 0,
+  };
+
+  window.__kbkFetchStats = fetchStats;
 
   function now() {
     return Date.now();
@@ -56,6 +66,16 @@
     if (!url || url.origin !== window.location.origin || url.pathname !== "/api/scanner") return false;
     var method = String((init && init.method) || (input && input.method) || "GET").toUpperCase();
     return method === "GET";
+  }
+
+  function apiKind(input) {
+    var url = scannerUrl(input);
+    if (!url || url.origin !== window.location.origin) return "";
+    if (url.pathname === "/api/scanner") return "scanner";
+    if (url.pathname === "/api/history") return "history";
+    if (url.pathname === "/api/quote") return "quote";
+    if (url.pathname === "/api/exchange") return "exchange";
+    return "";
   }
 
   function isCacheAgeValid(cachedAt) {
@@ -119,6 +139,7 @@
   }
 
   async function fetchAndCache(input, init) {
+    fetchStats.scannerNetwork += 1;
     var response = await originalFetch(input, init);
     var body = await response.clone().text();
     var headers = {};
@@ -135,16 +156,12 @@
     return entry;
   }
 
-  function refreshInBackground(input, init) {
-    if (inFlightEntryPromise) return;
-    inFlightEntryPromise = fetchAndCache(input, init)
-      .catch(function logRefreshFailure(error) {
-        console.warn("[SCANNER_CACHE] background refresh failed", error);
-        return null;
-      })
-      .finally(function clearInFlight() {
-        inFlightEntryPromise = null;
-      });
+  function parseEntryBody(entry) {
+    try {
+      return entry ? JSON.parse(entry.body) : null;
+    } catch (_error) {
+      return null;
+    }
   }
 
   function shouldForceRefresh() {
@@ -181,7 +198,49 @@
     markForceRefresh();
   };
 
+  window.__kbkResetFetchStats = function resetFetchStats() {
+    fetchStats.scanner = 0;
+    fetchStats.scannerNetwork = 0;
+    fetchStats.scannerCacheHits = 0;
+    fetchStats.history = 0;
+    fetchStats.quote = 0;
+    fetchStats.exchange = 0;
+  };
+
+  window.__kbkGetSharedScannerData = function getSharedScannerData(options) {
+    var force = Boolean(options && options.force);
+    if (force) {
+      markForceRefresh();
+    }
+
+    if (!cachedEntry || !isCacheAgeValid(cachedEntry.cachedAt)) {
+      cachedEntry = readPersistedCache();
+    }
+
+    var age = cachedEntry ? now() - cachedEntry.cachedAt : Infinity;
+    if (!force && cachedEntry && age <= SCANNER_CACHE_TTL_MS) {
+      return Promise.resolve(parseEntryBody(cachedEntry));
+    }
+
+    if (!inFlightEntryPromise) {
+      inFlightEntryPromise = fetchAndCache("/api/scanner", { cache: "default" })
+        .finally(function clearInFlight() {
+          inFlightEntryPromise = null;
+          persistForceUntil(0);
+        });
+    }
+
+    return inFlightEntryPromise.then(function toData(entry) {
+      return parseEntryBody(entry);
+    });
+  };
+
   window.fetch = function cachedFetch(input, init) {
+    var kind = apiKind(input);
+    if (kind && Object.prototype.hasOwnProperty.call(fetchStats, kind)) {
+      fetchStats[kind] += 1;
+    }
+
     if (!isScannerRequest(input, init)) {
       return originalFetch(input, init);
     }
@@ -194,12 +253,12 @@
     var age = cachedEntry ? now() - cachedEntry.cachedAt : Infinity;
 
     if (!force && cachedEntry && age <= SCANNER_CACHE_TTL_MS) {
-      refreshInBackground(input, init);
+      fetchStats.scannerCacheHits += 1;
       return Promise.resolve(responseFromEntry(cachedEntry));
     }
 
-    if (!force && cachedEntry && age <= SCANNER_STALE_MS) {
-      refreshInBackground(input, init);
+    if (!force && cachedEntry && age <= SCANNER_STALE_MS && inFlightEntryPromise) {
+      fetchStats.scannerCacheHits += 1;
       return Promise.resolve(responseFromEntry(cachedEntry));
     }
 

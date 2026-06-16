@@ -1,4 +1,7 @@
-const SCANNER_URL = "https://kbk-theta-accumulation-pro.vercel.app/api/scanner";
+function scannerUrl() {
+  const explicit = String(process.env.KBK_SCANNER_UPSTREAM || process.env.PRO_ALERT_SCANNER_URL || "").trim();
+  return explicit;
+}
 
 function num(value) {
   const parsed = Number(value);
@@ -86,7 +89,11 @@ module.exports = async function handler(req, res) {
 
     const minScore = num(process.env.PRO_ALERT_MIN_SCORE) ?? 75;
     const maxAlerts = num(process.env.PRO_ALERT_MAX_ITEMS) ?? 5;
-    const response = await fetch(SCANNER_URL, { cache: "no-store" });
+    const targetUrl = scannerUrl();
+    if (!targetUrl) {
+      throw new Error("scanner upstream is disabled. Set KBK_SCANNER_UPSTREAM or PRO_ALERT_SCANNER_URL when running alert scan outside production.");
+    }
+    const response = await fetch(targetUrl, { cache: "default" });
     const payload = await response.json();
     if (!response.ok || payload?.ok === false) {
       throw new Error(payload?.message || `scanner ${response.status}`);

@@ -42,6 +42,92 @@ function clamp(value, min = 0, max = 100) {
   return Math.max(min, Math.min(max, value));
 }
 
+function getChangePenalty(changePercent) {
+  const change = num(changePercent);
+  if (change === null) return 0;
+  if (change >= 80) return 70;
+  if (change >= 50) return 55;
+  if (change >= 25) return 40;
+  if (change >= 15) return 28;
+  if (change >= 10) return 20;
+  if (change >= 8) return 12;
+  if (change >= 5) return 5;
+  return 0;
+}
+
+function classifyStageByMove({ changePercent, relativeVolume, rsi }) {
+  const change = num(changePercent) ?? 0;
+  const rvol = num(relativeVolume) ?? 0;
+  const safeRsi = num(rsi) ?? 50;
+
+  if (change >= 80 || safeRsi >= 95) return "OVERHEATED";
+  if (change >= 25) return "CHASING_RISK";
+  if (change >= 15) return "MOMENTUM_EXPANSION";
+  if (change >= 8) return "EARLY_BREAKOUT";
+  if (change >= -3 && change <= 8 && rvol >= 1.5) return "PRE_SURGE";
+  if (change >= -5 && change <= 5 && rvol >= 1.1) return "ACCUMULATION";
+  return "NEUTRAL";
+}
+
+function stageLabelKo(stage) {
+  const labels = {
+    ACCUMULATION: "매집 후보",
+    PRE_SURGE: "급등 전 후보",
+    EARLY_BREAKOUT: "초반 돌파",
+    MOMENTUM_EXPANSION: "이미 상승 진행",
+    CHASING_RISK: "추격 위험",
+    OVERHEATED: "과열",
+    NEUTRAL: "중립",
+  };
+  return labels[stage] || labels.NEUTRAL;
+}
+
+function riskLabelKo(stage) {
+  const labels = {
+    ACCUMULATION: "낮음",
+    PRE_SURGE: "초입 후보",
+    EARLY_BREAKOUT: "돌파 진행",
+    MOMENTUM_EXPANSION: "상승 진행",
+    CHASING_RISK: "추격 위험",
+    OVERHEATED: "과열",
+    NEUTRAL: "중립",
+  };
+  return labels[stage] || labels.NEUTRAL;
+}
+
+function withChangePenalty(score, changePenalty) {
+  const base = num(score) ?? 0;
+  return Math.round(clamp(base - (num(changePenalty) ?? 0)));
+}
+
+function buildStageMetadata(item) {
+  const change = num(item?.changePercent) ?? num(item?.preMarketChangePercent) ?? 0;
+  const rvol = num(item?.relativeVolume) ?? num(item?.volumeRatio) ?? 0;
+  const rsi = num(item?.rsi) ?? num(item?.technical?.rsi) ?? 50;
+  const stage = classifyStageByMove({ changePercent: change, relativeVolume: rvol, rsi });
+  const changePenalty = getChangePenalty(change);
+  const isPreSurgeCandidate = (stage === "ACCUMULATION" || stage === "PRE_SURGE") && change <= 10;
+  const isChasingRisk = stage === "CHASING_RISK" || stage === "OVERHEATED";
+  const isOverheated = stage === "OVERHEATED";
+  return {
+    stage,
+    stageLabelKo: stageLabelKo(stage),
+    riskLabelKo: riskLabelKo(stage),
+    changePenalty,
+    isPreSurgeCandidate,
+    isChasingRisk,
+    isOverheated,
+  };
+}
+
+function cacheControlValue(ok) {
+  const successSeconds = Math.round(SCANNER_SUCCESS_TTL_MS / 1000);
+  const failureSeconds = Math.round(SCANNER_FAILURE_TTL_MS / 1000);
+  return ok
+    ? `public, max-age=0, s-maxage=${successSeconds}, stale-while-revalidate=${successSeconds}`
+    : `public, max-age=0, s-maxage=${failureSeconds}, stale-while-revalidate=${failureSeconds}`;
+}
+
 function changePercentFromPreviousClose(price, previousClose) {
   const current = num(price);
   const prev = num(previousClose);
@@ -670,7 +756,8 @@ function evaluateTopPickForSnapshot(item) {
   const risk = Math.round(num(item?.riskScore) ?? 50);
   const pattern = Math.round(num(item?.chartPatternScore ?? item?.patternSimilarityScore) ?? 50);
   const signal = topPickSignalScore(item, price, volume, change);
-  const baseScore = surge * 0.55 + pattern * 0.2 + signal.volumeBonus + signal.changeBonus - risk * 0.12;
+  const changePenalty = num(item?.changePenalty) ?? getChangePenalty(change);
+  const baseScore = surge * 0.55 + pattern * 0.2 + signal.volumeBonus + signal.changeBonus - risk * 0.12 - changePenalty;
   const setup = signal.setup;
   const chaseRisk = computeTopPickChaseRisk(item, setup, change, risk);
   const entrySuitability = Math.round(clamp(baseScore + signal.signalBonus));
@@ -701,6 +788,7 @@ function evaluateTopPickForSnapshot(item) {
     topPickFinalScore: entrySuitability,
     topPickDisplayFinalScore: finalScore,
     topPickChaseRisk: chaseRisk,
+    changePenalty,
     topPickVerdictReasonCodes: reasonCodes,
     topPickGrade: computeTopPickGrade(finalScore),
     quantitativeScore: selectionScores.quantitativeScore,
@@ -713,6 +801,7 @@ function evaluateTopPickForSnapshot(item) {
     rvol: scannerTopPickRvol(item),
     selectionGroup: selectionScores.selectionGroup,
     statusBadge: selectionScores.statusBadge,
+    changePenalty,
   };
 }
 
@@ -1646,11 +1735,13 @@ async function normalizeItem(item, enrichVolume = true, metrics = null) {
   const boosted = boostedScore(merged);
   const correctedVolumeScore = volumeStrength(merged);
   const quality = volumeQualityScore(merged);
-  const baseScannerScore = Math.max(num(merged.scannerScore) ?? 0, boosted);
-  const baseFinalScore = Math.max(num(merged.finalProbabilityScore) ?? 0, boosted);
+  const stageMeta = buildStageMetadata(merged);
+  const baseScannerScore = withChangePenalty(Math.max(num(merged.scannerScore) ?? 0, boosted), stageMeta.changePenalty);
+  const baseFinalScore = withChangePenalty(Math.max(num(merged.finalProbabilityScore) ?? 0, boosted), stageMeta.changePenalty);
 
   return {
     ...merged,
+    ...stageMeta,
     volumeComputationVersion: "pro-rvol-v2",
     volume: isTrustedCurrentVolumeSource(merged.volumeSource) ? ((num(merged.volume) ?? rawVolume) || null) : null,
     volumeStrengthScore: correctedVolumeScore,
@@ -1960,14 +2051,15 @@ async function fetchBaseScannerPayload() {
 }
 
 function sendCachedScannerResponse(res, status, payload, cacheState) {
-  res.setHeader("cache-control", "no-store");
+  res.setHeader("cache-control", cacheControlValue(status >= 200 && status < 300));
   res.setHeader("x-kbk-scanner-cache", cacheState);
   res.status(status).json(payload);
 }
 
 async function buildScannerResponse(req) {
   const requestStartedAt = Date.now();
-  const requestId = headerValue(req.headers, "x-request-id") || makeRequestId("scanner");
+  const headers = req?.headers || {};
+  const requestId = headerValue(headers, "x-request-id") || makeRequestId("scanner");
   console.log(`[SCANNER] start requestId=${requestId}`);
   try {
     const baseStartedAt = Date.now();
@@ -2090,18 +2182,21 @@ async function buildScannerResponse(req) {
           quality,
           surgeAcceleration,
         );
+        const stageMeta = buildStageMetadata({ ...normalizedItem, ...compactObject(liveQuote) });
         const volumeAdjustedFinalScore = Math.round(clamp(
           boostedFinalScore * 0.58
           + quality.score * 0.22
           + surgeAcceleration.surgeAccelerationScore * 0.20
           + earlyMomentumBonus,
         ));
-        const finalProbabilityScore = quality.score < 30
+        const rawFinalProbabilityScore = quality.score < 30
           ? Math.min(volumeAdjustedFinalScore, 69)
           : volumeAdjustedFinalScore;
-        const scannerScore = quality.score < 30
+        const rawScannerScore = quality.score < 30
           ? Math.min(boostedScannerScore, 69)
           : Math.max(baseScannerScore, boostedScannerScore);
+        const finalProbabilityScore = withChangePenalty(rawFinalProbabilityScore, stageMeta.changePenalty);
+        const scannerScore = withChangePenalty(rawScannerScore, stageMeta.changePenalty);
         const debugQuoteSource = debugQuoteSourceLabel(localQuoteSnapshot, batchQuoteMap.has(symbolKey));
         const debugHistorySource = debugHistorySourceLabel(localHistorySnapshot, chartMap.has(symbolKey));
         const debugFallback = debugFallbackReason({
@@ -2125,6 +2220,7 @@ async function buildScannerResponse(req) {
           postMarketChangePercent: liveQuote.postMarketChangePercent ?? null,
           volume: liveQuote.volume ?? null,
           ...commonSignals,
+          ...stageMeta,
           rankAuxiliaryScore,
           ...surgeAcceleration,
           volumeQualityScore: quality.score,
@@ -2169,14 +2265,17 @@ async function buildScannerResponse(req) {
         const marketPrioritySortScore = (num(topPickEvaluation.finalSelectionScore ?? responseItem.finalSelectionScore) ?? finalProbabilityScore)
           + earlyMomentumBonus
           + liquidityMomentumBonus
-          - forbiddenPenalty;
+          - forbiddenPenalty
+          - stageMeta.changePenalty;
+        const finalSelectionScore = Math.round(clamp(marketPrioritySortScore));
 
         return {
           ...responseItem,
           ...topPickEvaluation,
           forbiddenPenalty,
+          finalSelectionScore,
           marketPrioritySortScore,
-          volumeQualitySortScore: marketPrioritySortScore + (quality.score * 0.03) + (surgeAcceleration.surgeAccelerationScore * 0.04),
+          volumeQualitySortScore: marketPrioritySortScore + (quality.score * 0.03) + (surgeAcceleration.surgeAccelerationScore * 0.04) - (stageMeta.changePenalty * 0.25),
           sourceTags: [...new Set([
             ...(Array.isArray(normalizedItem.sourceTags) ? normalizedItem.sourceTags : []),
             batchQuoteMap.has(symbolKey) ? "yahoo-v7-batch" : null,
@@ -2214,7 +2313,6 @@ async function buildScannerResponse(req) {
         items: payload.data.items.length,
       });
     }
-
     logScannerStep("completed", requestStartedAt, {
       requestId,
       status: 200,

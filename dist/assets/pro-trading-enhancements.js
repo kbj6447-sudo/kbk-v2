@@ -260,6 +260,57 @@ function topPickItemField(item, key) {
   return toNumber(item?.[key]) ?? toNumber(item?.technical?.[key]);
 }
 
+function getChangePenalty(changePercent) {
+  const change = toNumber(changePercent);
+  if (change === null) return 0;
+  if (change >= 80) return 70;
+  if (change >= 50) return 55;
+  if (change >= 25) return 40;
+  if (change >= 15) return 28;
+  if (change >= 10) return 20;
+  if (change >= 8) return 12;
+  if (change >= 5) return 5;
+  return 0;
+}
+
+function classifyStageByMove({ changePercent, relativeVolume, rsi }) {
+  const change = toNumber(changePercent) ?? 0;
+  const rvol = toNumber(relativeVolume) ?? 0;
+  const safeRsi = toNumber(rsi) ?? 50;
+  if (change >= 80 || safeRsi >= 95) return "OVERHEATED";
+  if (change >= 25) return "CHASING_RISK";
+  if (change >= 15) return "MOMENTUM_EXPANSION";
+  if (change >= 8) return "EARLY_BREAKOUT";
+  if (change >= -3 && change <= 8 && rvol >= 1.5) return "PRE_SURGE";
+  if (change >= -5 && change <= 5 && rvol >= 1.1) return "ACCUMULATION";
+  return "NEUTRAL";
+}
+
+function stageMetaOf(item, changeOverride = null) {
+  const change = toNumber(changeOverride) ?? mainChangePercent(item) ?? 0;
+  const relativeVolume = rvolValue(item) ?? 0;
+  const rsi = toNumber(item?.rsi ?? item?.technical?.rsi) ?? 50;
+  const stage = String(item?.stage || classifyStageByMove({ changePercent: change, relativeVolume, rsi }));
+  const changePenalty = toNumber(item?.changePenalty) ?? getChangePenalty(change);
+  const isPreSurgeCandidate = item?.isPreSurgeCandidate === true
+    || ((stage === "ACCUMULATION" || stage === "PRE_SURGE") && change <= 10);
+  const isChasingRisk = item?.isChasingRisk === true || stage === "CHASING_RISK" || stage === "OVERHEATED";
+  const isOverheated = item?.isOverheated === true || stage === "OVERHEATED";
+  return {
+    stage,
+    stageLabelKo: item?.stageLabelKo || item?.stageLabel || stage,
+    riskLabelKo: item?.riskLabelKo || (isOverheated ? "과열" : isChasingRisk ? "추격 위험" : "중립"),
+    changePenalty,
+    isPreSurgeCandidate,
+    isChasingRisk,
+    isOverheated,
+  };
+}
+
+function scannerFetchOptions(url) {
+  return String(url || "").includes("/api/scanner") ? { cache: "default" } : { cache: "no-store" };
+}
+
 function clampTopPickScore(value, min = 0, max = 100) {
   const n = toNumber(value);
   if (n === null) return min;
@@ -1326,8 +1377,9 @@ async function renderTopPicksOnly(renderPhase = "initial") {
         const surge = Math.round(Number(item.finalProbabilityScore ?? item.scannerScore ?? 0));
         const risk = Math.round(Number(item.riskScore ?? 50));
         const pattern = Math.round(Number(item.patternSimilarityScore ?? 50));
-        const signal = topPickSignalScore(item, price, volume ?? 0, change);
-        const baseScore = surge * .55 + pattern * .2 + signal.volumeBonus + signal.changeBonus - risk * .12;
+        const signal = topPickSignalScore(item, price, volume, change);
+        const stageMeta = stageMetaOf(item, change);
+        const baseScore = surge * .55 + pattern * .2 + signal.volumeBonus + signal.changeBonus - risk * .12 - stageMeta.changePenalty;
         const finalScore = Math.round(Math.max(0, Math.min(100, baseScore + signal.signalBonus)));
         const reasoning = topPickReasoning(item, {
           change,
@@ -1387,7 +1439,8 @@ async function renderTopPicksOnly(renderPhase = "initial") {
           + Math.max(0, reasoning.priority - 1) * 4
           + displayMomentum.liquidityBonus
           + displayMomentum.earlyMomentumBonus
-          - displayMomentum.forbiddenPenalty;
+          - displayMomentum.forbiddenPenalty
+          - stageMeta.changePenalty;
         return {
           item,
           price,
@@ -1402,11 +1455,14 @@ async function renderTopPicksOnly(renderPhase = "initial") {
           chaseRisk,
           finalDecision: fd,
           selectionMetrics,
+          stageMeta,
           displaySortScore,
         };
       })
       .filter((pick) => pick.selectionMetrics.selectionGroup === "상단 후보" || pick.selectionMetrics.finalSelectionScore >= 50 || pick.reasoning.priority >= 2)
       .sort((a, b) => selectionGroupRank(a.selectionMetrics.selectionGroup) - selectionGroupRank(b.selectionMetrics.selectionGroup)
+        || (a.stageMeta?.isChasingRisk ? 1 : 0) - (b.stageMeta?.isChasingRisk ? 1 : 0)
+        || (a.stageMeta?.isOverheated ? 1 : 0) - (b.stageMeta?.isOverheated ? 1 : 0)
         || b.displaySortScore - a.displaySortScore
         || b.selectionMetrics.entrySuitability - a.selectionMetrics.entrySuitability
         || b.selectionMetrics.chartPatternScore - a.selectionMetrics.chartPatternScore
@@ -1439,11 +1495,11 @@ async function renderTopPicksOnly(renderPhase = "initial") {
         <strong>텔레그램 알림 조건</strong><br>
         최종 선별 점수 80점 이상 · 신규 진입 적합도 60점 이상 · 차트 모양 유사도 70점 이상 · 추격 위험 60점 이하 · 상대거래량 2배 이상
       </section>
-      ${displayItems.length ? displayItems.map(({ item, displayItem, displayPrice, displayChange, displayVolume, surge, risk, pattern, finalScore, reasoning, chaseRisk, finalDecision: fd, selectionMetrics }) => `
+      ${displayItems.length ? displayItems.map(({ item, displayItem, displayPrice, displayChange, displayVolume, surge, risk, pattern, finalScore, reasoning, chaseRisk, finalDecision: fd, selectionMetrics, stageMeta }) => `
         <article class="kbk-pro-top-card" data-symbol="${textEscape(item.symbol)}">
           ${fd ? renderFinalDecisionHeroHtml(fd, textEscape) : ""}
           <div class="kbk-pro-top-head">
-            <div><h3>${textEscape(item.symbol)}</h3><p>${textEscape(item.name || item.symbol)}</p></div>
+            <div><h3>${textEscape(item.symbol)}</h3><p>${textEscape(item.name || item.symbol)}</p><p>${textEscape(stageMeta?.stageLabelKo || item.stageLabelKo || item.stage || "")}${stageMeta?.changePenalty ? ` · 상승률 패널티 ${stageMeta.changePenalty}점` : ""}</p></div>
             <div class="kbk-pro-top-score">${selectionMetrics.finalSelectionScore}</div>
           </div>
           <div class="kbk-pro-badges">
@@ -1578,7 +1634,7 @@ async function fetchJson(url) {
   }
 
   const request = (async () => {
-    const response = await fetch(url, { cache: "no-store" });
+    const response = await fetch(url, scannerFetchOptions(url));
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || payload?.ok === false) {
       const message = payload?.message || config?.message || `API ${response.status}`;
@@ -2142,6 +2198,137 @@ async function renderBacktestExpectation() {
   }
 }
 
+function accumulationRouteActive() {
+  const path = String(window.location.pathname || "");
+  return path === "/scanner/accumulation" || path === "/accumulation";
+}
+
+function stageAwareAccumulationAllowed(item) {
+  if (!item) return false;
+  const stageMeta = stageMetaOf(item);
+  const change = toNumber(item.changePercent) ?? mainChangePercent(item) ?? 0;
+  return stageMeta.isPreSurgeCandidate === true
+    && change <= 10
+    && ["ACCUMULATION", "PRE_SURGE", "SURGE_PRECURSOR", "SURGE PRECURSOR"].includes(stageMeta.stage);
+}
+
+function rootScannerRouteActive() {
+  return String(window.location.pathname || "") === "/";
+}
+
+function candidateRowSymbol(row) {
+  const symbolCell = row.querySelectorAll("td")[1];
+  return String(symbolCell?.textContent || "").trim().split(/\s+/)[0].toUpperCase();
+}
+
+async function applyStageAwareAccumulationPage() {
+  if (!accumulationRouteActive()) return;
+  const cards = Array.from(document.querySelectorAll("article.stock-card"));
+  if (!cards.length) return;
+  // TODO: Move this filter upstream into the accumulation route source array so excluded hot names are never rendered, not just hidden after mount.
+
+  let payload = null;
+  try {
+    payload = typeof window.__kbkGetSharedScannerData === "function"
+      ? await window.__kbkGetSharedScannerData()
+      : await fetchJson("/api/scanner");
+  } catch {
+    return;
+  }
+
+  const items = Array.isArray(payload?.data?.items) ? payload.data.items : Array.isArray(payload?.items) ? payload.items : [];
+  const itemMap = new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
+  let visibleCount = 0;
+
+  for (const card of cards) {
+    const symbol = String(card.querySelector("h3")?.textContent || "").trim().toUpperCase();
+    const item = itemMap.get(symbol);
+    if (!item) continue;
+
+    if (!stageAwareAccumulationAllowed(item)) {
+      card.style.display = "none";
+      continue;
+    }
+
+    visibleCount += 1;
+    card.style.display = "";
+    const meta = stageMetaOf(item);
+    const badge = card.querySelector(".accent-badge");
+    if (badge) badge.textContent = meta.stageLabelKo || item.stageLabelKo || meta.stage;
+
+    const note = card.querySelector(".stock-note");
+    if (note) {
+      note.dataset.kbkOriginalNote = note.dataset.kbkOriginalNote || note.textContent || "";
+      note.textContent = meta.riskLabelKo && meta.riskLabelKo !== "중립"
+        ? `${meta.riskLabelKo} · ${note.dataset.kbkOriginalNote}`
+        : note.dataset.kbkOriginalNote;
+    }
+  }
+
+  const summaryCards = Array.from(document.querySelectorAll(".accumulation-page .hero-scoreboard .score-card strong"));
+  if (summaryCards[0]) summaryCards[0].textContent = String(visibleCount);
+}
+
+async function applyStageAwareCandidateTable() {
+  if (!rootScannerRouteActive()) return;
+  const table = document.querySelector(".candidate-table");
+  if (!table) return;
+
+  let payload = null;
+  try {
+    payload = typeof window.__kbkGetSharedScannerData === "function"
+      ? await window.__kbkGetSharedScannerData()
+      : await fetchJson("/api/scanner");
+  } catch {
+    return;
+  }
+
+  const items = Array.isArray(payload?.data?.items) ? payload.data.items : Array.isArray(payload?.items) ? payload.items : [];
+  const itemMap = new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
+  const ranking = new Map(items
+    .slice()
+    .sort((a, b) => (toNumber(b.finalSelectionScore) ?? toNumber(b.finalProbabilityScore) ?? 0) - (toNumber(a.finalSelectionScore) ?? toNumber(a.finalProbabilityScore) ?? 0))
+    .map((item, index) => [String(item.symbol).toUpperCase(), index]));
+
+  const rows = Array.from(table.querySelectorAll("tr"));
+  if (rows.length <= 1) return;
+  const headerRow = rows[0];
+  const bodyRows = rows.slice(1);
+
+  for (const row of bodyRows) {
+    const symbol = candidateRowSymbol(row);
+    const item = itemMap.get(symbol);
+    if (!item) continue;
+    const meta = stageMetaOf(item);
+    const cells = row.querySelectorAll("td");
+    const scoreCell = cells[cells.length - 2];
+    const statusCell = cells[cells.length - 1];
+
+    row.dataset.kbkRank = String(ranking.get(symbol) ?? 9999);
+    row.dataset.kbkStage = meta.stage;
+
+    if (scoreCell && toNumber(item.finalSelectionScore) !== null) {
+      scoreCell.textContent = String(Math.round(toNumber(item.finalSelectionScore)));
+    }
+    if (statusCell) {
+      statusCell.textContent = meta.isOverheated
+        ? "과열"
+        : meta.isChasingRisk
+          ? "추격 위험"
+          : meta.stageLabelKo || meta.stage;
+      statusCell.title = meta.riskLabelKo || "";
+    }
+  }
+
+  bodyRows
+    .sort((a, b) => Number(a.dataset.kbkRank || 9999) - Number(b.dataset.kbkRank || 9999))
+    .forEach((row) => table.appendChild(row));
+
+  if (headerRow.parentElement === table) {
+    table.insertBefore(headerRow, table.firstChild);
+  }
+}
+
 function boot() {
   ensureStyles();
   addRefreshShortcut();
@@ -2150,6 +2337,8 @@ function boot() {
   clarifyEmptyAccumulation();
   patchFloatingPointText();
   ensureExchangeRateStatus();
+  window.setTimeout(applyStageAwareAccumulationPage, 200);
+  window.setTimeout(applyStageAwareCandidateTable, 350);
 
   const observer = new MutationObserver(() => {
     patchFloatingPointText();
@@ -2159,6 +2348,8 @@ function boot() {
     if (document.getElementById("exchange-rate") && !window.__kbkExchangeState) {
       ensureExchangeRateStatus();
     }
+    applyStageAwareAccumulationPage();
+    applyStageAwareCandidateTable();
   });
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
   window.addEventListener("popstate", handleRoute);

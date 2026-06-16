@@ -297,8 +297,11 @@
 
     try {
       // 데이터 가져오기
+      const sharedScanner = typeof window.__kbkGetSharedScannerData === 'function'
+        ? window.__kbkGetSharedScannerData()
+        : fetch('/api/scanner', { cache: 'default' }).then(r => r.json());
       const [scanRes, exRes] = await Promise.all([
-        fetch('/api/scanner', { cache: 'no-store' }).then(r => r.json()),
+        sharedScanner,
         fetch('/api/exchange', { cache: 'no-store' }).then(r => r.json()).catch(() => null)
       ]);
 
