@@ -1628,6 +1628,24 @@ function isTopPicksActive() {
   return window.location.pathname === "/top-picks" || window.location.hash === "#top-picks";
 }
 
+function topPicksFromPayload(payload) {
+  const raw = Array.isArray(payload?.data?.topPicks)
+    ? payload.data.topPicks
+    : Array.isArray(payload?.topPicks)
+      ? payload.topPicks
+      : [];
+  if (raw.length > 0) {
+    const safe = raw.filter((item) => item?.isChasingRisk !== true && item?.isOverheated !== true);
+    const risky = raw.filter((item) => item?.isChasingRisk === true || item?.isOverheated === true);
+    return [...safe, ...risky].slice(0, 20);
+  }
+  const items = Array.isArray(payload?.data?.items) ? payload.data.items : Array.isArray(payload?.items) ? payload.items : [];
+  return items
+    .filter((item) => item?.symbol && item.included !== false)
+    .sort((a, b) => (num(b.marketPrioritySortScore) ?? num(b.finalSelectionScore) ?? 0) - (num(a.marketPrioritySortScore) ?? num(a.finalSelectionScore) ?? 0))
+    .slice(0, 20);
+}
+
 async function loadTopPicks() {
   if (typeof window.__kbkRenderTopPicksOnly === "function") {
     return null;
@@ -1650,7 +1668,7 @@ async function loadTopPicks() {
       fetchJson("/api/exchange").catch(() => null),
     ]);
     usdKrw = num(exchangePayload?.rate) ?? num(exchangePayload?.usdKrw) ?? num(exchangePayload?.data?.rate) ?? usdKrw;
-    const items = payload?.data?.items ?? payload?.items ?? [];
+    const items = topPicksFromPayload(payload);
     const rankPicks = (a, b) => (a.stageMeta?.isChasingRisk ? 1 : 0) - (b.stageMeta?.isChasingRisk ? 1 : 0)
       || (a.stageMeta?.isOverheated ? 1 : 0) - (b.stageMeta?.isOverheated ? 1 : 0)
       || (b.setupBias?.strongEarlySignal ? 1 : 0) - (a.setupBias?.strongEarlySignal ? 1 : 0)

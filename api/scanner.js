@@ -11,6 +11,7 @@ const SCANNER_OVER_ONE_LIMIT = 30;
 const SCANNER_ACCUMULATION_LIMIT = 30;
 const SCANNER_PRE_MOVE_LIMIT = 30;
 const SCANNER_TOP_PICKS_LIMIT = 20;
+const SCANNER_REBOUND_WATCH_LIMIT = 30;
 const scannerSuccessCacheByMode = {
   default: null,
   debug: null,
@@ -123,39 +124,81 @@ function deriveScannerArrays(payload) {
   if (!payload || typeof payload !== "object" || !payload.data || typeof payload.data !== "object") return payload;
   const items = Array.isArray(payload.data.items) ? payload.data.items : [];
   const ranked = sortByPriority(items);
+  const parseChange = (item) => num(item?.changePercent ?? item?.preMarketChangePercent);
+  const parsePrice = (item) => num(item?.price ?? item?.preMarketPrice ?? item?.regularMarketPrice);
+  const isRisky = (item) => item?.isOverheated === true || item?.isChasingRisk === true;
+  const isVwapBelow = (item) => item?.aboveVwap === false || ((num(item?.vwapDistancePercent) ?? 0) < -1.5);
+
   if (!Array.isArray(payload.data.shortTermCandidates)) {
-    payload.data.shortTermCandidates = ranked.slice(0, SCANNER_SHORT_TERM_LIMIT);
+    payload.data.shortTermCandidates = ranked
+      .filter((item) => {
+        const change = parseChange(item);
+        return change !== null && change >= 0 && !isRisky(item);
+      })
+      .slice(0, SCANNER_SHORT_TERM_LIMIT);
   }
   if (!Array.isArray(payload.data.topPicks)) {
-    payload.data.topPicks = ranked.slice(0, SCANNER_TOP_PICKS_LIMIT);
+    const safe = ranked.filter((item) => !isRisky(item));
+    const risky = ranked.filter((item) => isRisky(item));
+    payload.data.topPicks = [...safe, ...risky].slice(0, SCANNER_TOP_PICKS_LIMIT);
   }
   if (!Array.isArray(payload.data.accumulationCandidates)) {
     payload.data.accumulationCandidates = ranked
       .filter((item) => {
         const stage = String(item?.stage || "");
-        const change = num(item?.changePercent ?? item?.preMarketChangePercent) ?? 0;
+        const change = parseChange(item);
+        if (change === null || change > 10 || isRisky(item)) return false;
         return item?.isPreSurgeCandidate === true
           || stage === "ACCUMULATION"
-          || stage === "PRE_SURGE"
-          || (change <= 10 && item?.isChasingRisk !== true && item?.isOverheated !== true);
+          || stage === "PRE_SURGE";
       })
       .slice(0, SCANNER_ACCUMULATION_LIMIT);
   }
   if (!Array.isArray(payload.data.underOneCandidates)) {
     payload.data.underOneCandidates = ranked
       .filter((item) => {
-        const price = num(item?.price ?? item?.preMarketPrice ?? item?.regularMarketPrice);
-        return price !== null && price < 1;
+        const price = parsePrice(item);
+        const change = parseChange(item);
+        return price !== null
+          && price < 1
+          && change !== null
+          && change >= 0
+          && !isRisky(item);
       })
       .slice(0, SCANNER_UNDER_ONE_LIMIT);
   }
   if (!Array.isArray(payload.data.overOneCandidates)) {
-    payload.data.overOneCandidates = ranked
+    const preferredStages = new Set(["EARLY_BREAKOUT", "PRE_SURGE", "MOMENTUM_EXPANSION"]);
+    const preferred = ranked
       .filter((item) => {
-        const price = num(item?.price ?? item?.preMarketPrice ?? item?.regularMarketPrice);
-        return price !== null && price >= 1;
+        const price = parsePrice(item);
+        const change = parseChange(item);
+        const stage = String(item?.stage || "");
+        return price !== null
+          && price >= 1
+          && change !== null
+          && change >= 0
+          && !isRisky(item)
+          && preferredStages.has(stage)
+          && !isVwapBelow(item);
       })
-      .slice(0, SCANNER_OVER_ONE_LIMIT);
+      .sort((a, b) => {
+        const aChange = parseChange(a) ?? 0;
+        const bChange = parseChange(b) ?? 0;
+        const aPriority = (aChange >= 2 ? 1000 : 0) + (num(a?.marketPrioritySortScore) ?? num(a?.finalSelectionScore) ?? 0);
+        const bPriority = (bChange >= 2 ? 1000 : 0) + (num(b?.marketPrioritySortScore) ?? num(b?.finalSelectionScore) ?? 0);
+        return bPriority - aPriority;
+      });
+    payload.data.overOneCandidates = preferred.slice(0, SCANNER_OVER_ONE_LIMIT);
+  }
+  if (!Array.isArray(payload.data.reboundWatchCandidates)) {
+    payload.data.reboundWatchCandidates = ranked
+      .filter((item) => {
+        const price = parsePrice(item);
+        const change = parseChange(item);
+        return price !== null && price >= 1 && change !== null && change < 0;
+      })
+      .slice(0, SCANNER_REBOUND_WATCH_LIMIT);
   }
   if (!Array.isArray(payload.data.preMoveCandidates)) {
     payload.data.preMoveCandidates = [];
@@ -175,6 +218,7 @@ function sanitizeScannerPayload(payload, { debug = false } = {}) {
   payload.data.accumulationCandidates = sanitizeScannerList(payload.data.accumulationCandidates, SCANNER_ACCUMULATION_LIMIT, options);
   payload.data.preMoveCandidates = sanitizeScannerList(payload.data.preMoveCandidates, SCANNER_PRE_MOVE_LIMIT, options);
   payload.data.topPicks = sanitizeScannerList(payload.data.topPicks, SCANNER_TOP_PICKS_LIMIT, options);
+  payload.data.reboundWatchCandidates = sanitizeScannerList(payload.data.reboundWatchCandidates, SCANNER_REBOUND_WATCH_LIMIT, options);
   return payload;
 }
 

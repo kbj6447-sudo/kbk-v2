@@ -1387,7 +1387,7 @@ async function renderTopPicksOnly(renderPhase = "initial") {
     try {
       const payload = await fetchJson("/api/scanner");
       if (renderToken !== topPicksRenderToken) return;
-      const items = (payload?.items || payload?.data?.items || [])
+      const items = topPicksFromPayload(payload)
       .filter((item) => item?.symbol && item.included !== false)
       .map((item) => {
         const price = livePriceOf(item) ?? 0;
@@ -2239,6 +2239,61 @@ function preMoveCandidatesFromPayload(payload) {
     .slice(0, 30);
 }
 
+function scannerItemsFromPayload(payload) {
+  return Array.isArray(payload?.data?.items) ? payload.data.items : Array.isArray(payload?.items) ? payload.items : [];
+}
+
+function shortTermCandidatesFromPayload(payload) {
+  const raw = Array.isArray(payload?.data?.shortTermCandidates)
+    ? payload.data.shortTermCandidates
+    : Array.isArray(payload?.shortTermCandidates)
+      ? payload.shortTermCandidates
+      : [];
+  if (raw.length > 0) return raw;
+  return scannerItemsFromPayload(payload)
+    .filter((item) => item?.symbol)
+    .filter((item) => toNumber(item.changePercent) !== null && toNumber(item.changePercent) >= 0)
+    .filter((item) => item?.isChasingRisk !== true && item?.isOverheated !== true)
+    .slice(0, 30);
+}
+
+function accumulationCandidatesFromPayload(payload) {
+  const raw = Array.isArray(payload?.data?.accumulationCandidates)
+    ? payload.data.accumulationCandidates
+    : Array.isArray(payload?.accumulationCandidates)
+      ? payload.accumulationCandidates
+      : [];
+  if (raw.length > 0) return raw;
+  return scannerItemsFromPayload(payload)
+    .filter((item) => item?.symbol)
+    .filter((item) => {
+      const stage = String(item?.stage || "");
+      const change = toNumber(item.changePercent);
+      return (stage === "ACCUMULATION" || stage === "PRE_SURGE" || item?.isPreSurgeCandidate === true)
+        && change !== null
+        && change <= 10;
+    })
+    .filter((item) => item?.isChasingRisk !== true && item?.isOverheated !== true)
+    .slice(0, 30);
+}
+
+function topPicksFromPayload(payload) {
+  const raw = Array.isArray(payload?.data?.topPicks)
+    ? payload.data.topPicks
+    : Array.isArray(payload?.topPicks)
+      ? payload.topPicks
+      : [];
+  if (raw.length > 0) {
+    const safe = raw.filter((item) => item?.isChasingRisk !== true && item?.isOverheated !== true);
+    const risky = raw.filter((item) => item?.isChasingRisk === true || item?.isOverheated === true);
+    return [...safe, ...risky].slice(0, 20);
+  }
+  return scannerItemsFromPayload(payload)
+    .filter((item) => item?.symbol)
+    .sort((a, b) => (toNumber(b.marketPrioritySortScore) ?? toNumber(b.finalSelectionScore) ?? 0) - (toNumber(a.marketPrioritySortScore) ?? toNumber(a.finalSelectionScore) ?? 0))
+    .slice(0, 20);
+}
+
 function removePreMoveSection() {
   document.getElementById("kbk-pre-move-section")?.remove();
 }
@@ -2341,14 +2396,17 @@ async function applyStageAwareAccumulationPage() {
 
   const cards = Array.from(document.querySelectorAll("article.stock-card"));
   if (!cards.length) return;
-  const items = Array.isArray(payload?.data?.items) ? payload.data.items : Array.isArray(payload?.items) ? payload.items : [];
+  const items = accumulationCandidatesFromPayload(payload);
   const itemMap = new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
   let visibleCount = 0;
 
   for (const card of cards) {
     const symbol = String(card.querySelector("h3")?.textContent || "").trim().toUpperCase();
     const item = itemMap.get(symbol);
-    if (!item) continue;
+    if (!item) {
+      card.style.display = "none";
+      continue;
+    }
 
     if (!stageAwareAccumulationAllowed(item)) {
       card.style.display = "none";
@@ -2389,7 +2447,7 @@ async function applyStageAwareCandidateTable() {
     return;
   }
 
-  const items = Array.isArray(payload?.data?.items) ? payload.data.items : Array.isArray(payload?.items) ? payload.items : [];
+  const items = shortTermCandidatesFromPayload(payload);
   const itemMap = new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
   const ranking = new Map(items
     .slice()
@@ -2404,7 +2462,11 @@ async function applyStageAwareCandidateTable() {
   for (const row of bodyRows) {
     const symbol = candidateRowSymbol(row);
     const item = itemMap.get(symbol);
-    if (!item) continue;
+    if (!item) {
+      row.style.display = "none";
+      continue;
+    }
+    row.style.display = "";
     const meta = stageMetaOf(item);
     const cells = row.querySelectorAll("td");
     const scoreCell = cells[cells.length - 2];
