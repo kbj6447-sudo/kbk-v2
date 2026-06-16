@@ -2244,15 +2244,39 @@ function scannerItemsFromPayload(payload) {
 }
 
 function shortTermCandidatesFromPayload(payload) {
+  const hasRecoverySignal = (item) => {
+    const rvol = toNumber(item?.relativeVolume ?? item?.volumeRatio ?? item?.rvol);
+    const volumeStrength = toNumber(item?.volumeStrengthScore ?? item?.volumeQualityScore);
+    const entrySuitability = toNumber(item?.entrySuitability);
+    return (rvol !== null && rvol >= 1.2)
+      || (volumeStrength !== null && volumeStrength >= 55)
+      || (entrySuitability !== null && entrySuitability >= 55);
+  };
+  const allowed = (item) => {
+    const change = toNumber(item?.changePercent ?? item?.preMarketChangePercent);
+    if (change === null || change < -3) return false;
+    if (item?.isChasingRisk === true || item?.isOverheated === true) return false;
+    if (change < 0) return hasRecoverySignal(item);
+    return true;
+  };
   const raw = Array.isArray(payload?.data?.shortTermCandidates)
     ? payload.data.shortTermCandidates
     : Array.isArray(payload?.shortTermCandidates)
       ? payload.shortTermCandidates
       : [];
-  if (raw.length > 0) return raw;
+  const preferred = raw.filter(allowed);
+  const fallbackPool = scannerItemsFromPayload(payload)
+    .filter((item) => item?.symbol)
+    .filter(allowed);
+  if (preferred.length >= 10) return preferred.slice(0, 30);
+  const seen = new Set(preferred.map((item) => String(item?.symbol || "").toUpperCase()));
+  const merged = [
+    ...preferred,
+    ...fallbackPool.filter((item) => !seen.has(String(item?.symbol || "").toUpperCase())),
+  ];
+  if (merged.length > 0) return merged.slice(0, 30);
   return scannerItemsFromPayload(payload)
     .filter((item) => item?.symbol)
-    .filter((item) => toNumber(item.changePercent) !== null && toNumber(item.changePercent) >= 0)
     .filter((item) => item?.isChasingRisk !== true && item?.isOverheated !== true)
     .slice(0, 30);
 }
@@ -2462,11 +2486,7 @@ async function applyStageAwareCandidateTable() {
   for (const row of bodyRows) {
     const symbol = candidateRowSymbol(row);
     const item = itemMap.get(symbol);
-    if (!item) {
-      row.style.display = "none";
-      continue;
-    }
-    row.style.display = "";
+    if (!item) continue;
     const meta = stageMetaOf(item);
     const cells = row.querySelectorAll("td");
     const scoreCell = cells[cells.length - 2];
@@ -2479,11 +2499,13 @@ async function applyStageAwareCandidateTable() {
       scoreCell.textContent = String(Math.round(toNumber(item.finalSelectionScore)));
     }
     if (statusCell) {
+      const change = toNumber(item.changePercent ?? item.preMarketChangePercent);
+      const recoveryTone = change !== null && change < 0 ? "반등 관찰/회복 대기" : null;
       statusCell.textContent = meta.isOverheated
         ? "과열"
         : meta.isChasingRisk
           ? "추격 위험"
-          : meta.stageLabelKo || meta.stage;
+          : recoveryTone || meta.stageLabelKo || meta.stage;
       statusCell.title = meta.riskLabelKo || "";
     }
   }
