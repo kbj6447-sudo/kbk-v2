@@ -1773,6 +1773,14 @@ function isSurgeWatchPage() {
   return window.location.pathname.includes("/scanner/surge-watch") || window.location.pathname.includes("/surge-watch");
 }
 
+function isSegmentedSurgeWatchPage() {
+  const path = window.location.pathname;
+  return path.includes("/scanner/surge-watch-under-1")
+    || path.includes("/surge-watch-under-1")
+    || path.includes("/scanner/surge-watch-over-1")
+    || path.includes("/surge-watch-over-1");
+}
+
 function visibleSurgeCards() {
   if (!isSurgeWatchPage()) return [];
   return Array.from(document.querySelectorAll(".stock-card")).filter((card) => {
@@ -1797,6 +1805,7 @@ function updateSurgeCardQuote(card, quote, livePrice = null) {
   if (!priceRow) return;
   const price = num(livePrice) ?? priceUsd(quote);
   const change = mainChangePct(quote, price) ?? changePct(quote);
+  if (isSegmentedSurgeWatchPage() && change !== null && change < 0) return;
   const volume = num(quote?.volume);
   const volumeSource = quote?.volumeSource;
   const confirmedVolume = hasConfirmedVolume({ volume, volumeSource }) ? volume : null;

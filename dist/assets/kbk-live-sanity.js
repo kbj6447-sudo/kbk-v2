@@ -15,6 +15,14 @@ function isSurgeRoute() {
   return window.location.pathname.includes("/scanner/surge-watch") || window.location.pathname.includes("/surge-watch");
 }
 
+function isSegmentedSurgeRoute() {
+  const path = window.location.pathname;
+  return path.includes("/scanner/surge-watch-under-1")
+    || path.includes("/surge-watch-under-1")
+    || path.includes("/scanner/surge-watch-over-1")
+    || path.includes("/surge-watch-over-1");
+}
+
 function isUnderOneView() {
   return isSurgeRoute() && /1달러 미만|UNDER \$1/i.test(document.body.textContent || "");
 }
@@ -122,6 +130,7 @@ function updateCard(card, quote, livePrice, rate) {
   const price = livePrice ?? toNumber(quote?.price) ?? toNumber(quote?.preMarketPrice);
   const previousClose = toNumber(quote?.previousClose);
   const change = price !== null && previousClose ? ((price - previousClose) / previousClose) * 100 : toNumber(quote?.changePercent);
+  if (isSegmentedSurgeRoute() && change !== null && change < 0) return;
   const volume = toNumber(quote?.volume) ?? toNumber(quote?.preMarketVolume);
   const volumeConfirmed = hasConfirmedVolume(quote, volume);
   const quoteRvol = toNumber(quote?.relativeVolume) ?? toNumber(quote?.volumeRatio);
