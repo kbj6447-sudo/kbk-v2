@@ -2258,6 +2258,21 @@ function candidateRowSymbol(row) {
   return String(symbolCell?.textContent || "").trim().split(/\s+/)[0].toUpperCase();
 }
 
+function realtimeCandidateItems(payload, limit = KBK_TOP_PICKS_RENDER_LIMIT + 10) {
+  const data = payload?.data && typeof payload.data === "object" && !Array.isArray(payload.data)
+    ? payload.data
+    : payload;
+  const shortTerm = Array.isArray(data?.shortTermCandidates) ? data.shortTermCandidates : [];
+  if (shortTerm.length) return shortTerm.slice(0, limit);
+
+  const fallbackItems = Array.isArray(data?.items) ? data.items : [];
+  return fallbackItems
+    .filter((item) => item?.symbol && item.included !== false)
+    .filter((item) => item.isOverheated !== true)
+    .sort((a, b) => (toNumber(b.scannerScore) ?? toNumber(b.finalProbabilityScore) ?? 0) - (toNumber(a.scannerScore) ?? toNumber(a.finalProbabilityScore) ?? 0))
+    .slice(0, limit);
+}
+
 async function applyStageAwareAccumulationPage() {
   if (!accumulationRouteActive()) return;
   if (accumulationPageFilterInFlight) return;
@@ -2325,8 +2340,9 @@ async function applyStageAwareCandidateTable() {
       ? await window.__kbkGetSharedScannerData()
       : await fetchJson("/api/scanner");
 
-    const items = scannerPayloadItems(payload, "items", KBK_TABLE_RENDER_LIMIT);
+    const items = realtimeCandidateItems(payload, 30);
     const itemMap = new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
+    if (!itemMap.size) return;
     const ranking = new Map(items
       .slice()
       .sort((a, b) => (toNumber(b.finalSelectionScore) ?? toNumber(b.finalProbabilityScore) ?? 0) - (toNumber(a.finalSelectionScore) ?? toNumber(a.finalProbabilityScore) ?? 0))
@@ -2341,7 +2357,8 @@ async function applyStageAwareCandidateTable() {
       const symbol = candidateRowSymbol(row);
       const item = itemMap.get(symbol);
       if (!item) {
-        row.remove();
+        // Realtime candidates are rendered by the main scanner app. Do not remove
+        // unmatched rows here; otherwise a lightweight payload can blank the table.
         continue;
       }
       const meta = stageMetaOf(item);
@@ -2369,10 +2386,7 @@ async function applyStageAwareCandidateTable() {
       .filter((row) => row.isConnected)
       .sort((a, b) => Number(a.dataset.kbkRank || 9999) - Number(b.dataset.kbkRank || 9999));
     sortedRows.forEach((row, index) => {
-      if (index >= KBK_TABLE_RENDER_LIMIT) {
-        row.remove();
-        return;
-      }
+      if (index >= 30) return;
       table.appendChild(row);
     });
 

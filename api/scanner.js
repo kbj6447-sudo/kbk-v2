@@ -2050,6 +2050,16 @@ function buildTopPickItems(items) {
     .filter((item) => item.isPreSurgeCandidate === true || !item.isOverheated);
 }
 
+function buildShortTermItems(items) {
+  const sorted = byFinalSelectionScore(items)
+    .filter((item) => item?.symbol && item.included !== false)
+    .filter((item) => item.isOverheated !== true && item.isChasingRisk !== true);
+  const preferredStages = new Set(["PRE_SURGE", "EARLY_BREAKOUT", "MOMENTUM_EXPANSION", "NEUTRAL"]);
+  const preferred = sorted.filter((item) => preferredStages.has(String(item.stage || "").toUpperCase()));
+  const source = preferred.length ? preferred : sorted;
+  return source.slice(0, DEFAULT_SHORT_TERM_LIMIT);
+}
+
 function buildDefaultItems(items) {
   const sorted = byFinalSelectionScore(items);
   const selected = [];
@@ -2078,6 +2088,7 @@ function shapeScannerPayloadForRequest(payload, req) {
   const sourceItems = payload.data.items;
   const responseItems = options.full ? sourceItems : buildDefaultItems(sourceItems);
   const sorted = byFinalSelectionScore(sourceItems);
+  const shortTermItems = buildShortTermItems(sourceItems);
   const topPickItems = buildTopPickItems(sourceItems);
   const underOneItems = [...sourceItems].filter(isUnderOneScannerItem).sort(compareUnderOneScannerItems);
   const overOneItems = sorted.filter((item) => !isUnderOneScannerItem(item));
@@ -2099,7 +2110,7 @@ function shapeScannerPayloadForRequest(payload, req) {
         topPicks: DEFAULT_TOP_PICK_LIMIT,
       },
       items: limitAndSanitize(responseItems, options.full ? sourceItems.length : DEFAULT_SCANNER_ITEM_LIMIT, options),
-      shortTermCandidates: limitAndSanitize(sorted, options.full ? sorted.length : DEFAULT_SHORT_TERM_LIMIT, options),
+      shortTermCandidates: limitAndSanitize(options.full ? sorted : shortTermItems, options.full ? sorted.length : DEFAULT_SHORT_TERM_LIMIT, options),
       underOneCandidates: limitAndSanitize(underOneItems, options.full ? underOneItems.length : DEFAULT_UNDER_ONE_LIMIT, options),
       overOneCandidates: limitAndSanitize(overOneItems, options.full ? overOneItems.length : DEFAULT_OVER_ONE_LIMIT, options),
       accumulationCandidates: limitAndSanitize(accumulationItems, options.full ? accumulationItems.length : DEFAULT_ACCUMULATION_LIMIT, options),
