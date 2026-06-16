@@ -61,6 +61,23 @@ function sanitizeScannerItem(item, { debug = false } = {}) {
     finalSelectionScore: item.finalSelectionScore ?? null,
     marketPrioritySortScore: item.marketPrioritySortScore ?? null,
     volumeQualitySortScore: item.volumeQualitySortScore ?? null,
+    surgePrecursorScore: item.surgePrecursorScore ?? null,
+    momentumExpansionScore: item.momentumExpansionScore ?? null,
+    volumeAccelerationScore: item.volumeAccelerationScore ?? null,
+    volumeQualityScore: item.volumeQualityScore ?? null,
+    entrySuitability: item.entrySuitability ?? null,
+    riskScore: item.riskScore ?? null,
+    rvol: item.rvol ?? null,
+    vwap: item.vwap ?? null,
+    aboveVwap: item.aboveVwap ?? null,
+    vwapDistancePercent: item.vwapDistancePercent ?? null,
+    compressionScore: item.compressionScore ?? null,
+    higherLowScore: item.higherLowScore ?? null,
+    volumeStrengthScore: item.volumeStrengthScore ?? null,
+    tradeValueKrw: item.tradeValueKrw ?? null,
+    statusBadge: item.statusBadge ?? null,
+    topPickVerdict: item.topPickVerdict ?? null,
+    topPickGrade: item.topPickGrade ?? null,
     changePenalty: item.changePenalty ?? null,
     isPreSurgeCandidate: item.isPreSurgeCandidate === true,
     isChasingRisk: item.isChasingRisk === true,
@@ -83,16 +100,73 @@ function sanitizeScannerItem(item, { debug = false } = {}) {
 }
 
 function sanitizeScannerList(list, limit, options) {
-  if (!Array.isArray(list)) return list;
+  if (!Array.isArray(list)) return [];
   return list
     .map((item) => sanitizeScannerItem(item, options))
     .filter((item) => item && item.symbol)
     .slice(0, limit);
 }
 
+function sortByPriority(items = []) {
+  return items
+    .slice()
+    .sort((a, b) => {
+      const aPriority = num(a.marketPrioritySortScore) ?? num(a.finalSelectionScore) ?? num(a.finalProbabilityScore) ?? num(a.scannerScore) ?? 0;
+      const bPriority = num(b.marketPrioritySortScore) ?? num(b.finalSelectionScore) ?? num(b.finalProbabilityScore) ?? num(b.scannerScore) ?? 0;
+      return bPriority - aPriority
+        || ((num(b.entrySuitability ?? b.topPickFinalScore) ?? 0) - (num(a.entrySuitability ?? a.topPickFinalScore) ?? 0))
+        || ((num(b.rvol ?? b.relativeVolume ?? b.volumeRatio) ?? 0) - (num(a.rvol ?? a.relativeVolume ?? a.volumeRatio) ?? 0));
+    });
+}
+
+function deriveScannerArrays(payload) {
+  if (!payload || typeof payload !== "object" || !payload.data || typeof payload.data !== "object") return payload;
+  const items = Array.isArray(payload.data.items) ? payload.data.items : [];
+  const ranked = sortByPriority(items);
+  if (!Array.isArray(payload.data.shortTermCandidates)) {
+    payload.data.shortTermCandidates = ranked.slice(0, SCANNER_SHORT_TERM_LIMIT);
+  }
+  if (!Array.isArray(payload.data.topPicks)) {
+    payload.data.topPicks = ranked.slice(0, SCANNER_TOP_PICKS_LIMIT);
+  }
+  if (!Array.isArray(payload.data.accumulationCandidates)) {
+    payload.data.accumulationCandidates = ranked
+      .filter((item) => {
+        const stage = String(item?.stage || "");
+        const change = num(item?.changePercent ?? item?.preMarketChangePercent) ?? 0;
+        return item?.isPreSurgeCandidate === true
+          || stage === "ACCUMULATION"
+          || stage === "PRE_SURGE"
+          || (change <= 10 && item?.isChasingRisk !== true && item?.isOverheated !== true);
+      })
+      .slice(0, SCANNER_ACCUMULATION_LIMIT);
+  }
+  if (!Array.isArray(payload.data.underOneCandidates)) {
+    payload.data.underOneCandidates = ranked
+      .filter((item) => {
+        const price = num(item?.price ?? item?.preMarketPrice ?? item?.regularMarketPrice);
+        return price !== null && price < 1;
+      })
+      .slice(0, SCANNER_UNDER_ONE_LIMIT);
+  }
+  if (!Array.isArray(payload.data.overOneCandidates)) {
+    payload.data.overOneCandidates = ranked
+      .filter((item) => {
+        const price = num(item?.price ?? item?.preMarketPrice ?? item?.regularMarketPrice);
+        return price !== null && price >= 1;
+      })
+      .slice(0, SCANNER_OVER_ONE_LIMIT);
+  }
+  if (!Array.isArray(payload.data.preMoveCandidates)) {
+    payload.data.preMoveCandidates = [];
+  }
+  return payload;
+}
+
 function sanitizeScannerPayload(payload, { debug = false } = {}) {
   if (!payload || typeof payload !== "object") return payload;
   if (!payload.data || typeof payload.data !== "object") return payload;
+  deriveScannerArrays(payload);
   const options = { debug };
   payload.data.items = sanitizeScannerList(payload.data.items, SCANNER_ITEM_LIMIT, options);
   payload.data.shortTermCandidates = sanitizeScannerList(payload.data.shortTermCandidates, SCANNER_SHORT_TERM_LIMIT, options);

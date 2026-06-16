@@ -2364,9 +2364,10 @@ async function applyStageAwareAccumulationPage() {
     const note = card.querySelector(".stock-note");
     if (note) {
       note.dataset.kbkOriginalNote = note.dataset.kbkOriginalNote || note.textContent || "";
-      note.textContent = meta.riskLabelKo && meta.riskLabelKo !== "중립"
+      const nextNote = meta.riskLabelKo && meta.riskLabelKo !== "중립"
         ? `${meta.riskLabelKo} · ${note.dataset.kbkOriginalNote}`
         : note.dataset.kbkOriginalNote;
+      if (note.textContent !== nextNote) note.textContent = nextNote;
     }
   }
 
@@ -2425,13 +2426,33 @@ async function applyStageAwareCandidateTable() {
     }
   }
 
-  bodyRows
-    .sort((a, b) => Number(a.dataset.kbkRank || 9999) - Number(b.dataset.kbkRank || 9999))
-    .forEach((row) => table.appendChild(row));
+  const sortedRows = bodyRows
+    .slice()
+    .sort((a, b) => Number(a.dataset.kbkRank || 9999) - Number(b.dataset.kbkRank || 9999));
+  const orderChanged = sortedRows.some((row, index) => row !== bodyRows[index]);
+  if (orderChanged) {
+    sortedRows.forEach((row) => table.appendChild(row));
+  }
 
   if (headerRow.parentElement === table) {
     table.insertBefore(headerRow, table.firstChild);
   }
+}
+
+let stageAwareApplyQueued = false;
+let stageAwareAppliedAt = 0;
+
+function scheduleStageAwareApply() {
+  if (stageAwareApplyQueued) return;
+  const now = Date.now();
+  if (now - stageAwareAppliedAt < 250) return;
+  stageAwareApplyQueued = true;
+  window.setTimeout(() => {
+    stageAwareApplyQueued = false;
+    stageAwareAppliedAt = Date.now();
+    applyStageAwareAccumulationPage();
+    applyStageAwareCandidateTable();
+  }, 120);
 }
 
 function boot() {
@@ -2453,8 +2474,7 @@ function boot() {
     if (document.getElementById("exchange-rate") && !window.__kbkExchangeState) {
       ensureExchangeRateStatus();
     }
-    applyStageAwareAccumulationPage();
-    applyStageAwareCandidateTable();
+    scheduleStageAwareApply();
   });
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
   window.addEventListener("popstate", handleRoute);
