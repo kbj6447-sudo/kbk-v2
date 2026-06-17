@@ -1491,7 +1491,7 @@ async function renderTopPicksOnly(renderPhase = "initial") {
           displaySortScore,
         };
       })
-      .filter((pick) => pick.selectionMetrics.selectionGroup === "상단 후보" || pick.selectionMetrics.finalSelectionScore >= 50 || pick.reasoning.priority >= 2)
+      .filter((pick) => getTopPickOperationalRankScore(pick.item) >= 70 || pick.selectionMetrics.selectionGroup === "상단 후보" || pick.selectionMetrics.finalSelectionScore >= 50 || pick.reasoning.priority >= 2)
       .sort((a, b) => getTopPickOperationalRankScore(b.item) - getTopPickOperationalRankScore(a.item)
         || selectionGroupRank(a.selectionMetrics.selectionGroup) - selectionGroupRank(b.selectionMetrics.selectionGroup)
         || (a.stageMeta?.isChasingRisk ? 1 : 0) - (b.stageMeta?.isChasingRisk ? 1 : 0)
