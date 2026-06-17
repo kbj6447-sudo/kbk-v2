@@ -860,6 +860,19 @@ function selectionGroupRank(group) {
   return 2;
 }
 
+function getTopPickOperationalRankScore(item) {
+  const operational = Number(item?.operationalRankScore);
+  if (Number.isFinite(operational)) return operational;
+
+  const experimental = Number(item?.experimentalRankScore);
+  if (Number.isFinite(experimental)) return experimental;
+
+  const finalScore = Number(item?.finalSelectionScore);
+  if (Number.isFinite(finalScore)) return finalScore;
+
+  return 0;
+}
+
 function calculateTopPickSelectionMetrics(item, setup, reasoning, signal, finalScore, chaseRisk, change) {
   const entrySuitability = Math.round(toNumber(item.entrySuitability ?? item.topPickFinalScore) ?? finalScore);
   const chartPatternScore = Math.round(toNumber(item.chartPatternScore ?? item.patternSimilarityScore ?? finalScore) ?? 0);
@@ -1479,7 +1492,8 @@ async function renderTopPicksOnly(renderPhase = "initial") {
         };
       })
       .filter((pick) => pick.selectionMetrics.selectionGroup === "상단 후보" || pick.selectionMetrics.finalSelectionScore >= 50 || pick.reasoning.priority >= 2)
-      .sort((a, b) => selectionGroupRank(a.selectionMetrics.selectionGroup) - selectionGroupRank(b.selectionMetrics.selectionGroup)
+      .sort((a, b) => getTopPickOperationalRankScore(b.item) - getTopPickOperationalRankScore(a.item)
+        || selectionGroupRank(a.selectionMetrics.selectionGroup) - selectionGroupRank(b.selectionMetrics.selectionGroup)
         || (a.stageMeta?.isChasingRisk ? 1 : 0) - (b.stageMeta?.isChasingRisk ? 1 : 0)
         || (a.stageMeta?.isOverheated ? 1 : 0) - (b.stageMeta?.isOverheated ? 1 : 0)
         || b.displaySortScore - a.displaySortScore

@@ -34,8 +34,450 @@ function sanitizeScannerReasonList(reasons) {
     .slice(0, 3);
 }
 
+function firstNumericField(item, fields) {
+  for (const { key, source } of fields) {
+    if (!Object.prototype.hasOwnProperty.call(item, key)) continue;
+    const value = num(item[key]);
+    if (value !== null) return { value, source: source || key };
+  }
+  return { value: null, source: null };
+}
+
+function deriveRangeAuditFields(item) {
+  if (!item || typeof item !== "object") {
+    return {
+      highDropPercent: null,
+      highDropSource: null,
+      closePositionInRange: null,
+      closePositionSource: null,
+      vwapEstimate: null,
+      vwapSource: null,
+    };
+  }
+
+  const price = num(item.price);
+  const high = firstNumericField(item, [
+    { key: "regularMarketDayHigh", source: "regularMarketDayHigh" },
+    { key: "dayHigh", source: "intradayHigh" },
+    { key: "intradayHigh", source: "intradayHigh" },
+    { key: "preMarketHigh", source: "preMarketHigh" },
+    { key: "postMarketHigh", source: "postMarketHigh" },
+    { key: "price", source: "fallback" },
+  ]);
+  const low = firstNumericField(item, [
+    { key: "regularMarketDayLow", source: "regularMarketDayLow" },
+    { key: "dayLow", source: "intradayLow" },
+    { key: "intradayLow", source: "intradayLow" },
+    { key: "preMarketLow", source: "preMarketLow" },
+    { key: "postMarketLow", source: "postMarketLow" },
+    { key: "price", source: "fallback" },
+  ]);
+  const highDropPercent = high.value !== null && high.value > 0 && price !== null
+    ? Math.max(0, ((high.value - price) / high.value) * 100)
+    : null;
+  const closePositionInRange = high.value !== null && low.value !== null && price !== null && high.value > low.value
+    ? ((price - low.value) / (high.value - low.value)) * 100
+    : null;
+  const vwapEstimate = high.value !== null && low.value !== null && price !== null && high.value > 0 && low.value > 0 && price > 0
+    ? (high.value + low.value + price) / 3
+    : null;
+
+  return {
+    highDropPercent,
+    highDropSource: highDropPercent !== null ? high.source : null,
+    closePositionInRange,
+    closePositionSource: closePositionInRange !== null ? `${low.source}-${high.source}` : null,
+    vwapEstimate,
+    vwapSource: vwapEstimate !== null ? "hlc-estimate" : null,
+  };
+}
+
+const FIELD_QUICK_AUDIT_CONFIG = [
+  {
+    key: "sessionMovePercent",
+    fields: ["sessionMovePercent", "changePercent", "preMarketChangePercent", "regularMarketChangePercent", "postMarketChangePercent"],
+    canCalculateWithoutExtraCall: true,
+    requiresExtraApiCall: false,
+    conclusion: "use_with_fallback",
+  },
+  {
+    key: "closePositionInRange",
+    fields: ["closePositionInRange"],
+    canCalculateWithoutExtraCall: true,
+    requiresExtraApiCall: false,
+    conclusion: "use_with_fallback",
+  },
+  {
+    key: "volumeAcceleration",
+    fields: ["volumeAcceleration", "volumeAcceleration1m", "volumeAcceleration5m", "volumeAccelerationScore"],
+    canCalculateWithoutExtraCall: false,
+    requiresExtraApiCall: true,
+    conclusion: "top20_or_detail_only",
+  },
+  {
+    key: "higherLowScore",
+    fields: ["higherLowScore"],
+    canCalculateWithoutExtraCall: true,
+    requiresExtraApiCall: true,
+    conclusion: "top20_or_detail_only",
+  },
+  {
+    key: "highDropPercent",
+    fields: ["highDropPercent"],
+    canCalculateWithoutExtraCall: true,
+    requiresExtraApiCall: false,
+    conclusion: "use_with_fallback",
+  },
+  {
+    key: "vwap",
+    fields: ["vwap"],
+    canCalculateWithoutExtraCall: false,
+    requiresExtraApiCall: true,
+    conclusion: "top20_or_detail_only",
+  },
+  {
+    key: "aboveVwap",
+    fields: ["aboveVwap"],
+    canCalculateWithoutExtraCall: false,
+    requiresExtraApiCall: true,
+    conclusion: "top20_or_detail_only",
+  },
+  {
+    key: "vwapDistancePercent",
+    fields: ["vwapDistancePercent"],
+    canCalculateWithoutExtraCall: false,
+    requiresExtraApiCall: true,
+    conclusion: "top20_or_detail_only",
+  },
+  {
+    key: "tradeValueKrw",
+    fields: ["tradeValueKrw"],
+    canCalculateWithoutExtraCall: true,
+    requiresExtraApiCall: false,
+    conclusion: "use_now",
+  },
+  {
+    key: "relativeVolume",
+    fields: ["relativeVolume", "rvol", "volumeRatio"],
+    canCalculateWithoutExtraCall: true,
+    requiresExtraApiCall: false,
+    conclusion: "use_now",
+  },
+  {
+    key: "changePercent",
+    fields: ["changePercent", "preMarketChangePercent", "regularMarketChangePercent", "postMarketChangePercent"],
+    canCalculateWithoutExtraCall: true,
+    requiresExtraApiCall: false,
+    conclusion: "use_now",
+  },
+  {
+    key: "regularMarketDayHigh",
+    fields: ["regularMarketDayHigh"],
+    canCalculateWithoutExtraCall: false,
+    requiresExtraApiCall: true,
+    conclusion: "top20_or_detail_only",
+  },
+  {
+    key: "regularMarketDayLow",
+    fields: ["regularMarketDayLow"],
+    canCalculateWithoutExtraCall: false,
+    requiresExtraApiCall: true,
+    conclusion: "top20_or_detail_only",
+  },
+  {
+    key: "price",
+    fields: ["price"],
+    canCalculateWithoutExtraCall: true,
+    requiresExtraApiCall: false,
+    conclusion: "use_now",
+  },
+  {
+    key: "marketState",
+    fields: ["marketState"],
+    canCalculateWithoutExtraCall: true,
+    requiresExtraApiCall: false,
+    conclusion: "use_now",
+  },
+];
+
+function fieldValueState(item, fields) {
+  for (const field of fields) {
+    if (!Object.prototype.hasOwnProperty.call(item, field)) continue;
+    return item[field] === null || item[field] === undefined ? "null" : "exists";
+  }
+  return "missing";
+}
+
+function buildFieldQuickAudit(items = []) {
+  const total = Array.isArray(items) ? items.length : 0;
+  const audit = {};
+  for (const config of FIELD_QUICK_AUDIT_CONFIG) {
+    let existsCount = 0;
+    let nullCount = 0;
+    let missingCount = 0;
+    for (const item of items) {
+      const state = fieldValueState(item || {}, config.fields);
+      if (state === "exists") existsCount += 1;
+      else if (state === "null") nullCount += 1;
+      else missingCount += 1;
+    }
+    const usableRatio = total > 0 ? Number((existsCount / total).toFixed(3)) : 0;
+    audit[config.key] = {
+      existsCount,
+      nullCount,
+      missingCount,
+      usableRatio,
+      canCalculateWithoutExtraCall: config.canCalculateWithoutExtraCall,
+      requiresExtraApiCall: config.requiresExtraApiCall,
+      quickConclusion: config.conclusion,
+    };
+  }
+  return audit;
+}
+
+function buildQuickAuditSummary(fieldQuickAudit, totalCandidates) {
+  const entries = Object.entries(fieldQuickAudit || {});
+  return {
+    totalCandidates,
+    fieldsUsableNow: entries.filter(([, value]) => value.quickConclusion === "use_now").map(([key]) => key),
+    fieldsNeedFallback: entries.filter(([, value]) => value.quickConclusion === "use_with_fallback").map(([key]) => key),
+    fieldsNeedExtraApiCall: entries.filter(([, value]) => value.quickConclusion === "top20_or_detail_only").map(([key]) => key),
+    fieldsUnavailable: entries.filter(([, value]) => value.quickConclusion === "unavailable").map(([key]) => key),
+    recommendedNextStep: "Use only no-extra-call and fallback-safe fields for experimental score v1. VWAP and volumeAcceleration require extra API calls, so use them only for top20/detail in later phases.",
+  };
+}
+
+function attachQuickAudit(payload) {
+  if (!payload?.data || typeof payload.data !== "object") return payload;
+  const items = Array.isArray(payload.data.items) ? payload.data.items : [];
+  const fieldQuickAudit = buildFieldQuickAudit(items);
+  payload.data.fieldQuickAudit = fieldQuickAudit;
+  payload.data.quickAuditSummary = buildQuickAuditSummary(fieldQuickAudit, items.length);
+  return payload;
+}
+
+function experimentalChangeScore(changePercent) {
+  const change = num(changePercent);
+  if (change === null) return { score: 10, label: "change missing: neutral fallback" };
+  if (change >= -3 && change < 3) return { score: 22, label: "quiet session move" };
+  if (change >= 3 && change <= 8) return { score: 30, label: "early positive session move" };
+  if (change > 8 && change <= 15) return { score: 24, label: "extended but still usable move" };
+  if (change > 15 && change <= 25) return { score: 14, label: "chase risk from session move" };
+  if (change > 25) return { score: 6, label: "overextended session move" };
+  if (change >= -8) return { score: 12, label: "mild pullback" };
+  return { score: 4, label: "deep negative session move" };
+}
+
+function experimentalRelativeVolumeScore(relativeVolume) {
+  const rvol = num(relativeVolume);
+  if (rvol === null) return { score: 0, label: "relative volume missing: low confidence" };
+  if (rvol < 0.5) return { score: 0, label: "very low relative volume" };
+  if (rvol < 1) return { score: 3, label: "below-normal relative volume" };
+  if (rvol < 2) return { score: 12, label: "baseline relative volume" };
+  if (rvol < 3) return { score: 18, label: "moderate volume expansion" };
+  if (rvol < 5) return { score: 24, label: "strong volume expansion" };
+  return { score: 30, label: "very strong volume expansion" };
+}
+
+function experimentalTradeValueScore(tradeValueKrw, relativeVolume) {
+  const tradeValue = num(tradeValueKrw);
+  const rvol = num(relativeVolume);
+  if (tradeValue === null) return { score: 0, label: "trade value missing: low confidence" };
+  let score = 4;
+  let label = "thin trade value";
+  if (tradeValue >= 1_000_000_000) {
+    score = 25;
+    label = "very liquid trade value";
+  } else if (tradeValue >= 300_000_000) {
+    score = 22;
+    label = "liquid trade value";
+  } else if (tradeValue >= 100_000_000) {
+    score = 16;
+    label = "usable trade value";
+  } else if (tradeValue >= 30_000_000) {
+    score = 10;
+    label = "light trade value";
+  }
+  if (rvol !== null && rvol < 0.5 && score > 8) {
+    return { score: 8, label: `${label}; capped by very low RVOL` };
+  }
+  if (rvol !== null && rvol < 1 && score > 12) {
+    return { score: 12, label: `${label}; capped by low RVOL` };
+  }
+  return { score, label };
+}
+
+function experimentalPriceScore(price) {
+  const value = num(price);
+  if (value === null || value <= 0) return { score: 2, label: "price missing" };
+  if (value >= 0.5 && value <= 20) return { score: 10, label: "scanner-friendly price band" };
+  if (value > 20 && value <= 80) return { score: 8, label: "mid price band" };
+  if (value >= 0.1 && value < 0.5) return { score: 6, label: "sub-dollar price band" };
+  if (value > 80 && value <= 300) return { score: 5, label: "high price band" };
+  return { score: 3, label: "very high or ultra-low price band" };
+}
+
+function experimentalMarketStateScore(marketState) {
+  const state = String(marketState || "").toUpperCase();
+  if (state === "REGULAR") return { score: 4, label: "regular session state" };
+  if (state === "PRE" || state === "PREPRE" || state === "POST" || state === "POSTPOST" || state === "DAY") {
+    return { score: 3, label: "extended or day session state" };
+  }
+  return { score: state ? 2 : 0, label: "unknown or inactive market state" };
+}
+
+function experimentalOverextensionPenalty(changePercent) {
+  const change = num(changePercent);
+  if (change === null) return { penalty: 0, label: null };
+  if (change >= 70) return { penalty: 30, label: "Overextended: changePercent >= 70%, already surged risk" };
+  if (change >= 50) return { penalty: 20, label: "Overextended: changePercent >= 50%, already surged risk" };
+  if (change >= 30) return { penalty: 10, label: "Overextended: changePercent >= 30%, already surged risk" };
+  return { penalty: 0, label: null };
+}
+
+function experimentalExtremeRvolPenalty(relativeVolume) {
+  const rvol = num(relativeVolume);
+  if (rvol === null) return { penalty: 0, label: null };
+  if (rvol >= 1000) return { penalty: 5, label: "Abnormal RVOL: verify liquidity/source" };
+  if (rvol >= 100) return { penalty: 5, label: "Extreme RVOL: baseline may be too low" };
+  return { penalty: 0, label: null };
+}
+
+function experimentalLowLiquidityPenalty(tradeValueKrw, marketState) {
+  const tradeValue = num(tradeValueKrw);
+  if (tradeValue === null) return { penalty: 0, label: null };
+  const state = String(marketState || "").toUpperCase();
+  const isRegular = state === "REGULAR" || state === "";
+  const multiplier = isRegular ? 1 : 0.5;
+  if (tradeValue < 50_000_000) {
+    return { penalty: Math.round(15 * multiplier), label: "Low liquidity: tradeValueKrw < 50,000,000" };
+  }
+  if (tradeValue < 100_000_000) {
+    return { penalty: Math.round(8 * multiplier), label: "Low liquidity: tradeValueKrw < 100,000,000" };
+  }
+  if (tradeValue < 300_000_000) {
+    return { penalty: Math.round(4 * multiplier), label: "Low liquidity: tradeValueKrw < 300,000,000" };
+  }
+  return { penalty: 0, label: null };
+}
+
+function experimentalStructurePenalty(symbol, tradeValueKrw, changePercent) {
+  const value = String(symbol || "").toUpperCase();
+  if (!value) return { penalty: 0, labels: [] };
+  if (value.endsWith("U") || value.endsWith("W") || value.endsWith("R") || value.includes("WS")) {
+    const tradeValue = num(tradeValueKrw);
+    const change = num(changePercent);
+    const isLowLiquidity = tradeValue !== null && tradeValue < 100_000_000;
+    const isZeroChange = change !== null && change === 0;
+    let penalty = 8;
+    const labels = ["Structure risk: possible unit/warrant/right ticker"];
+    if (isLowLiquidity) {
+      penalty += 10;
+      labels.push("Structure + low liquidity: not suitable for top scanner rank");
+    }
+    if (isZeroChange) {
+      penalty += 8;
+      labels.push("Structure + zero change: likely inactive/unit-style move");
+    }
+    if (isLowLiquidity && isZeroChange) {
+      penalty += 10;
+      labels.push("Structure + low liquidity + zero change: high scanner-rank risk");
+    }
+    return { penalty, labels };
+  }
+  return { penalty: 0, labels: [] };
+}
+
+function experimentalRvolScoreCap(relativeVolume) {
+  const rvol = num(relativeVolume);
+  if (rvol === null || rvol < 0.5) {
+    return { maxScore: 45, label: "RVOL cap: low relative volume limits rank confidence" };
+  }
+  if (rvol < 1) {
+    return { maxScore: 49, label: "RVOL cap: low relative volume limits rank confidence" };
+  }
+  return { maxScore: null, label: null };
+}
+
+function buildExperimentalScore(item) {
+  const rvol = num(item?.relativeVolume);
+  const tradeValueRaw = num(item?.tradeValueKrw);
+  const change = experimentalChangeScore(item?.changePercent);
+  const relativeVolume = experimentalRelativeVolumeScore(rvol);
+  const tradeValue = experimentalTradeValueScore(tradeValueRaw, rvol);
+  const price = experimentalPriceScore(item?.price);
+  const marketState = experimentalMarketStateScore(item?.marketState);
+  const overextensionPenalty = experimentalOverextensionPenalty(item?.changePercent);
+  const extremeRvolPenalty = experimentalExtremeRvolPenalty(rvol);
+  const lowLiquidityPenalty = experimentalLowLiquidityPenalty(tradeValueRaw, item?.marketState);
+  const structurePenalty = experimentalStructurePenalty(item?.symbol, tradeValueRaw, item?.changePercent);
+  const rvolScoreCap = experimentalRvolScoreCap(rvol);
+  const totalPenalty = overextensionPenalty.penalty
+    + extremeRvolPenalty.penalty
+    + lowLiquidityPenalty.penalty
+    + structurePenalty.penalty;
+  const rawExperimentalScore = Math.round(clamp(
+    change.score
+    + relativeVolume.score
+    + tradeValue.score
+    + price.score
+    + marketState.score
+    - totalPenalty,
+  ));
+  const experimentalFinalSelectionScore = rvolScoreCap.maxScore !== null
+    ? Math.min(rawExperimentalScore, rvolScoreCap.maxScore)
+    : rawExperimentalScore;
+  const experimentalRankScore = experimentalFinalSelectionScore;
+  const experimentalScoreBreakdown = {
+    changePercent: change.score,
+    relativeVolume: relativeVolume.score,
+    tradeValueKrw: tradeValue.score,
+    price: price.score,
+    marketState: marketState.score,
+    overextensionPenalty: -overextensionPenalty.penalty,
+    extremeRvolPenalty: -extremeRvolPenalty.penalty,
+    lowLiquidityPenalty: -lowLiquidityPenalty.penalty,
+    structurePenalty: -structurePenalty.penalty,
+    totalPenalty: -totalPenalty,
+    rawTotal: rawExperimentalScore,
+    rvolScoreCap: rvolScoreCap.maxScore,
+    total: experimentalFinalSelectionScore,
+    excludedFields: [
+      "vwap",
+      "aboveVwap",
+      "vwapDistancePercent",
+      "volumeAcceleration",
+      "higherLowScore",
+      "highDropPercent",
+      "closePositionInRange",
+    ],
+  };
+  const experimentalReasons = [
+    change.label,
+    relativeVolume.label,
+    rvol !== null && rvol < 1 ? "Low RVOL: below normal volume, not a true volume surge" : null,
+    rvol !== null && rvol >= 3 ? "Strong RVOL: volume expansion candidate" : null,
+    overextensionPenalty.label,
+    extremeRvolPenalty.label,
+    rvolScoreCap.label,
+    tradeValue.label,
+    lowLiquidityPenalty.label,
+    ...structurePenalty.labels,
+    price.label,
+    marketState.label,
+    "diagnostic only: not used for sorting",
+  ].filter(Boolean);
+  return {
+    experimentalFinalSelectionScore,
+    experimentalRankScore,
+    experimentalScoreBreakdown,
+    experimentalReasons,
+  };
+}
+
 function sanitizeScannerItem(item, { debug = false } = {}) {
   if (!item || typeof item !== "object") return null;
+  const rangeAuditFields = deriveRangeAuditFields(item);
   const sanitized = {
     symbol: item.symbol ?? null,
     name: item.name ?? null,
@@ -60,6 +502,12 @@ function sanitizeScannerItem(item, { debug = false } = {}) {
     scannerScore: item.scannerScore ?? null,
     finalProbabilityScore: item.finalProbabilityScore ?? null,
     finalSelectionScore: item.finalSelectionScore ?? null,
+    experimentalFinalSelectionScore: item.experimentalFinalSelectionScore ?? null,
+    experimentalRankScore: item.experimentalRankScore ?? null,
+    experimentalScoreBreakdown: item.experimentalScoreBreakdown ?? null,
+    experimentalReasons: Array.isArray(item.experimentalReasons) ? item.experimentalReasons : [],
+    operationalRankScore: item.operationalRankScore ?? null,
+    operationalRankSource: item.operationalRankSource ?? null,
     marketPrioritySortScore: item.marketPrioritySortScore ?? null,
     volumeQualitySortScore: item.volumeQualitySortScore ?? null,
     surgePrecursorScore: item.surgePrecursorScore ?? null,
@@ -72,6 +520,12 @@ function sanitizeScannerItem(item, { debug = false } = {}) {
     vwap: item.vwap ?? null,
     aboveVwap: item.aboveVwap ?? null,
     vwapDistancePercent: item.vwapDistancePercent ?? null,
+    highDropPercent: rangeAuditFields.highDropPercent,
+    highDropSource: rangeAuditFields.highDropSource,
+    closePositionInRange: rangeAuditFields.closePositionInRange,
+    closePositionSource: rangeAuditFields.closePositionSource,
+    vwapEstimate: rangeAuditFields.vwapEstimate,
+    vwapSource: rangeAuditFields.vwapSource,
     compressionScore: item.compressionScore ?? null,
     higherLowScore: item.higherLowScore ?? null,
     volumeStrengthScore: item.volumeStrengthScore ?? null,
@@ -108,6 +562,30 @@ function sanitizeScannerList(list, limit, options) {
     .slice(0, limit);
 }
 
+function getOperationalRankScore(item) {
+  const experimental = num(item?.experimentalRankScore);
+  if (experimental !== null) return experimental;
+  const finalScore = num(item?.finalSelectionScore);
+  if (finalScore !== null) return finalScore;
+  return 0;
+}
+
+function operationalRankSource(item) {
+  return num(item?.experimentalRankScore) !== null ? "experimentalRankScore" : "finalSelectionScore";
+}
+
+function sortTopPicksByOperationalRank(items = []) {
+  return items
+    .slice()
+    .sort((a, b) => {
+      const scoreDiff = getOperationalRankScore(b) - getOperationalRankScore(a);
+      if (scoreDiff !== 0) return scoreDiff;
+      const tvDiff = (num(b?.tradeValueKrw) ?? 0) - (num(a?.tradeValueKrw) ?? 0);
+      if (tvDiff !== 0) return tvDiff;
+      return String(a?.symbol || "").localeCompare(String(b?.symbol || ""));
+    });
+}
+
 function sortByPriority(items = []) {
   return items
     .slice()
@@ -138,9 +616,11 @@ function deriveScannerArrays(payload) {
       .slice(0, SCANNER_SHORT_TERM_LIMIT);
   }
   if (!Array.isArray(payload.data.topPicks)) {
-    const safe = ranked.filter((item) => !isRisky(item));
-    const risky = ranked.filter((item) => isRisky(item));
-    payload.data.topPicks = [...safe, ...risky].slice(0, SCANNER_TOP_PICKS_LIMIT);
+    const operationalRanked = sortTopPicksByOperationalRank(items);
+    payload.data.topPicks = operationalRanked.slice(0, SCANNER_TOP_PICKS_LIMIT);
+    payload.data.rankingMode = "experimental_operational_v1";
+    payload.data.rankingAppliedTo = ["topPicks"];
+    payload.data.rankingFallback = "finalSelectionScore";
   }
   if (!Array.isArray(payload.data.accumulationCandidates)) {
     payload.data.accumulationCandidates = ranked
@@ -2724,12 +3204,25 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
           - forbiddenPenalty
           - stageMeta.changePenalty;
         const finalSelectionScore = Math.round(clamp(marketPrioritySortScore));
+        const experimentalScore = buildExperimentalScore(responseItem);
+        const operationalRankScore = getOperationalRankScore({
+          ...responseItem,
+          ...experimentalScore,
+          finalSelectionScore,
+        });
+        const operationalRankSourceValue = operationalRankSource({
+          ...experimentalScore,
+          finalSelectionScore,
+        });
 
         return {
           ...responseItem,
           ...topPickEvaluation,
+          ...experimentalScore,
           forbiddenPenalty,
           finalSelectionScore,
+          operationalRankScore,
+          operationalRankSource: operationalRankSourceValue,
           marketPrioritySortScore,
           volumeQualitySortScore: marketPrioritySortScore + (quality.score * 0.03) + (surgeAcceleration.surgeAccelerationScore * 0.04) - (stageMeta.changePenalty * 0.25),
           sourceTags: [...new Set([
@@ -2774,6 +3267,7 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
       payload.data.preMoveCandidates = buildPreMoveCandidates(payload.data.items);
     }
     sanitizeScannerPayload(payload, { debug: includeDebug });
+    attachQuickAudit(payload);
     logScannerStep("completed", requestStartedAt, {
       requestId,
       status: 200,
