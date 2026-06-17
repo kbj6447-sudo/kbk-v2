@@ -475,6 +475,186 @@ function buildExperimentalScore(item) {
   };
 }
 
+function underOneChangeScore(changePercent) {
+  const change = num(changePercent);
+  if (change === null || change < 0) return { score: 0, label: null };
+  if (change < 3) return { score: 18, label: "Under-one early move candidate" };
+  if (change < 8) return { score: 30, label: "Under-one early move candidate" };
+  if (change < 12) return { score: 26, label: "Under-one early move candidate" };
+  if (change < 20) return { score: 18, label: "Under-one early move candidate" };
+  if (change < 30) return { score: 10, label: "Under-one early move candidate" };
+  return { score: 0, label: "Overextended: changePercent >= 30" };
+}
+
+function underOneRvolScore(relativeVolume) {
+  const rvol = num(relativeVolume);
+  if (rvol === null || rvol < 0.1) return { score: 0, label: "Low RVOL: under-one volume not expanding" };
+  if (rvol < 0.5) return { score: 6, label: "Low RVOL: under-one volume not expanding" };
+  if (rvol < 1) return { score: 12, label: null };
+  if (rvol < 3) return { score: 16, label: null };
+  if (rvol < 5) return { score: 18, label: null };
+  return { score: 20, label: null };
+}
+
+function underOneTradeValueScore(tradeValueKrw) {
+  const tradeValue = num(tradeValueKrw);
+  if (tradeValue === null || tradeValue < 10_000_000) return { score: 0, label: "Low liquidity: tradeValueKrw below threshold" };
+  if (tradeValue < 50_000_000) return { score: 5, label: "Low liquidity: tradeValueKrw below threshold" };
+  if (tradeValue < 100_000_000) return { score: 10, label: "Low liquidity: tradeValueKrw below threshold" };
+  if (tradeValue < 500_000_000) return { score: 18, label: null };
+  if (tradeValue < 1_000_000_000) return { score: 22, label: null };
+  return { score: 25, label: null };
+}
+
+function underOnePriceBandScore(price) {
+  const value = num(price);
+  if (value === null || value < 0.01) return { score: 0, label: "Extreme penny risk: price below 0.05" };
+  if (value < 0.05) return { score: 3, label: "Extreme penny risk: price below 0.05" };
+  if (value < 0.1) return { score: 8, label: null };
+  if (value < 1) return { score: 15, label: null };
+  return { score: 0, label: null };
+}
+
+function underOneStructurePenalty(symbol, tradeValueKrw, relativeVolume, changePercent) {
+  const value = String(symbol || "").toUpperCase();
+  if (!value) return { penalty: 0, labels: [] };
+  const isStructure = value.endsWith("W")
+    || value.endsWith("R")
+    || value.includes("WS")
+    || value.endsWith("Z")
+    || value.includes("WW");
+  if (!isStructure) return { penalty: 0, labels: [] };
+
+  const tradeValue = num(tradeValueKrw);
+  const rvol = num(relativeVolume);
+  const change = num(changePercent);
+  let penalty = 20;
+  const labels = ["Structure risk: possible warrant/right/unit ticker"];
+  if (tradeValue !== null && tradeValue < 100_000_000) penalty += 10;
+  if (rvol === null || rvol < 0.1) penalty += 10;
+  if (change !== null && change === 0) penalty += 10;
+  return { penalty: Math.min(penalty, 35), labels };
+}
+
+function underOneRiskPenalty({ tradeValueKrw, relativeVolume, changePercent, price }) {
+  const tradeValue = num(tradeValueKrw);
+  const rvol = num(relativeVolume);
+  const change = num(changePercent);
+  const priceValue = num(price);
+  let penalty = 0;
+  const labels = [];
+  if (tradeValue !== null && tradeValue < 10_000_000) {
+    penalty += 20;
+    labels.push("Low liquidity: tradeValueKrw below threshold");
+  } else if (tradeValue !== null && tradeValue < 50_000_000) {
+    penalty += 12;
+    labels.push("Low liquidity: tradeValueKrw below threshold");
+  }
+  if (rvol === null) {
+    penalty += 8;
+    labels.push("Low RVOL: under-one volume not expanding");
+  } else if (rvol < 0.1) {
+    penalty += 10;
+    labels.push("Low RVOL: under-one volume not expanding");
+  }
+  if (change !== null && change >= 30) {
+    penalty += 20;
+    labels.push("Overextended: changePercent >= 30");
+  }
+  if (priceValue !== null && priceValue < 0.05) {
+    penalty += 15;
+    labels.push("Extreme penny risk: price below 0.05");
+  }
+  return { penalty: Math.min(penalty, 40), labels };
+}
+
+function buildUnderOneOperationalScore(item) {
+  const change = underOneChangeScore(item?.changePercent);
+  const rvol = underOneRvolScore(item?.relativeVolume);
+  const tradeValue = underOneTradeValueScore(item?.tradeValueKrw);
+  const price = underOnePriceBandScore(item?.price);
+  const riskPenalty = underOneRiskPenalty({
+    tradeValueKrw: item?.tradeValueKrw,
+    relativeVolume: item?.relativeVolume,
+    changePercent: item?.changePercent,
+    price: item?.price,
+  });
+  const structurePenalty = underOneStructurePenalty(
+    item?.symbol,
+    item?.tradeValueKrw,
+    item?.relativeVolume,
+    item?.changePercent,
+  );
+  const rawTotal = change.score
+    + rvol.score
+    + tradeValue.score
+    + price.score
+    - riskPenalty.penalty
+    - structurePenalty.penalty;
+  const underOneOperationalRankScore = Math.round(clamp(rawTotal));
+  const underOneOperationalScoreBreakdown = {
+    changeScore: change.score,
+    rvolScore: rvol.score,
+    tradeValueScore: tradeValue.score,
+    priceBandScore: price.score,
+    riskPenalty: -riskPenalty.penalty,
+    structurePenalty: -structurePenalty.penalty,
+    rawTotal,
+    total: underOneOperationalRankScore,
+    diagnosticOnly: true,
+    excludedFields: [
+      "vwap",
+      "aboveVwap",
+      "vwapDistancePercent",
+      "volumeAcceleration",
+      "higherLowScore",
+      "highDropPercent",
+      "closePositionInRange",
+    ],
+  };
+  const underOneOperationalReasons = [
+    change.label,
+    rvol.label,
+    tradeValue.label,
+    price.label,
+    ...riskPenalty.labels,
+    ...structurePenalty.labels,
+    "diagnostic only: not used for sorting",
+  ].filter(Boolean);
+  return {
+    underOneOperationalRankScore,
+    underOneOperationalScoreBreakdown,
+    underOneOperationalReasons: [...new Set(underOneOperationalReasons)],
+    underOneOperationalRankSource: "underOneOperationalV1",
+  };
+}
+
+function getUnderOneOperationalRankScore(item) {
+  const underOneScore = num(item?.underOneOperationalRankScore);
+  if (underOneScore !== null) return underOneScore;
+  const operational = num(item?.operationalRankScore);
+  if (operational !== null) return operational;
+  const experimental = num(item?.experimentalRankScore);
+  if (experimental !== null) return experimental;
+  const finalScore = num(item?.finalSelectionScore);
+  if (finalScore !== null) return finalScore;
+  return 0;
+}
+
+function sortUnderOneCandidatesByOperationalRank(items = []) {
+  return items
+    .slice()
+    .sort((a, b) => {
+      const scoreDiff = getUnderOneOperationalRankScore(b) - getUnderOneOperationalRankScore(a);
+      if (scoreDiff !== 0) return scoreDiff;
+      const tradeValueDiff = (num(b?.tradeValueKrw) ?? 0) - (num(a?.tradeValueKrw) ?? 0);
+      if (tradeValueDiff !== 0) return tradeValueDiff;
+      const rvolDiff = (num(b?.relativeVolume) ?? 0) - (num(a?.relativeVolume) ?? 0);
+      if (rvolDiff !== 0) return rvolDiff;
+      return (num(b?.changePercent) ?? 0) - (num(a?.changePercent) ?? 0);
+    });
+}
+
 function sanitizeScannerItem(item, { debug = false } = {}) {
   if (!item || typeof item !== "object") return null;
   const rangeAuditFields = deriveRangeAuditFields(item);
@@ -508,6 +688,10 @@ function sanitizeScannerItem(item, { debug = false } = {}) {
     experimentalReasons: Array.isArray(item.experimentalReasons) ? item.experimentalReasons : [],
     operationalRankScore: item.operationalRankScore ?? null,
     operationalRankSource: item.operationalRankSource ?? null,
+    underOneOperationalRankScore: item.underOneOperationalRankScore ?? null,
+    underOneOperationalScoreBreakdown: item.underOneOperationalScoreBreakdown ?? null,
+    underOneOperationalReasons: Array.isArray(item.underOneOperationalReasons) ? item.underOneOperationalReasons : [],
+    underOneOperationalRankSource: item.underOneOperationalRankSource ?? null,
     marketPrioritySortScore: item.marketPrioritySortScore ?? null,
     volumeQualitySortScore: item.volumeQualitySortScore ?? null,
     surgePrecursorScore: item.surgePrecursorScore ?? null,
@@ -635,7 +819,7 @@ function deriveScannerArrays(payload) {
       .slice(0, SCANNER_ACCUMULATION_LIMIT);
   }
   if (!Array.isArray(payload.data.underOneCandidates)) {
-    payload.data.underOneCandidates = ranked
+    const underOneRanked = ranked
       .filter((item) => {
         const price = parsePrice(item);
         const change = parseChange(item);
@@ -645,7 +829,15 @@ function deriveScannerArrays(payload) {
           && change >= 0
           && !isRisky(item);
       })
-      .slice(0, SCANNER_UNDER_ONE_LIMIT);
+      .slice(0, SCANNER_UNDER_ONE_LIMIT)
+      .map((item) => ({
+        ...item,
+        ...buildUnderOneOperationalScore(item),
+      }));
+    payload.data.underOneCandidates = sortUnderOneCandidatesByOperationalRank(underOneRanked);
+    payload.data.underOneRankingMode = "under_one_operational_v1";
+    payload.data.underOneRankingAppliedTo = ["underOneCandidates"];
+    payload.data.underOneRankingFallback = "operationalRankScore > experimentalRankScore > finalSelectionScore";
   }
   if (!Array.isArray(payload.data.overOneCandidates)) {
     const preferredStages = new Set(["EARLY_BREAKOUT", "PRE_SURGE", "MOMENTUM_EXPANSION"]);
