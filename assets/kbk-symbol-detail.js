@@ -902,6 +902,13 @@ function scannerFetchOptions(url) {
   return String(url || "").includes("/api/scanner") ? { cache: "default" } : { cache: "no-store" };
 }
 
+function formatScore(value, fallback = "-") {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  const rounded = Math.round(parsed * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2).replace(/\.?0+$/, "");
+}
+
 function itemField(item, key) {
   return num(item?.[key]) ?? num(item?.technical?.[key]);
 }
@@ -916,7 +923,22 @@ function formatKrwFromUsdDollar(dollarUsd) {
 }
 
 function computeVolumeQualityScore(item, price, volume, rvol) {
-  const dollarVolume = price > 0 && volume > 0 ? price * volume : null;
+  const hasVolume = Number.isFinite(Number(volume)) && Number(volume) > 0;
+  const hasRvol = Number.isFinite(Number(rvol)) && Number(rvol) > 0;
+  const dollarVolume = price > 0 && hasVolume ? price * volume : null;
+  if (!hasVolume && !hasRvol) {
+    return {
+      score: 24,
+      dollarVolume: null,
+      volumeScore: 0,
+      rvolScore: 0,
+      dollarScore: 0,
+      strong: false,
+      moderate: false,
+      contributed: false,
+      dataLabel: "데이터 부족",
+    };
+  }
   const volumeScore = volume >= 10_000_000 ? 96
     : volume >= 5_000_000 ? 88
     : volume >= 2_000_000 ? 78
@@ -935,7 +957,8 @@ function computeVolumeQualityScore(item, price, volume, rvol) {
     : dollarVolume >= 1_000_000 ? 70
     : dollarVolume >= 500_000 ? 55
     : 38;
-  const score = Math.round(clampScore(volumeScore * 0.35 + rvolScore * 0.35 + dollarScore * 0.3));
+  const rawScore = volumeScore * 0.35 + rvolScore * 0.35 + dollarScore * 0.3;
+  const score = Math.round(clampScore(!hasVolume ? Math.min(rawScore, 45) : rawScore));
   return {
     score,
     dollarVolume,
@@ -945,6 +968,7 @@ function computeVolumeQualityScore(item, price, volume, rvol) {
     strong: score >= 72,
     moderate: score >= 58,
     contributed: score >= 58 && (volume >= 500_000 || rvol >= 1.2 || (dollarVolume !== null && dollarVolume >= 500_000)),
+    dataLabel: hasVolume && hasRvol ? null : "기본 추정값",
   };
 }
 
@@ -1534,6 +1558,7 @@ function renderTopPicks(picks, updatedAt) {
     + '</section>'
     + (enrichedPicks.length ? ('<section class="kbk-top-grid">' + enrichedPicks.map((pick, index) => {
       const displayScore = pick.displayFinalScore ?? pick.finalScore;
+      const displayScoreText = formatScore(displayScore);
       const scoreGrade = topPickScoreGrade(displayScore);
       const verdictTone = pick.verdict === '留ㅼ닔 媛?? || pick.verdict === '理쒖슦???⑦? ?꾨낫' ? 'buy' : pick.verdict === '愿李? || pick.verdict === '?곸쐞 媛먯떆 ?꾨낫' ? 'watch' : 'block';
       return ''
@@ -1544,7 +1569,7 @@ function renderTopPicks(picks, updatedAt) {
         +       '<h3>' + esc(pick.symbol) + '</h3>'
         +       '<p>' + esc(pick.name) + '</p>'
         +     '</div>'
-        +     '<div class="kbk-top-score">' + displayScore + '점 <small>(' + esc(scoreGrade) + ')</small><span>' + (index === 0 ? '1?? : esc(pick.verdict)) + '</span></div>'
+        +     '<div class="kbk-top-score">' + displayScoreText + '점 <small>(' + esc(scoreGrade) + ')</small><span>' + (index === 0 ? '1?? : esc(pick.verdict)) + '</span></div>'
         +   '</div>'
         +   '<div class="kbk-top-row">'
         +     '<strong>' + pricePairText(pick.displayPrice ?? pick.price) + '</strong>'
@@ -1554,10 +1579,10 @@ function renderTopPicks(picks, updatedAt) {
         +     '<span>' + esc(pick.vwap) + '</span>'
         +   '</div>'
         +   '<div class="kbk-top-metrics">'
-        +     '<div><span>?⑦? ?먯닔</span><b>' + pick.scalpScore + '??/b></div>'
-        +     '<div><span>??벑 ?먯닔</span><b>' + pick.surgeScore + '??/b></div>'
-        +     '<div><span>嫄곕옒???덉쭏</span><b>' + (pick.volumeQualityScore ?? '-') + '??/b></div>'
-        +     '<div><span>?섍툒 媛??/span><b>' + (pick.surgeAccelerationScore ?? '-') + '??/b></div>'
+        +     '<div><span>?⑦? ?먯닔</span><b>' + formatScore(pick.scalpScore) + '??/b></div>'
+        +     '<div><span>??벑 ?먯닔</span><b>' + formatScore(pick.surgeScore) + '??/b></div>'
+        +     '<div><span>嫄곕옒???덉쭏</span><b>' + (pick.dataQualityStatus === 'insufficient-data' ? '데이터 부족' : formatScore(pick.volumeQualityScore)) + '??/b></div>'
+        +     '<div><span>?섍툒 媛??/span><b>' + formatScore(pick.surgeAccelerationScore) + '??/b></div>'
         +   '</div>'
         +   renderTopPickScoreInterpretation(displayScore)
         +   '<div class="kbk-top-reasons">' + pick.reasons.map((reason) => '<span>' + esc(reason) + '</span>').join('') + '</div>'
@@ -1577,9 +1602,9 @@ function renderTopPicks(picks, updatedAt) {
         +         '<h4>理쒖쥌 ?먮떒</h4>'
         +         '<div class="kbk-top-judgement ' + verdictTone + '">' + esc(pick.verdict) + '</div>'
         +         '<ul>'
-        +           '<li>통합 점수: ' + (pick.displayFinalScore ?? pick.finalScore) + '점</li>'
-        +           '<li>기본 점수: ' + pick.baseFinalScore + '점</li>'
-        +           '<li>추격 위험: ' + pick.chaseRisk + '점</li>'
+        +           '<li>통합 점수: ' + formatScore(pick.displayFinalScore ?? pick.finalScore) + '점</li>'
+        +           '<li>기본 점수: ' + formatScore(pick.baseFinalScore) + '점</li>'
+        +           '<li>추격 위험: ' + formatScore(pick.chaseRisk) + '점</li>'
         +           '<li>단타 시그널: ' + esc(pick.finalDecision?.scalpAction ?? '-') + '</li>'
         +         '</ul>'
         +       '</section>'

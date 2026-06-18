@@ -33,6 +33,13 @@ function pct(n) {
   return `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
 }
 
+function formatScore(value, fallback = "-") {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  const rounded = Math.round(parsed * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2).replace(/\.?0+$/, "");
+}
+
 function compact(n) {
   if (n === null || n === undefined || n === "") return "-";
   const value = Number(n);
@@ -574,7 +581,20 @@ function formatKrwFromUsdDollar(dollarUsd) {
 }
 
 function computeVolumeQualityScore(item, price, volume, rvol) {
-  const dollarVolume = price > 0 && volume > 0 ? price * volume : null;
+  const hasVolume = Number.isFinite(Number(volume)) && Number(volume) > 0;
+  const hasRvol = Number.isFinite(Number(rvol)) && Number(rvol) > 0;
+  const dollarVolume = price > 0 && hasVolume ? price * volume : null;
+  if (!hasVolume && !hasRvol) {
+    return {
+      score: 24,
+      dollarVolume: null,
+      rvolScore: 0,
+      strong: false,
+      moderate: false,
+      contributed: false,
+      dataLabel: "데이터 부족",
+    };
+  }
   const volumeScore = volume >= 10_000_000 ? 96
     : volume >= 5_000_000 ? 88
     : volume >= 2_000_000 ? 78
@@ -593,7 +613,8 @@ function computeVolumeQualityScore(item, price, volume, rvol) {
     : dollarVolume >= 1_000_000 ? 70
     : dollarVolume >= 500_000 ? 55
     : 38;
-  const score = Math.round(clampTopPickScore(volumeScore * 0.35 + rvolScore * 0.35 + dollarScore * 0.3));
+  const rawScore = volumeScore * 0.35 + rvolScore * 0.35 + dollarScore * 0.3;
+  const score = Math.round(clampTopPickScore(!hasVolume ? Math.min(rawScore, 45) : rawScore));
   return {
     score,
     dollarVolume,
@@ -601,6 +622,7 @@ function computeVolumeQualityScore(item, price, volume, rvol) {
     strong: score >= 72,
     moderate: score >= 58,
     contributed: score >= 58 && (volume >= 500_000 || rvol >= 1.2 || (dollarVolume !== null && dollarVolume >= 500_000)),
+    dataLabel: hasVolume && hasRvol ? null : "기본 추정값",
   };
 }
 
@@ -1028,8 +1050,8 @@ function patchFloatingPointText(root = document.body) {
     const before = node.nodeValue;
     if (!before || !/\d+\.\d{3,}점/.test(before)) continue;
     node.nodeValue = before.replace(/(\d+\.\d{3,})점/g, (_, raw) => {
-      const value = Number(raw);
-      return Number.isFinite(value) ? `${Math.round(value)}점` : `${raw}점`;
+      const value = formatScore(raw, raw);
+      return `${value}점`;
     });
   }
 }
@@ -1533,7 +1555,7 @@ async function renderTopPicksOnly(renderPhase = "initial") {
           ${fd ? renderFinalDecisionHeroHtml(fd, textEscape) : ""}
           <div class="kbk-pro-top-head">
             <div><h3>${textEscape(item.symbol)}</h3><p>${textEscape(item.name || item.symbol)}</p><p>${textEscape(stageMeta?.stageLabelKo || item.stageLabelKo || item.stage || "")}${stageMeta?.changePenalty ? ` · 상승률 패널티 ${stageMeta.changePenalty}점` : ""}</p></div>
-            <div class="kbk-pro-top-score">${selectionMetrics.finalSelectionScore}</div>
+            <div class="kbk-pro-top-score">${formatScore(selectionMetrics.finalSelectionScore)}</div>
           </div>
           <div class="kbk-pro-badges">
             <span class="kbk-badge score">${textEscape(selectionMetrics.statusBadge)}</span>
@@ -1549,13 +1571,13 @@ async function renderTopPicksOnly(renderPhase = "initial") {
           </div>
           ${sessionDebugHtml(displayItem)}
           <div class="kbk-pro-top-grid">
-            <div><span>최종 선별</span><b>${selectionMetrics.finalSelectionScore}점</b></div>
-            <div><span>신규 진입</span><b>${selectionMetrics.entrySuitability}점</b></div>
-            <div><span>차트 유사도</span><b>${selectionMetrics.chartPatternScore}점</b></div>
-            <div><span>추격 위험</span><b>${chaseRisk}점</b></div>
+            <div><span>최종 선별</span><b>${formatScore(selectionMetrics.finalSelectionScore)}점</b></div>
+            <div><span>신규 진입</span><b>${formatScore(selectionMetrics.entrySuitability)}점</b></div>
+            <div><span>차트 유사도</span><b>${formatScore(selectionMetrics.chartPatternScore)}점</b></div>
+            <div><span>추격 위험</span><b>${formatScore(chaseRisk)}점</b></div>
             <div><span>상대거래량</span><b>${displayRvolText(displayItem).replace("상대거래량 ", "")}</b></div>
             <div><span>대표 패턴</span><b>${textEscape(selectionMetrics.patternName)}</b></div>
-            <div><span>거래량 확증</span><b>${selectionMetrics.volumeConfirmationScore}점</b></div>
+            <div><span>거래량 확증</span><b>${displayItem.dataQualityStatus === "insufficient-data" ? "데이터 부족" : `${formatScore(selectionMetrics.volumeConfirmationScore)}점`}</b></div>
             <div><span>상태</span><b>${textEscape(selectionMetrics.statusBadge)}</b></div>
           </div>
           <div class="kbk-pro-top-meta" style="grid-template-columns:1fr">

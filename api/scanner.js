@@ -1590,6 +1590,39 @@ function clamp(value, min = 0, max = 100) {
   return Math.max(min, Math.min(max, value));
 }
 
+function hasActualCatalyst(item = {}) {
+  const sourceTags = Array.isArray(item.sourceTags) ? item.sourceTags : [];
+  const storyTags = Array.isArray(item.storyTags) ? item.storyTags : [];
+  if (sourceTags.some((tag) => /news|sec|8-k|filing|press/i.test(String(tag)))) return true;
+  if (storyTags.length > 0) return true;
+  return Boolean(item.newsTitle || item.newsUrl || item.catalyst || item.catalystTitle);
+}
+
+function hasUsableVolumeData(item = {}) {
+  const rawVolume = Math.max(num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0);
+  const trustedRawVolume = isTrustedCurrentVolumeSource(item.volumeSource) && rawVolume > 0;
+  const relativeVolume = num(item.relativeVolume) ?? num(item.volumeRatio) ?? num(item.rvol);
+  return trustedRawVolume || (relativeVolume !== null && relativeVolume > 0);
+}
+
+function isSparseNoCatalystCandidate(item = {}) {
+  const change = num(item.changePercent ?? item.preMarketChangePercent);
+  return change !== null
+    && Math.abs(change) <= 0.05
+    && !hasUsableVolumeData(item)
+    && !hasActualCatalyst(item);
+}
+
+function isPrimaryCommonStockCandidate(item = {}) {
+  const symbol = String(item.symbol || "").toUpperCase();
+  const name = String(item.companyName || item.name || item.shortName || item.longName || "");
+  if (/\b(warrants?|units?|rights?|preferred|depositary share|depositary shares)\b/i.test(name)) return false;
+  if (/\badr\b/i.test(name) && /\b(preferred|depositary|right|unit|warrant)\b/i.test(name)) return false;
+  if (/^[A-Z]{1,4}(WS|WT)$/.test(symbol)) return false;
+  if (/^[A-Z]{4,5}[WUR]$/.test(symbol)) return false;
+  return true;
+}
+
 function getChangePenalty(changePercent) {
   const change = num(changePercent);
   if (change === null) return 0;
@@ -1684,17 +1717,19 @@ function changePercentFromPreviousClose(price, previousClose) {
 }
 
 function volumeStrength(item) {
-  if (!isTrustedCurrentVolumeSource(item.volumeSource)) return 18;
+  const trustedVolume = isTrustedCurrentVolumeSource(item.volumeSource);
   const rawVolume = Math.max(num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0);
   const relativeVolume = num(item.relativeVolume) ?? num(item.volumeRatio);
   const previousVolumeRatio = num(item.previousDayVolumeRatio);
   const bestVolumeRatio = Math.max(relativeVolume ?? 0, previousVolumeRatio ?? 0);
+  if (!trustedVolume && bestVolumeRatio <= 0) return 24;
   const rvolScore = bestVolumeRatio >= 8 ? 96
     : bestVolumeRatio >= 5 ? 86
       : bestVolumeRatio >= 3 ? 74
         : bestVolumeRatio >= 1.5 ? 60
           : bestVolumeRatio > 0 ? 42
             : 0;
+  if (!trustedVolume) return clamp(Math.min(rvolScore, 45));
   const rawScore = rawVolume >= 20_000_000 ? 96
     : rawVolume >= 10_000_000 ? 86
       : rawVolume >= 5_000_000 ? 78
@@ -1707,6 +1742,8 @@ function volumeQualityScore(item) {
   const trustedVolume = isTrustedCurrentVolumeSource(item.volumeSource);
   const rawVolume = Math.max(num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0);
   const relativeVolume = num(item.relativeVolume) ?? num(item.volumeRatio);
+  const hasRawVolume = trustedVolume && rawVolume > 0;
+  const hasRelativeVolume = relativeVolume !== null && relativeVolume > 0;
   const priceUsd = num(item.price) ?? num(item.preMarketPrice) ?? num(item.regularMarketPrice);
   const priceKrw = num(item.priceKrw);
   const usdKrw = num(item.usdKrw) ?? num(item.exchangeRate) ?? 1350;
@@ -1717,13 +1754,15 @@ function volumeQualityScore(item) {
     ?? (priceKrw !== null && rawVolume ? priceKrw * rawVolume : null)
     ?? (priceUsd !== null && rawVolume ? priceUsd * rawVolume * usdKrw : null);
 
-  let score = trustedVolume ? 50 : 20;
-  if (!trustedVolume) {
+  if (!hasRawVolume && !hasRelativeVolume) {
     return {
-      score: Math.round(clamp(score)),
+      score: 24,
       tradeValueKrw: null,
+      volumeDataStatus: "missing",
     };
   }
+  let score = hasRawVolume ? 50 : 32;
+  if (!hasRawVolume && hasRelativeVolume) score += Math.min(relativeVolume * 4, 12);
   if ((relativeVolume ?? 0) >= 3 && rawVolume < 100_000) score -= 25;
   else if (rawVolume > 0 && rawVolume < 100_000) score -= 12;
 
@@ -1744,8 +1783,9 @@ function volumeQualityScore(item) {
   }
 
   return {
-    score: Math.round(clamp(score)),
+    score: Math.round(clamp(!hasRawVolume ? Math.min(score, 45) : score)),
     tradeValueKrw: tradeValueKrw !== null ? Math.round(tradeValueKrw) : null,
+    volumeDataStatus: hasRawVolume && hasRelativeVolume ? "confirmed" : hasRawVolume ? "volume-only" : "rvol-only",
   };
 }
 
@@ -3856,6 +3896,7 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
     });
 
     if (payload?.data?.items && Array.isArray(payload.data.items)) {
+      payload.data.items = payload.data.items.filter(isPrimaryCommonStockCandidate);
       const rankedForVolume = [...payload.data.items]
         .sort((a, b) => {
           const aVolume = Math.max(num(a.volume) ?? 0, num(a.preMarketVolume) ?? 0);
@@ -4062,17 +4103,21 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
           ...experimentalScore,
           finalSelectionScore,
         });
+        const sparseNoCatalyst = isSparseNoCatalystCandidate(responseItem);
+        const dataQualityPenalty = sparseNoCatalyst ? 30 : 0;
 
         return {
           ...responseItem,
           ...topPickEvaluation,
           ...experimentalScore,
           forbiddenPenalty,
-          finalSelectionScore,
+          finalSelectionScore: Math.round(clamp(finalSelectionScore - dataQualityPenalty)),
           operationalRankScore,
           operationalRankSource: operationalRankSourceValue,
-          marketPrioritySortScore,
-          volumeQualitySortScore: marketPrioritySortScore + (quality.score * 0.03) + (surgeAcceleration.surgeAccelerationScore * 0.04) - (stageMeta.changePenalty * 0.25),
+          marketPrioritySortScore: marketPrioritySortScore - dataQualityPenalty,
+          volumeQualitySortScore: marketPrioritySortScore + (quality.score * 0.03) + (surgeAcceleration.surgeAccelerationScore * 0.04) - (stageMeta.changePenalty * 0.25) - dataQualityPenalty,
+          included: sparseNoCatalyst ? false : responseItem.included,
+          dataQualityStatus: sparseNoCatalyst ? "insufficient-data" : quality.volumeDataStatus,
           sourceTags: [...new Set([
             ...(Array.isArray(normalizedItem.sourceTags) ? normalizedItem.sourceTags : []),
             batchQuoteMap.has(symbolKey) ? "yahoo-v7-batch" : null,
@@ -4090,9 +4135,11 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
             ...(Array.isArray(normalizedItem.selectionReasons) ? normalizedItem.selectionReasons : []),
             rankAuxiliaryScore > 0 ? `Common signal boost +${rankAuxiliaryScore}` : null,
             quality.score < 30 ? "Volume quality under 30: demoted from top candidates" : null,
+            sparseNoCatalyst ? "Insufficient data: flat price, missing volume, no catalyst" : null,
           ].filter(Boolean),
         };
       }))
+      .filter((item) => item?.included !== false)
       .sort((a, b) => {
         const groupDiff = selectionGroupRank(a.selectionGroup) - selectionGroupRank(b.selectionGroup);
         if (groupDiff !== 0) return groupDiff;
