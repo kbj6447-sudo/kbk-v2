@@ -12,6 +12,8 @@ const SCANNER_ACCUMULATION_LIMIT = 30;
 const SCANNER_PRE_MOVE_LIMIT = 30;
 const SCANNER_TOP_PICKS_LIMIT = 20;
 const SCANNER_REBOUND_WATCH_LIMIT = 30;
+const SCANNER_TRADE_BLOCK_LIMIT = 20;
+const SCANNER_REENTRY_WATCH_LIMIT = 30;
 const scannerSuccessCacheByMode = {
   default: null,
   debug: null,
@@ -1358,6 +1360,12 @@ function sanitizeScannerItem(item, { debug = false } = {}) {
     accumulationReason: item.accumulationReason ?? null,
     accumulationSignals: item.accumulationSignals ?? null,
     accumulationRejectReason: item.accumulationRejectReason ?? null,
+    tradeBlockScore: item.tradeBlockScore ?? null,
+    tradeBlockReason: item.tradeBlockReason ?? null,
+    tradeBlockSignals: item.tradeBlockSignals ?? null,
+    watchlistReason: item.watchlistReason ?? null,
+    reentryWaitReason: item.reentryWaitReason ?? null,
+    tradeGrouping: item.tradeGrouping ?? null,
     statusBadge: item.statusBadge ?? null,
     topPickVerdict: item.topPickVerdict ?? null,
     topPickGrade: item.topPickGrade ?? null,
@@ -1607,9 +1615,143 @@ function buildAccumulationCandidates(items = [], limit = SCANNER_ACCUMULATION_LI
   ].slice(0, limit);
 }
 
+function tradeGroupNumber(item, ...keys) {
+  for (const key of keys) {
+    const value = num(item?.[key]) ?? num(item?.technical?.[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function tradeGroupVwapState(item = {}) {
+  const distance = tradeGroupNumber(item, "vwapDistancePercent");
+  const state = String(item?.vwapState ?? item?.technical?.vwapState ?? "").toLowerCase();
+  const above = item?.aboveVwap === true || state === "above" || (distance !== null && distance >= 0);
+  const near = state === "near" || (distance !== null && distance > -1.5 && distance < 0);
+  const below = item?.aboveVwap === false || state === "below" || (distance !== null && distance <= -1.5);
+  return { above, near, below, distance };
+}
+
+function evaluateTradeGrouping(item = {}) {
+  const change = tradeGroupNumber(item, "changePercent", "preMarketChangePercent");
+  const rvol = tradeGroupNumber(item, "relativeVolume", "volumeRatio", "rvol");
+  const chaseRisk = tradeGroupNumber(item, "chasingRiskScore", "chaseRiskScore", "topPickChaseRisk", "riskScore") ?? 0;
+  const dropRisk = tradeGroupNumber(item, "dropRiskScore", "dropRisk") ?? 0;
+  const volume = Math.max(num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0, num(item.regularMarketVolume) ?? 0);
+  const vwap = tradeGroupVwapState(item);
+  const vwapWeak = vwap.below || (vwap.distance !== null && vwap.distance < 0);
+  const statusText = String(item.statusBadge || "");
+  const verdictText = String(item.topPickVerdict || item.finalDecisionLabel || "");
+  const volumeMissing = (rvol === null || rvol <= 0) && volume <= 0;
+  const dataInsufficient = item.dataQualityStatus === "insufficient-data" || (volumeMissing && change !== null && change >= 8);
+
+  let tradeBlockScore = 0;
+  const blockSignals = [];
+  if (item.isOverheated === true) {
+    tradeBlockScore += 35;
+    blockSignals.push("overheated");
+  }
+  if (item.isChasingRisk === true && chaseRisk >= 60) {
+    tradeBlockScore += 30;
+    blockSignals.push(`chasing-risk-${Math.round(chaseRisk)}`);
+  }
+  if (dropRisk >= 60) {
+    tradeBlockScore += dropRisk >= 80 ? 34 : 26;
+    blockSignals.push(`drop-risk-${Math.round(dropRisk)}`);
+  }
+  if (change !== null && change >= 15) {
+    tradeBlockScore += 24;
+    blockSignals.push(`change-${change.toFixed(1)}%`);
+  } else if (change !== null && change >= 10 && vwapWeak) {
+    tradeBlockScore += 22;
+    blockSignals.push("hot-change-vwap-weak");
+  }
+  if (rvol !== null && rvol >= 8 && vwapWeak) {
+    tradeBlockScore += rvol >= 20 ? 28 : 20;
+    blockSignals.push(`rvol-${rvol.toFixed(1)}-vwap-weak`);
+  }
+  if (statusText.includes("\uC81C\uC678")) {
+    tradeBlockScore += 18;
+    blockSignals.push("excluded-status");
+  }
+  if (dataInsufficient && change !== null && change >= 8) {
+    tradeBlockScore += 18;
+    blockSignals.push("insufficient-data-hot");
+  }
+  if (verdictText.includes("\uAE08\uC9C0") && (chaseRisk >= 60 || dropRisk >= 60 || vwapWeak || (change !== null && change >= 10))) {
+    tradeBlockScore += 14;
+    blockSignals.push("forbidden-verdict-confirmed");
+  }
+
+  const tradeBlocked = tradeBlockScore >= 35
+    || item.isOverheated === true
+    || (dropRisk >= 60)
+    || (item.isChasingRisk === true && chaseRisk >= 60)
+    || (change !== null && change >= 15)
+    || (change !== null && change >= 10 && vwapWeak && rvol !== null && rvol >= 3)
+    || (rvol !== null && rvol >= 8 && vwapWeak)
+    || (dataInsufficient && change !== null && change >= 8);
+
+  const watchSignals = [];
+  if (!tradeBlocked) {
+    const resurge = tradeGroupNumber(item, "reSurgeSetupScore") ?? 0;
+    const reclaim = tradeGroupNumber(item, "vwapReclaimScore") ?? 0;
+    const volumeAcceleration = tradeGroupNumber(item, "volumeAccelerationScore") ?? 0;
+    const entrySuitability = tradeGroupNumber(item, "entrySuitability", "topPickFinalScore");
+    if (vwap.below || reclaim >= 55) watchSignals.push("VWAP 재안착 대기");
+    if (resurge >= 60) watchSignals.push("눌림 후 재상승 대기");
+    if (volumeMissing || (rvol !== null && rvol < 1.2 && change !== null && change >= 3)) watchSignals.push("거래량 확인 대기");
+    if (entrySuitability !== null && entrySuitability >= 40 && entrySuitability < 65) watchSignals.push("신규 진입 보통");
+    if (volumeAcceleration >= 55 && change !== null && change >= 0) watchSignals.push("수급 관찰");
+    if (verdictText.includes("\uAD00\uCC30") || statusText.includes("\uAD00\uCC30")) watchSignals.push("관찰 추천");
+  }
+
+  const tradeBlockReason = tradeBlocked
+    ? blockSignals.length ? blockSignals.join(" | ") : "strict-risk"
+    : null;
+  const reentryWaitReason = !tradeBlocked && watchSignals.some((signal) => signal.includes("재안착") || signal.includes("재상승"))
+    ? watchSignals.join(" | ")
+    : null;
+  const watchlistReason = !tradeBlocked
+    ? (watchSignals.length ? watchSignals.join(" | ") : null)
+    : null;
+
+  return {
+    tradeBlockScore: Math.round(clamp(tradeBlockScore)),
+    tradeBlockReason,
+    tradeBlockSignals: blockSignals,
+    watchlistReason,
+    reentryWaitReason,
+    tradeGrouping: tradeBlocked ? "TRADE_BLOCK" : watchlistReason ? "REENTRY_WATCH" : "NONE",
+  };
+}
+
+function sortTradeBlockCandidates(items = []) {
+  return items.slice().sort((a, b) => {
+    const scoreDiff = (num(b.tradeBlockScore) ?? 0) - (num(a.tradeBlockScore) ?? 0);
+    if (scoreDiff !== 0) return scoreDiff;
+    const rvolDiff = (num(b.relativeVolume ?? b.rvol ?? b.volumeRatio) ?? 0) - (num(a.relativeVolume ?? a.rvol ?? a.volumeRatio) ?? 0);
+    if (rvolDiff !== 0) return rvolDiff;
+    return (num(b.changePercent ?? b.preMarketChangePercent) ?? 0) - (num(a.changePercent ?? a.preMarketChangePercent) ?? 0);
+  });
+}
+
+function sortReentryWatchCandidates(items = []) {
+  return items.slice().sort((a, b) => {
+    const aReentry = a.reentryWaitReason ? 1 : 0;
+    const bReentry = b.reentryWaitReason ? 1 : 0;
+    if (aReentry !== bReentry) return bReentry - aReentry;
+    return (num(b.operationalRankScore ?? b.finalSelectionScore ?? b.scannerScore) ?? 0)
+      - (num(a.operationalRankScore ?? a.finalSelectionScore ?? a.scannerScore) ?? 0);
+  });
+}
+
 function deriveScannerArrays(payload) {
   if (!payload || typeof payload !== "object" || !payload.data || typeof payload.data !== "object") return payload;
-  const items = Array.isArray(payload.data.items) ? payload.data.items : [];
+  payload.data.items = Array.isArray(payload.data.items)
+    ? payload.data.items.map((item) => ({ ...item, ...evaluateTradeGrouping(item) }))
+    : [];
+  const items = payload.data.items;
   const ranked = sortByPriority(items);
   const parseChange = (item) => num(item?.changePercent ?? item?.preMarketChangePercent);
   const parsePrice = (item) => num(item?.price ?? item?.preMarketPrice ?? item?.regularMarketPrice);
@@ -1710,6 +1852,13 @@ function deriveScannerArrays(payload) {
       })
       .slice(0, SCANNER_REBOUND_WATCH_LIMIT);
   }
+  payload.data.tradeBlockCandidates = sortTradeBlockCandidates(items.filter((item) => item.tradeGrouping === "TRADE_BLOCK"))
+    .slice(0, SCANNER_TRADE_BLOCK_LIMIT);
+  payload.data.reentryWatchCandidates = sortReentryWatchCandidates(items.filter((item) => item.tradeGrouping === "REENTRY_WATCH"))
+    .slice(0, SCANNER_REENTRY_WATCH_LIMIT);
+  payload.data.tradeGroupingMode = "trade_block_watchlist_v1";
+  payload.data.tradeGroupingAppliedTo = ["tradeBlockCandidates", "reentryWatchCandidates"];
+  payload.data.tradeGroupingFallback = "strict risk only for tradeBlock; vwap/reentry/volume wait for watchlist";
   if (!Array.isArray(payload.data.preMoveCandidates)) {
     payload.data.preMoveCandidates = [];
   }
@@ -1729,6 +1878,8 @@ function sanitizeScannerPayload(payload, { debug = false } = {}) {
   payload.data.preMoveCandidates = sanitizeScannerList(payload.data.preMoveCandidates, SCANNER_PRE_MOVE_LIMIT, options);
   payload.data.topPicks = sanitizeScannerList(payload.data.topPicks, SCANNER_TOP_PICKS_LIMIT, options);
   payload.data.reboundWatchCandidates = sanitizeScannerList(payload.data.reboundWatchCandidates, SCANNER_REBOUND_WATCH_LIMIT, options);
+  payload.data.tradeBlockCandidates = sanitizeScannerList(payload.data.tradeBlockCandidates, SCANNER_TRADE_BLOCK_LIMIT, options);
+  payload.data.reentryWatchCandidates = sanitizeScannerList(payload.data.reentryWatchCandidates, SCANNER_REENTRY_WATCH_LIMIT, options);
   return payload;
 }
 

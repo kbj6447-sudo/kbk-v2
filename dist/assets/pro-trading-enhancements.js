@@ -733,6 +733,56 @@ function renderTopPickSectionHtml(sections) {
   `).join("");
 }
 
+function scannerArrayFromPayload(payload, key) {
+  const data = payload?.data || payload || {};
+  const direct = Array.isArray(data?.[key]) ? data[key] : [];
+  return direct.filter((item) => item?.symbol);
+}
+
+function renderTradeGroupingCard(item, mode) {
+  const isBlock = mode === "block";
+  const reason = isBlock
+    ? item.tradeBlockReason || "위험 신호 확인"
+    : item.reentryWaitReason || item.watchlistReason || "관찰 대기";
+  const score = isBlock ? toNumber(item.tradeBlockScore) : toNumber(item.operationalRankScore ?? item.finalSelectionScore);
+  return `
+    <article class="kbk-pro-top-card kbk-trade-${isBlock ? "block" : "watch"}" data-symbol="${textEscape(item.symbol)}">
+      <div class="kbk-pro-top-head">
+        <div><h3>${textEscape(item.symbol)}</h3><p>${textEscape(item.name || item.symbol)}</p><p>${textEscape(item.stageLabelKo || item.stage || "")}</p></div>
+        <div class="kbk-pro-top-score">${score !== null ? formatScore(score) : "-"}</div>
+      </div>
+      <div class="kbk-pro-badges">
+        <span class="kbk-badge ${isBlock ? "risk" : "group"}">${isBlock ? "매매 금지" : item.reentryWaitReason ? "재상승 대기" : "관찰 후보"}</span>
+        <span class="kbk-badge score">${textEscape(item.statusBadge || item.topPickVerdict || "관찰")}</span>
+      </div>
+      <div class="price-row">
+        <strong>${toNumber(item.price) !== null ? topPickKrwPrice(item.price) : "-"}</strong>
+        <span>${toNumber(item.changePercent) !== null ? pct(item.changePercent) : "-"}</span>
+        <span>${displayRvolText(item)}</span>
+      </div>
+      <div class="kbk-pro-top-meta" style="grid-template-columns:1fr">
+        <div><span>${isBlock ? "금지 사유" : "대기 사유"}</span><p>${textEscape(reason)}</p></div>
+      </div>
+    </article>
+  `;
+}
+
+function renderTradeGroupingSection(title, subtitle, items, mode) {
+  const limit = mode === "block" ? 20 : 30;
+  const visible = items.slice(0, limit);
+  return `
+    <section class="kbk-pro-trade-group">
+      <div class="kbk-pro-top-head">
+        <div><h3>${textEscape(title)}</h3><p>${textEscape(subtitle)}</p></div>
+        <div class="kbk-pro-top-score">${visible.length}</div>
+      </div>
+      ${visible.length
+        ? `<div class="stock-grid">${visible.map((item) => renderTradeGroupingCard(item, mode)).join("")}</div>`
+        : `<section class="kbk-empty-note">현재 조건에 해당하는 후보가 없습니다.</section>`}
+    </section>
+  `;
+}
+
 function topPickSetupProfile(item, price, volume, change) {
   const rvol = rvolValue(item);
   const rsi = toNumber(item?.rsi ?? item?.technical?.rsi);
@@ -1121,6 +1171,10 @@ function ensureStyles() {
     .kbk-pro-fast-hold{background:#fffbeb;border-color:#fbbf24}
     .kbk-pro-fast-hold span,.kbk-pro-fast-hold strong{color:#d97706}
     .kbk-pro-alert-box{background:#ecfeff;border:1px solid rgba(14,116,144,.24);border-radius:12px;padding:12px 14px;color:#155e75;margin:12px 0;font-weight:800;line-height:1.5}
+    .kbk-pro-trade-group{display:grid;gap:10px;margin:12px 0 16px}
+    .kbk-pro-trade-group>.kbk-pro-top-head{background:#fff;border:1px solid rgba(15,23,42,.1);border-radius:12px;padding:12px 14px}
+    .kbk-trade-block{border-color:#fecaca;background:#fffafa}
+    .kbk-trade-watch{border-color:#bfdbfe;background:#f8fbff}
     .kbk-pre-move-section{display:grid;gap:12px;margin:12px 0 16px}
     .kbk-pre-move-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;background:linear-gradient(135deg,#ecfeff,#eff6ff);border:1px solid rgba(37,99,235,.14);border-radius:16px;padding:16px 18px}
     .kbk-pre-move-head h3{margin:4px 0 6px;color:#0f172a;font-size:1.2rem}
@@ -1534,6 +1588,9 @@ async function renderTopPicksOnly(renderPhase = "initial") {
           ...resolveTopPickDisplayFields(pick.item, latestQuote, renderPhase, "renderTopPicksOnly"),
         };
       });
+      const tradeBlockItems = scannerArrayFromPayload(payload, "tradeBlockCandidates");
+      const reentryWatchItems = scannerArrayFromPayload(payload, "reentryWatchCandidates")
+        .filter((item) => item.tradeGrouping !== "TRADE_BLOCK" && !item.tradeBlockReason);
       panel.innerHTML = `
       <section class="accumulation-hero">
         <div>
@@ -1550,6 +1607,18 @@ async function renderTopPicksOnly(renderPhase = "initial") {
         <strong>텔레그램 알림 조건</strong><br>
         최종 선별 점수 80점 이상 · 신규 진입 적합도 60점 이상 · 차트 모양 유사도 70점 이상 · 추격 위험 60점 이하 · 상대거래량 2배 이상
       </section>
+      ${renderTradeGroupingSection(
+        "매매 금지 종목",
+        "과열, 추격 위험, VWAP 약세, 데이터 부족이 함께 확인된 진짜 위험 후보만 표시합니다.",
+        tradeBlockItems,
+        "block",
+      )}
+      ${renderTradeGroupingSection(
+        "재상승 대기/관찰 후보",
+        "VWAP 재안착, 눌림 후 재상승, 거래량 확인이 필요한 후보를 매매 금지와 분리했습니다.",
+        reentryWatchItems,
+        "watch",
+      )}
       ${displayItems.length ? displayItems.map(({ item, displayItem, displayPrice, displayChange, displayVolume, surge, risk, pattern, finalScore, reasoning, chaseRisk, finalDecision: fd, selectionMetrics, stageMeta }) => `
         <article class="kbk-pro-top-card" data-symbol="${textEscape(item.symbol)}">
           ${fd ? renderFinalDecisionHeroHtml(fd, textEscape) : ""}
