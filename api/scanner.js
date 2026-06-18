@@ -1352,6 +1352,12 @@ function sanitizeScannerItem(item, { debug = false } = {}) {
     higherLowScore: item.higherLowScore ?? null,
     volumeStrengthScore: item.volumeStrengthScore ?? null,
     tradeValueKrw: item.tradeValueKrw ?? null,
+    dataQualityStatus: item.dataQualityStatus ?? null,
+    accumulationRankScore: item.accumulationRankScore ?? null,
+    accumulationScore: item.accumulationScore ?? null,
+    accumulationReason: item.accumulationReason ?? null,
+    accumulationSignals: item.accumulationSignals ?? null,
+    accumulationRejectReason: item.accumulationRejectReason ?? null,
     statusBadge: item.statusBadge ?? null,
     topPickVerdict: item.topPickVerdict ?? null,
     topPickGrade: item.topPickGrade ?? null,
@@ -1420,6 +1426,187 @@ function sortByPriority(items = []) {
     });
 }
 
+function accumulationNumber(item, ...keys) {
+  for (const key of keys) {
+    const value = num(item?.[key]) ?? num(item?.technical?.[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function accumulationDataQuality(item = {}) {
+  const quoteSource = String(item.debugQuoteSource || "").toLowerCase();
+  const historySource = String(item.debugHistorySource || "").toLowerCase();
+  const hasQuote = quoteSource && quoteSource !== "none";
+  const hasHistory = historySource && historySource !== "none";
+  const status = hasQuote && hasHistory ? "quote-history"
+    : hasQuote ? "quote-only"
+      : hasHistory ? "history-only"
+        : "missing";
+  const score = status === "quote-history" ? 100
+    : status === "quote-only" || status === "history-only" ? 45
+      : 0;
+  return { status, score, hasQuote, hasHistory };
+}
+
+function accumulationVwapScore(item = {}) {
+  const distance = num(item.vwapDistancePercent);
+  const reclaim = accumulationNumber(item, "vwapReclaimScore") ?? 0;
+  if (item.aboveVwap === true) return 100;
+  if (distance !== null) {
+    const abs = Math.abs(distance);
+    if (distance >= 0 && abs <= 1.5) return 95;
+    if (abs <= 2) return 82;
+    if (abs <= 4) return 65;
+    if (distance >= -6) return 42;
+    return 18;
+  }
+  if (reclaim >= 70) return 80;
+  if (reclaim >= 55) return 62;
+  if (num(item.vwapEstimate) !== null) return 45;
+  return 35;
+}
+
+function accumulationChangeStabilityScore(change) {
+  if (change === null) return 0;
+  if (change >= -2 && change <= 2) return 100;
+  if (change >= -5 && change <= 5) return 82;
+  if (change > 5 && change <= 8) return 45;
+  return 0;
+}
+
+function accumulationVolumeScore(item = {}) {
+  const rvol = num(item.relativeVolume) ?? num(item.volumeRatio) ?? num(item.rvol);
+  const volume = Math.max(num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0, num(item.regularMarketVolume) ?? 0);
+  if ((rvol === null || rvol <= 0) && volume <= 0) return 0;
+  if (rvol !== null) {
+    if (rvol >= 1.15 && rvol <= 2.5) return 100;
+    if (rvol > 2.5 && rvol <= 4) return 76;
+    if (rvol > 4 && rvol <= 6) return 48;
+    if (rvol > 6) return 22;
+    if (rvol >= 0.8) return 48;
+    return 22;
+  }
+  if (volume >= 1_000_000) return 58;
+  if (volume >= 300_000) return 42;
+  return 24;
+}
+
+function accumulationRejectReason(item = {}) {
+  const stage = String(item.stage || "");
+  const change = num(item.changePercent ?? item.preMarketChangePercent);
+  const rvol = num(item.relativeVolume) ?? num(item.volumeRatio) ?? num(item.rvol);
+  const volume = Math.max(num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0, num(item.regularMarketVolume) ?? 0);
+  const compression = accumulationNumber(item, "compressionScore", "boxCompression", "volatilityContraction") ?? 50;
+  const higherLow = accumulationNumber(item, "higherLowScore") ?? 50;
+  const quality = accumulationDataQuality(item);
+  if (!isPrimaryCommonStockCandidate(item)) return "non-common-stock";
+  if (item.isOverheated === true || item.isChasingRisk === true) return "overheated-or-chasing";
+  if (String(item.statusBadge || "").includes("제외")) return "excluded-status";
+  if (item.included === false || item.dataQualityStatus === "insufficient-data") return "insufficient-data";
+  if (change === null) return "missing-change";
+  if (change > 8 && !(stage === "ACCUMULATION" && compression >= 75 && higherLow >= 65)) return "change-too-hot";
+  if (change < -5) return "change-too-weak";
+  if (rvol !== null && rvol > 8) return "rvol-too-hot";
+  if (!["ACCUMULATION", "PRE_SURGE"].includes(stage) && item.isPreSurgeCandidate !== true) return "not-accumulation-stage";
+  if (quality.status === "missing") return "missing-quote-history";
+  if (compression === 50 && higherLow === 50 && quality.status !== "quote-history") return "default-technical-scores";
+  if ((rvol === null || rvol <= 0) && volume <= 0) return "missing-volume-and-rvol";
+  return null;
+}
+
+function buildAccumulationOperationalScore(item = {}) {
+  const change = num(item.changePercent ?? item.preMarketChangePercent);
+  const stage = String(item.stage || "");
+  const compression = clamp(accumulationNumber(item, "compressionScore", "boxCompression", "volatilityContraction") ?? 50);
+  const higherLow = clamp(accumulationNumber(item, "higherLowScore") ?? 50);
+  const vwap = clamp(accumulationVwapScore(item));
+  const changeStability = clamp(accumulationChangeStabilityScore(change));
+  const volumeWarmup = clamp(accumulationVolumeScore(item));
+  const dataQuality = accumulationDataQuality(item);
+  const preSurgePenalty = stage === "PRE_SURGE" ? 8 : 0;
+  const warmChangePenalty = change !== null && change > 5 ? 10 : 0;
+  const score = Math.round(clamp(
+    compression * 0.25
+      + higherLow * 0.20
+      + vwap * 0.20
+      + changeStability * 0.15
+      + volumeWarmup * 0.15
+      + dataQuality.score * 0.05
+      - preSurgePenalty
+      - warmChangePenalty,
+  ));
+  const reasons = [
+    `compression ${Math.round(compression)}`,
+    `higherLow ${Math.round(higherLow)}`,
+    `vwap ${Math.round(vwap)}`,
+    `change ${change === null ? "missing" : change.toFixed(1) + "%"}`,
+    `volumeWarmup ${Math.round(volumeWarmup)}`,
+    `data ${dataQuality.status}`,
+    stage === "PRE_SURGE" ? "PRE_SURGE supplement" : null,
+  ].filter(Boolean);
+  return {
+    accumulationRankScore: score,
+    accumulationScore: score,
+    accumulationSignals: {
+      compressionScore: Math.round(compression),
+      higherLowScore: Math.round(higherLow),
+      vwapScore: Math.round(vwap),
+      changeStabilityScore: Math.round(changeStability),
+      volumeWarmupScore: Math.round(volumeWarmup),
+      dataQualityScore: Math.round(dataQuality.score),
+      dataQualityStatus: dataQuality.status,
+    },
+    accumulationReason: reasons.join(" | "),
+    accumulationRejectReason: null,
+  };
+}
+
+function sortAccumulationCandidates(items = []) {
+  return items
+    .slice()
+    .sort((a, b) => {
+      const scoreDiff = (num(b.accumulationRankScore) ?? 0) - (num(a.accumulationRankScore) ?? 0);
+      if (scoreDiff !== 0) return scoreDiff;
+      const compressionDiff = (num(b.compressionScore) ?? 50) - (num(a.compressionScore) ?? 50);
+      if (compressionDiff !== 0) return compressionDiff;
+      const higherLowDiff = (num(b.higherLowScore) ?? 50) - (num(a.higherLowScore) ?? 50);
+      if (higherLowDiff !== 0) return higherLowDiff;
+      const vwapDiff = accumulationVwapScore(b) - accumulationVwapScore(a);
+      if (vwapDiff !== 0) return vwapDiff;
+      const rvolDiff = (num(b.rvol ?? b.relativeVolume ?? b.volumeRatio) ?? 0) - (num(a.rvol ?? a.relativeVolume ?? a.volumeRatio) ?? 0);
+      if (rvolDiff !== 0) return rvolDiff;
+      const aChange = Math.abs(num(a.changePercent ?? a.preMarketChangePercent) ?? 99);
+      const bChange = Math.abs(num(b.changePercent ?? b.preMarketChangePercent) ?? 99);
+      if (aChange !== bChange) return aChange - bChange;
+      return (accumulationDataQuality(b).score - accumulationDataQuality(a).score);
+    });
+}
+
+function buildAccumulationCandidates(items = [], limit = SCANNER_ACCUMULATION_LIMIT) {
+  const evaluated = items.map((item) => {
+    const reject = accumulationRejectReason(item);
+    if (reject) {
+      return {
+        ...item,
+        accumulationRejectReason: reject,
+      };
+    }
+    return {
+      ...item,
+      ...buildAccumulationOperationalScore(item),
+    };
+  });
+  const accepted = evaluated.filter((item) => !item.accumulationRejectReason);
+  const primary = sortAccumulationCandidates(accepted.filter((item) => String(item.stage || "") === "ACCUMULATION"));
+  const supplement = sortAccumulationCandidates(accepted.filter((item) => String(item.stage || "") === "PRE_SURGE"));
+  const preSurgeLimit = Math.min(10, primary.length, Math.max(0, limit - primary.length));
+  return [
+    ...primary,
+    ...supplement.slice(0, preSurgeLimit),
+  ].slice(0, limit);
+}
+
 function deriveScannerArrays(payload) {
   if (!payload || typeof payload !== "object" || !payload.data || typeof payload.data !== "object") return payload;
   const items = Array.isArray(payload.data.items) ? payload.data.items : [];
@@ -1452,18 +1639,13 @@ function deriveScannerArrays(payload) {
     payload.data.rankingAppliedTo = ["topPicks"];
     payload.data.rankingFallback = "finalSelectionScore";
   }
-  if (!Array.isArray(payload.data.accumulationCandidates)) {
-    payload.data.accumulationCandidates = ranked
-      .filter((item) => {
-        const stage = String(item?.stage || "");
-        const change = parseChange(item);
-        if (change === null || change > 10 || isRisky(item)) return false;
-        return item?.isPreSurgeCandidate === true
-          || stage === "ACCUMULATION"
-          || stage === "PRE_SURGE";
-      })
-      .slice(0, SCANNER_ACCUMULATION_LIMIT);
-  }
+  const accumulationSourceItems = items.length > 0
+    ? items
+    : Array.isArray(payload.data.accumulationCandidates) ? payload.data.accumulationCandidates : [];
+  payload.data.accumulationCandidates = buildAccumulationCandidates(accumulationSourceItems, SCANNER_ACCUMULATION_LIMIT);
+  payload.data.accumulationRankingMode = "accumulation_operational_v1";
+  payload.data.accumulationRankingAppliedTo = ["accumulationCandidates"];
+  payload.data.accumulationRankingFallback = "accumulationRankScore > compressionScore > higherLowScore > vwapScore > rvol > stableChange > dataQuality";
   if (!Array.isArray(payload.data.underOneCandidates)) {
     const underOneRanked = ranked
       .filter((item) => {
@@ -4126,11 +4308,9 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
             localHistorySnapshot?.historySource === "kis-daymarket-bars" ? "kis-local-history" : null,
             rankAuxiliaryScore > 0 ? "common-signal-rank-boost" : null,
           ].filter(Boolean))],
-          ...(includeDebug ? {
-            debugQuoteSource,
-            debugHistorySource,
-            debugFallbackReason: debugFallback,
-          } : {}),
+          debugQuoteSource,
+          debugHistorySource,
+          debugFallbackReason: debugFallback,
           selectionReasons: [
             ...(Array.isArray(normalizedItem.selectionReasons) ? normalizedItem.selectionReasons : []),
             rankAuxiliaryScore > 0 ? `Common signal boost +${rankAuxiliaryScore}` : null,

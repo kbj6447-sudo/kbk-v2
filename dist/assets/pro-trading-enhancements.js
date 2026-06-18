@@ -2361,7 +2361,9 @@ function accumulationCandidatesFromPayload(payload) {
       const change = toNumber(item.changePercent);
       return (stage === "ACCUMULATION" || stage === "PRE_SURGE" || item?.isPreSurgeCandidate === true)
         && change !== null
-        && change <= 10;
+        && change <= 8
+        && !String(item?.statusBadge || "").includes("제외")
+        && item?.dataQualityStatus !== "insufficient-data";
     })
     .filter((item) => item?.isChasingRisk !== true && item?.isOverheated !== true)
     .slice(0, 30);
@@ -2455,9 +2457,14 @@ function stageAwareAccumulationAllowed(item) {
   if (!item) return false;
   const stageMeta = stageMetaOf(item);
   const change = toNumber(item.changePercent) ?? mainChangePercent(item) ?? 0;
-  return stageMeta.isPreSurgeCandidate === true
-    && change <= 10
-    && ["ACCUMULATION", "PRE_SURGE", "SURGE_PRECURSOR", "SURGE PRECURSOR"].includes(stageMeta.stage);
+  const serverRanked = toNumber(item.accumulationRankScore) !== null && !item.accumulationRejectReason;
+  return serverRanked
+    && item.isChasingRisk !== true
+    && item.isOverheated !== true
+    && !String(item.statusBadge || "").includes("제외")
+    && item.dataQualityStatus !== "insufficient-data"
+    && change <= 8
+    && ["ACCUMULATION", "PRE_SURGE"].includes(stageMeta.stage);
 }
 
 function rootScannerRouteActive() {
@@ -2471,7 +2478,6 @@ function candidateRowSymbol(row) {
 
 async function applyStageAwareAccumulationPage() {
   if (!accumulationRouteActive()) return;
-  // TODO: Move this filter upstream into the accumulation route source array so excluded hot names are never rendered, not just hidden after mount.
 
   let payload = null;
   try {
