@@ -515,15 +515,33 @@ function underOnePriceBandScore(price) {
   return { score: 0, label: null };
 }
 
-function underOneStructurePenalty(symbol, tradeValueKrw, relativeVolume, changePercent) {
+function isUnderOneStructureRiskSymbol(symbol) {
   const value = String(symbol || "").toUpperCase();
-  if (!value) return { penalty: 0, labels: [] };
-  const isStructure = value.endsWith("W")
+  if (!value) return false;
+  return value.endsWith("OW")
+    || value.endsWith("AW")
+    || value.endsWith("CW")
+    || value.endsWith("PR")
+    || value.endsWith("W")
     || value.endsWith("R")
-    || value.includes("WS")
     || value.endsWith("Z")
-    || value.includes("WW");
-  if (!isStructure) return { penalty: 0, labels: [] };
+    || value.includes("WW")
+    || value.includes("WS");
+}
+
+function isUnderOneHighConfidenceStructureSymbol(symbol) {
+  const value = String(symbol || "").toUpperCase();
+  if (!value) return false;
+  return value.endsWith("OW")
+    || value.endsWith("AW")
+    || value.endsWith("CW")
+    || value.endsWith("PR")
+    || value.includes("WW")
+    || value.includes("WS");
+}
+
+function underOneStructurePenalty(symbol, tradeValueKrw, relativeVolume, changePercent) {
+  if (!isUnderOneStructureRiskSymbol(symbol)) return { penalty: 0, labels: [] };
 
   const tradeValue = num(tradeValueKrw);
   const rvol = num(relativeVolume);
@@ -534,6 +552,90 @@ function underOneStructurePenalty(symbol, tradeValueKrw, relativeVolume, changeP
   if (rvol === null || rvol < 0.1) penalty += 10;
   if (change !== null && change === 0) penalty += 10;
   return { penalty: Math.min(penalty, 35), labels };
+}
+
+function underOneScoreCap({ symbol, tradeValueKrw, relativeVolume, price }) {
+  const tradeValue = num(tradeValueKrw);
+  const rvol = num(relativeVolume);
+  const priceValue = num(price);
+  const labels = [];
+  let cap = 100;
+
+  if (isUnderOneStructureRiskSymbol(symbol)) {
+    cap = Math.min(cap, 15);
+    labels.push("Score capped: structure risk");
+    if (isUnderOneHighConfidenceStructureSymbol(symbol)) {
+      cap = Math.min(cap, 7);
+      labels.push("Score capped: low liquidity structure ticker");
+    }
+    if (tradeValue !== null && tradeValue < 50_000_000) {
+      cap = Math.min(cap, 7);
+      labels.push("Score capped: low liquidity structure ticker");
+    }
+    if (rvol === null || rvol < 0.1) {
+      cap = Math.min(cap, 5);
+      labels.push("Score capped: low liquidity structure ticker");
+    }
+    if (priceValue !== null && priceValue < 0.05) {
+      cap = Math.min(cap, 3);
+      labels.push("Score capped: extreme penny risk");
+    }
+  }
+
+  if (priceValue !== null && priceValue < 0.01) {
+    cap = Math.min(cap, 2);
+    labels.push("Score capped: extreme penny risk");
+  }
+  if (tradeValue !== null && tradeValue < 1_000_000) {
+    cap = Math.min(cap, 5);
+    labels.push("Score capped: low liquidity structure ticker");
+  }
+  if (rvol === null && tradeValue !== null && tradeValue < 50_000_000) {
+    cap = Math.min(cap, 5);
+    labels.push("Score capped: low liquidity structure ticker");
+  }
+
+  return {
+    cap,
+    labels: [...new Set(labels)],
+  };
+}
+
+function underOneQualityBucket({ symbol, underOneOperationalRankScore, tradeValueKrw, relativeVolume, price }) {
+  const score = num(underOneOperationalRankScore) ?? 0;
+  const tradeValue = num(tradeValueKrw);
+  const rvol = num(relativeVolume);
+  const priceValue = num(price);
+  const structureRisk = isUnderOneStructureRiskSymbol(symbol);
+
+  if (structureRisk
+    || score < 15
+    || (tradeValue !== null && tradeValue < 50_000_000)
+    || rvol === null
+    || rvol < 0.1
+    || (priceValue !== null && priceValue < 0.05)) {
+    return {
+      bucket: 2,
+      label: "Under-one quality bucket: structure fallback",
+    };
+  }
+
+  if (!structureRisk
+    && score >= 40
+    && tradeValue !== null
+    && tradeValue >= 100_000_000
+    && rvol >= 0.1
+    && (priceValue === null || priceValue >= 0.05)) {
+    return {
+      bucket: 0,
+      label: "Under-one quality bucket: primary",
+    };
+  }
+
+  return {
+    bucket: 1,
+    label: "Under-one quality bucket: weak",
+  };
 }
 
 function underOneRiskPenalty({ tradeValueKrw, relativeVolume, changePercent, price }) {
@@ -585,13 +687,27 @@ function buildUnderOneOperationalScore(item) {
     item?.relativeVolume,
     item?.changePercent,
   );
+  const scoreCap = underOneScoreCap({
+    symbol: item?.symbol,
+    tradeValueKrw: item?.tradeValueKrw,
+    relativeVolume: item?.relativeVolume,
+    price: item?.price,
+  });
   const rawTotal = change.score
     + rvol.score
     + tradeValue.score
     + price.score
     - riskPenalty.penalty
     - structurePenalty.penalty;
-  const underOneOperationalRankScore = Math.round(clamp(rawTotal));
+  const uncappedTotal = Math.round(clamp(rawTotal));
+  const underOneOperationalRankScore = Math.min(uncappedTotal, scoreCap.cap);
+  const qualityBucket = underOneQualityBucket({
+    symbol: item?.symbol,
+    underOneOperationalRankScore,
+    tradeValueKrw: item?.tradeValueKrw,
+    relativeVolume: item?.relativeVolume,
+    price: item?.price,
+  });
   const underOneOperationalScoreBreakdown = {
     changeScore: change.score,
     rvolScore: rvol.score,
@@ -600,6 +716,9 @@ function buildUnderOneOperationalScore(item) {
     riskPenalty: -riskPenalty.penalty,
     structurePenalty: -structurePenalty.penalty,
     rawTotal,
+    uncappedTotal,
+    scoreCap: scoreCap.cap < 100 ? scoreCap.cap : null,
+    qualityBucket: qualityBucket.bucket,
     total: underOneOperationalRankScore,
     diagnosticOnly: true,
     excludedFields: [
@@ -619,10 +738,13 @@ function buildUnderOneOperationalScore(item) {
     price.label,
     ...riskPenalty.labels,
     ...structurePenalty.labels,
+    ...scoreCap.labels,
+    qualityBucket.label,
     "diagnostic only: not used for sorting",
   ].filter(Boolean);
   return {
     underOneOperationalRankScore,
+    underOneQualityBucket: qualityBucket.bucket,
     underOneOperationalScoreBreakdown,
     underOneOperationalReasons: [...new Set(underOneOperationalReasons)],
     underOneOperationalRankSource: "underOneOperationalV1",
@@ -645,6 +767,8 @@ function sortUnderOneCandidatesByOperationalRank(items = []) {
   return items
     .slice()
     .sort((a, b) => {
+      const bucketDiff = (num(a?.underOneQualityBucket) ?? 2) - (num(b?.underOneQualityBucket) ?? 2);
+      if (bucketDiff !== 0) return bucketDiff;
       const scoreDiff = getUnderOneOperationalRankScore(b) - getUnderOneOperationalRankScore(a);
       if (scoreDiff !== 0) return scoreDiff;
       const tradeValueDiff = (num(b?.tradeValueKrw) ?? 0) - (num(a?.tradeValueKrw) ?? 0);
@@ -689,6 +813,7 @@ function sanitizeScannerItem(item, { debug = false } = {}) {
     operationalRankScore: item.operationalRankScore ?? null,
     operationalRankSource: item.operationalRankSource ?? null,
     underOneOperationalRankScore: item.underOneOperationalRankScore ?? null,
+    underOneQualityBucket: item.underOneQualityBucket ?? null,
     underOneOperationalScoreBreakdown: item.underOneOperationalScoreBreakdown ?? null,
     underOneOperationalReasons: Array.isArray(item.underOneOperationalReasons) ? item.underOneOperationalReasons : [],
     underOneOperationalRankSource: item.underOneOperationalRankSource ?? null,
