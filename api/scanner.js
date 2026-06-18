@@ -638,6 +638,207 @@ function underOneQualityBucket({ symbol, underOneOperationalRankScore, tradeValu
   };
 }
 
+function shortTermRvolScore(relativeVolume) {
+  const rvol = num(relativeVolume);
+  if (rvol === null || rvol < 1) return { score: 0, label: null };
+  if (rvol < 2) return { score: 8, label: null };
+  if (rvol < 3) return { score: 14, label: "Short-term volume expansion" };
+  if (rvol < 5) return { score: 22, label: "Short-term volume expansion" };
+  if (rvol < 10) return { score: 27, label: "Short-term volume expansion" };
+  return { score: 30, label: "Short-term volume expansion" };
+}
+
+function shortTermChangeScore(changePercent) {
+  const change = num(changePercent);
+  if (change === null || change < 0) return { score: 0, label: null };
+  if (change < 1) return { score: 6, label: null };
+  if (change < 3) return { score: 14, label: "Good short-term change range" };
+  if (change < 8) return { score: 25, label: "Good short-term change range" };
+  if (change < 15) return { score: 20, label: "Good short-term change range" };
+  if (change < 25) return { score: 12, label: null };
+  if (change < 50) return { score: 5, label: "Overextended for scalp" };
+  return { score: 0, label: "Overextended for scalp" };
+}
+
+function shortTermTradeValueScore(tradeValueKrw) {
+  const tradeValue = num(tradeValueKrw);
+  if (tradeValue === null) return { score: 5, label: null };
+  if (tradeValue < 10_000_000) return { score: 0, label: "Low trade value for scalp" };
+  if (tradeValue < 50_000_000) return { score: 4, label: "Low trade value for scalp" };
+  if (tradeValue < 100_000_000) return { score: 8, label: null };
+  if (tradeValue < 500_000_000) return { score: 14, label: null };
+  if (tradeValue < 1_000_000_000) return { score: 17, label: null };
+  return { score: 20, label: null };
+}
+
+function shortTermPriceBandScore(price) {
+  const value = num(price);
+  if (value === null) return { score: 0, label: null };
+  if (value < 0.5) return { score: 2, label: null };
+  if (value < 1) return { score: 6, label: null };
+  if (value < 5) return { score: 10, label: null };
+  if (value < 20) return { score: 8, label: null };
+  if (value < 100) return { score: 5, label: null };
+  return { score: 2, label: null };
+}
+
+function shortTermBaseQualityScore(item) {
+  const operational = num(item?.operationalRankScore);
+  if (operational !== null) {
+    if (operational >= 70) return 10;
+    if (operational >= 50) return 7;
+    if (operational >= 30) return 4;
+    return 0;
+  }
+  const finalScore = num(item?.finalSelectionScore) ?? num(item?.marketPrioritySortScore);
+  if (finalScore === null) return 0;
+  if (finalScore >= 70) return 10;
+  if (finalScore >= 50) return 7;
+  if (finalScore >= 30) return 4;
+  return 0;
+}
+
+function shortTermRiskPenalty({ price, changePercent, relativeVolume, tradeValueKrw }) {
+  const priceValue = num(price);
+  const change = num(changePercent);
+  const rvol = num(relativeVolume);
+  const tradeValue = num(tradeValueKrw);
+  let penalty = 0;
+  const labels = [];
+
+  if (change !== null && change >= 50) {
+    penalty += 20;
+    labels.push("Overextended for scalp");
+  } else if (change !== null && change >= 25) {
+    penalty += 8;
+    labels.push("Overextended for scalp");
+  }
+  if (rvol === null) penalty += 8;
+  else if (rvol < 1) penalty += 10;
+  if (tradeValue === null) penalty += 5;
+  else if (tradeValue < 50_000_000) {
+    penalty += 8;
+    labels.push("Low trade value for scalp");
+  }
+  if (rvol !== null && rvol >= 3 && (tradeValue === null || tradeValue < 50_000_000)) {
+    labels.push("High RVOL but low liquidity");
+  }
+  if (priceValue !== null && priceValue < 0.5) penalty += 8;
+  if (priceValue !== null && priceValue >= 100) penalty += 5;
+
+  return {
+    penalty: Math.min(penalty, 35),
+    labels,
+  };
+}
+
+function shortTermStructurePenalty({ symbol, tradeValueKrw, relativeVolume }) {
+  if (!isUnderOneStructureRiskSymbol(symbol)) return { penalty: 0, labels: [] };
+  const tradeValue = num(tradeValueKrw);
+  const rvol = num(relativeVolume);
+  let penalty = 15;
+  const labels = ["Structure risk for scalp"];
+  if (tradeValue === null || tradeValue < 100_000_000) penalty += 10;
+  if (rvol === null) penalty += 10;
+  return {
+    penalty: Math.min(penalty, 25),
+    labels,
+  };
+}
+
+function shortTermQualityBucket({ symbol, shortTermOperationalRankScore, relativeVolume, changePercent, tradeValueKrw }) {
+  const score = num(shortTermOperationalRankScore) ?? 0;
+  const rvol = num(relativeVolume);
+  const change = num(changePercent);
+  const tradeValue = num(tradeValueKrw);
+  const structureRisk = isUnderOneStructureRiskSymbol(symbol);
+
+  if (structureRisk || score < 25 || rvol === null || (tradeValue !== null && tradeValue < 10_000_000)) {
+    return { bucket: 3, label: "Short-term quality bucket: fallback" };
+  }
+  if (!structureRisk && score >= 65 && rvol >= 3 && change !== null && change >= 1 && change <= 15 && tradeValue !== null && tradeValue >= 100_000_000) {
+    return { bucket: 0, label: "Short-term quality bucket: primary" };
+  }
+  if (!structureRisk && score >= 45 && rvol >= 2 && change !== null && change >= 0 && change <= 20) {
+    return { bucket: 1, label: "Short-term quality bucket: usable" };
+  }
+  if (!structureRisk && score >= 25 && rvol >= 1) {
+    return { bucket: 2, label: "Short-term quality bucket: weak" };
+  }
+  return { bucket: 3, label: "Short-term quality bucket: fallback" };
+}
+
+function buildShortTermOperationalScore(item) {
+  const rvol = shortTermRvolScore(item?.relativeVolume ?? item?.volumeRatio ?? item?.rvol);
+  const change = shortTermChangeScore(item?.changePercent ?? item?.preMarketChangePercent);
+  const tradeValue = shortTermTradeValueScore(item?.tradeValueKrw);
+  const price = shortTermPriceBandScore(item?.price ?? item?.preMarketPrice ?? item?.regularMarketPrice);
+  const baseQualityScore = shortTermBaseQualityScore(item);
+  const riskPenalty = shortTermRiskPenalty({
+    price: item?.price ?? item?.preMarketPrice ?? item?.regularMarketPrice,
+    changePercent: item?.changePercent ?? item?.preMarketChangePercent,
+    relativeVolume: item?.relativeVolume ?? item?.volumeRatio ?? item?.rvol,
+    tradeValueKrw: item?.tradeValueKrw,
+  });
+  const structurePenalty = shortTermStructurePenalty({
+    symbol: item?.symbol,
+    tradeValueKrw: item?.tradeValueKrw,
+    relativeVolume: item?.relativeVolume ?? item?.volumeRatio ?? item?.rvol,
+  });
+  const rawTotal = rvol.score
+    + change.score
+    + tradeValue.score
+    + price.score
+    + baseQualityScore
+    - riskPenalty.penalty
+    - structurePenalty.penalty;
+  const shortTermOperationalRankScore = Math.round(clamp(rawTotal));
+  const qualityBucket = shortTermQualityBucket({
+    symbol: item?.symbol,
+    shortTermOperationalRankScore,
+    relativeVolume: item?.relativeVolume ?? item?.volumeRatio ?? item?.rvol,
+    changePercent: item?.changePercent ?? item?.preMarketChangePercent,
+    tradeValueKrw: item?.tradeValueKrw,
+  });
+  const shortTermOperationalScoreBreakdown = {
+    rvolScore: rvol.score,
+    changeScore: change.score,
+    tradeValueScore: tradeValue.score,
+    priceBandScore: price.score,
+    baseQualityScore,
+    riskPenalty: -riskPenalty.penalty,
+    structurePenalty: -structurePenalty.penalty,
+    rawTotal,
+    qualityBucket: qualityBucket.bucket,
+    total: shortTermOperationalRankScore,
+    diagnosticOnly: true,
+    excludedFields: [
+      "vwap",
+      "aboveVwap",
+      "vwapDistancePercent",
+      "volumeAcceleration",
+      "closePositionInRange",
+      "sessionMovePercent",
+    ],
+  };
+  const shortTermOperationalReasons = [
+    rvol.label,
+    change.label,
+    tradeValue.label,
+    ...riskPenalty.labels,
+    ...structurePenalty.labels,
+    qualityBucket.label,
+    "diagnostic only: not used for sorting",
+  ].filter(Boolean);
+  return {
+    shortTermOperationalRankScore,
+    shortTermOperationalScoreBreakdown,
+    shortTermOperationalReasons: [...new Set(shortTermOperationalReasons)],
+    shortTermOperationalRankSource: "shortTermOperationalV1",
+    shortTermQualityBucket: qualityBucket.bucket,
+  };
+}
+
 function underOneRiskPenalty({ tradeValueKrw, relativeVolume, changePercent, price }) {
   const tradeValue = num(tradeValueKrw);
   const rvol = num(relativeVolume);
@@ -779,6 +980,38 @@ function sortUnderOneCandidatesByOperationalRank(items = []) {
     });
 }
 
+function getShortTermOperationalRankScore(item) {
+  const shortTermScore = num(item?.shortTermOperationalRankScore);
+  if (shortTermScore !== null) return shortTermScore;
+  const operational = num(item?.operationalRankScore);
+  if (operational !== null) return operational;
+  const experimental = num(item?.experimentalRankScore);
+  if (experimental !== null) return experimental;
+  const finalScore = num(item?.finalSelectionScore);
+  if (finalScore !== null) return finalScore;
+  const marketPriority = num(item?.marketPrioritySortScore);
+  if (marketPriority !== null) return marketPriority;
+  return 0;
+}
+
+function sortShortTermCandidatesByOperationalRank(items = []) {
+  return items
+    .slice()
+    .sort((a, b) => {
+      const bucketDiff = (num(a?.shortTermQualityBucket) ?? 3) - (num(b?.shortTermQualityBucket) ?? 3);
+      if (bucketDiff !== 0) return bucketDiff;
+      const scoreDiff = getShortTermOperationalRankScore(b) - getShortTermOperationalRankScore(a);
+      if (scoreDiff !== 0) return scoreDiff;
+      const rvolDiff = (num(b?.relativeVolume ?? b?.volumeRatio ?? b?.rvol) ?? 0)
+        - (num(a?.relativeVolume ?? a?.volumeRatio ?? a?.rvol) ?? 0);
+      if (rvolDiff !== 0) return rvolDiff;
+      const changeDiff = (num(b?.changePercent ?? b?.preMarketChangePercent) ?? 0)
+        - (num(a?.changePercent ?? a?.preMarketChangePercent) ?? 0);
+      if (changeDiff !== 0) return changeDiff;
+      return (num(b?.tradeValueKrw) ?? 0) - (num(a?.tradeValueKrw) ?? 0);
+    });
+}
+
 function sanitizeScannerItem(item, { debug = false } = {}) {
   if (!item || typeof item !== "object") return null;
   const rangeAuditFields = deriveRangeAuditFields(item);
@@ -812,6 +1045,11 @@ function sanitizeScannerItem(item, { debug = false } = {}) {
     experimentalReasons: Array.isArray(item.experimentalReasons) ? item.experimentalReasons : [],
     operationalRankScore: item.operationalRankScore ?? null,
     operationalRankSource: item.operationalRankSource ?? null,
+    shortTermOperationalRankScore: item.shortTermOperationalRankScore ?? null,
+    shortTermQualityBucket: item.shortTermQualityBucket ?? null,
+    shortTermOperationalScoreBreakdown: item.shortTermOperationalScoreBreakdown ?? null,
+    shortTermOperationalReasons: Array.isArray(item.shortTermOperationalReasons) ? item.shortTermOperationalReasons : [],
+    shortTermOperationalRankSource: item.shortTermOperationalRankSource ?? null,
     underOneOperationalRankScore: item.underOneOperationalRankScore ?? null,
     underOneQualityBucket: item.underOneQualityBucket ?? null,
     underOneOperationalScoreBreakdown: item.underOneOperationalScoreBreakdown ?? null,
@@ -924,6 +1162,14 @@ function deriveScannerArrays(payload) {
       })
       .slice(0, SCANNER_SHORT_TERM_LIMIT);
   }
+  payload.data.shortTermCandidates = payload.data.shortTermCandidates.map((item) => ({
+    ...item,
+    ...buildShortTermOperationalScore(item),
+  }));
+  payload.data.shortTermCandidates = sortShortTermCandidatesByOperationalRank(payload.data.shortTermCandidates);
+  payload.data.shortTermRankingMode = "short_term_operational_v1";
+  payload.data.shortTermRankingAppliedTo = ["shortTermCandidates"];
+  payload.data.shortTermRankingFallback = "operationalRankScore > experimentalRankScore > finalSelectionScore > marketPrioritySortScore";
   if (!Array.isArray(payload.data.topPicks)) {
     const operationalRanked = sortTopPicksByOperationalRank(items);
     payload.data.topPicks = operationalRanked.slice(0, SCANNER_TOP_PICKS_LIMIT);

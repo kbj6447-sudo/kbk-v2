@@ -2257,6 +2257,36 @@ function scannerItemsFromPayload(payload) {
   return Array.isArray(payload?.data?.items) ? payload.data.items : Array.isArray(payload?.items) ? payload.items : [];
 }
 
+function shortTermOperationalRankScore(item) {
+  return toNumber(item?.shortTermOperationalRankScore)
+    ?? toNumber(item?.operationalRankScore)
+    ?? toNumber(item?.experimentalRankScore)
+    ?? toNumber(item?.finalSelectionScore)
+    ?? toNumber(item?.marketPrioritySortScore)
+    ?? 0;
+}
+
+function compareShortTermOperationalCandidates(a, b) {
+  const aBucket = toNumber(a?.shortTermQualityBucket);
+  const bBucket = toNumber(b?.shortTermQualityBucket);
+  if (aBucket !== null || bBucket !== null) {
+    const bucketDiff = (aBucket ?? 9999) - (bBucket ?? 9999);
+    if (bucketDiff !== 0) return bucketDiff;
+    const scoreDiff = shortTermOperationalRankScore(b) - shortTermOperationalRankScore(a);
+    if (scoreDiff !== 0) return scoreDiff;
+    const rvolDiff = (toNumber(b?.relativeVolume ?? b?.volumeRatio ?? b?.rvol) ?? 0)
+      - (toNumber(a?.relativeVolume ?? a?.volumeRatio ?? a?.rvol) ?? 0);
+    if (rvolDiff !== 0) return rvolDiff;
+    const changeDiff = (toNumber(b?.changePercent ?? b?.preMarketChangePercent) ?? 0)
+      - (toNumber(a?.changePercent ?? a?.preMarketChangePercent) ?? 0);
+    if (changeDiff !== 0) return changeDiff;
+    const tradeValueDiff = (toNumber(b?.tradeValueKrw) ?? 0) - (toNumber(a?.tradeValueKrw) ?? 0);
+    if (tradeValueDiff !== 0) return tradeValueDiff;
+  }
+  return (toNumber(b?.finalSelectionScore) ?? toNumber(b?.finalProbabilityScore) ?? 0)
+    - (toNumber(a?.finalSelectionScore) ?? toNumber(a?.finalProbabilityScore) ?? 0);
+}
+
 function shortTermCandidatesFromPayload(payload) {
   const hasRecoverySignal = (item) => {
     const rvol = toNumber(item?.relativeVolume ?? item?.volumeRatio ?? item?.rvol);
@@ -2489,7 +2519,7 @@ async function applyStageAwareCandidateTable() {
   const itemMap = new Map(items.filter((item) => item?.symbol).map((item) => [String(item.symbol).toUpperCase(), item]));
   const ranking = new Map(items
     .slice()
-    .sort((a, b) => (toNumber(b.finalSelectionScore) ?? toNumber(b.finalProbabilityScore) ?? 0) - (toNumber(a.finalSelectionScore) ?? toNumber(a.finalProbabilityScore) ?? 0))
+    .sort(compareShortTermOperationalCandidates)
     .map((item, index) => [String(item.symbol).toUpperCase(), index]));
 
   const rows = Array.from(table.querySelectorAll("tr"));
