@@ -742,7 +742,7 @@ function scannerArrayFromPayload(payload, key) {
 function renderTradeGroupingCard(item, mode) {
   const isBlock = mode === "block";
   const reason = isBlock
-    ? item.tradeBlockReason || "위험 신호 확인"
+    ? item.tradeBlockReasonKo || item.tradeBlockSummaryKo || "위험 신호 확인"
     : item.reentryWaitReason || item.watchlistReason || "관찰 대기";
   const score = isBlock ? toNumber(item.tradeBlockScore) : toNumber(item.operationalRankScore ?? item.finalSelectionScore);
   return `

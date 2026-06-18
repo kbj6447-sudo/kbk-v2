@@ -1363,9 +1363,18 @@ function sanitizeScannerItem(item, { debug = false } = {}) {
     tradeBlockScore: item.tradeBlockScore ?? null,
     tradeBlockReason: item.tradeBlockReason ?? null,
     tradeBlockSignals: item.tradeBlockSignals ?? null,
+    tradeBlockReasonKo: item.tradeBlockReasonKo ?? null,
+    tradeBlockSummaryKo: item.tradeBlockSummaryKo ?? null,
+    riskExplanationKo: item.riskExplanationKo ?? null,
     watchlistReason: item.watchlistReason ?? null,
     reentryWaitReason: item.reentryWaitReason ?? null,
     tradeGrouping: item.tradeGrouping ?? null,
+    surgeTimingClassification: item.surgeTimingClassification ?? null,
+    distanceFromDayHighPct: item.distanceFromDayHighPct ?? null,
+    earlySurgeMode: item.earlySurgeMode ?? null,
+    earlySurgeScore: item.earlySurgeScore ?? null,
+    earlySurgeReason: Array.isArray(item.earlySurgeReason) ? item.earlySurgeReason : [],
+    earlySurgeSignal: item.earlySurgeSignal ?? null,
     statusBadge: item.statusBadge ?? null,
     topPickVerdict: item.topPickVerdict ?? null,
     topPickGrade: item.topPickGrade ?? null,
@@ -1615,6 +1624,101 @@ function buildAccumulationCandidates(items = [], limit = SCANNER_ACCUMULATION_LI
   ].slice(0, limit);
 }
 
+function buildTradeBlockReasonKo(blockSignals, change, rvol) {
+  const reasons = [];
+  for (const signal of blockSignals) {
+    if (signal.startsWith("change-")) {
+      const p = parseFloat(signal.replace("change-", "").replace("%", ""));
+      reasons.push(`오늘 이미 크게 상승했습니다${Number.isFinite(p) ? `(${p.toFixed(1)}%)` : ""}. 현재 진입하면 고점 추격 위험이 큽니다.`);
+    } else if (signal === "overheated") {
+      reasons.push("현재 과열 상태입니다. 추가 매수는 고점 진입 위험이 있습니다.");
+    } else if (signal.startsWith("chasing-risk")) {
+      reasons.push("추격 위험이 높습니다. 현재 진입은 적합하지 않습니다.");
+    } else if (signal.startsWith("drop-risk")) {
+      reasons.push("고점 이후 하락 위험이 커진 상태입니다.");
+    } else if (signal.startsWith("rvol-") && signal.includes("vwap-weak")) {
+      reasons.push("거래량이 이미 과도하게 폭발해 초기 진입 구간은 지났습니다.");
+    } else if (signal === "excluded-status") {
+      reasons.push("스캐너 기준상 제외 후보로 분류되었습니다.");
+    } else if (signal === "insufficient-data-hot") {
+      reasons.push("데이터가 부족해 안전한 진입 판단이 어렵습니다.");
+    } else if (signal === "forbidden-verdict-confirmed") {
+      reasons.push("매매 금지 조건이 복수 확인되었습니다.");
+    } else if (signal === "hot-change-vwap-weak") {
+      reasons.push("현재가가 VWAP 아래에 있어 매수세가 약해진 상태입니다.");
+    }
+  }
+  if (reasons.length === 0) {
+    if (change !== null && change >= 15) {
+      reasons.push("오늘 이미 크게 상승했습니다. 현재 진입하면 고점 추격 위험이 큽니다.");
+    } else if (rvol !== null && rvol > 100) {
+      reasons.push("거래량이 이미 과도하게 폭발해 초기 진입 구간은 지났습니다.");
+    } else {
+      reasons.push("복합 위험 신호로 현재 진입이 적합하지 않습니다.");
+    }
+  }
+  return reasons.slice(0, 2).join(" ");
+}
+
+function buildSurgeTimingClassification(item) {
+  const change = num(item?.changePercent) ?? num(item?.preMarketChangePercent) ?? 0;
+  const rvol = num(item?.relativeVolume) ?? num(item?.volumeRatio) ?? 0;
+  const rangeAudit = deriveRangeAuditFields(item);
+  const distanceFromDayHighPct = rangeAudit.highDropPercent !== null
+    ? Math.round(rangeAudit.highDropPercent * 10) / 10
+    : null;
+
+  let surgeTimingClassification;
+  let earlySurgeSignal = null;
+  let earlySurgeScore = 0;
+  const earlySurgeReasonArr = [];
+
+  if (change >= 20 || rvol > 100) {
+    surgeTimingClassification = "LATE_CHASE_RISK";
+    earlySurgeSignal = "LATE_CHASE_RISK";
+    if (rvol > 100) earlySurgeReasonArr.push("RVOL 100배 이상 — 추격 위험");
+    else earlySurgeReasonArr.push(`상승률 ${change.toFixed(1)}%로 이미 크게 오른 상태`);
+    if (distanceFromDayHighPct !== null && distanceFromDayHighPct >= 8) {
+      earlySurgeReasonArr.push(`고점 대비 ${distanceFromDayHighPct.toFixed(1)}% 하락`);
+    }
+  } else if (change >= 15 || rvol > 20) {
+    surgeTimingClassification = "SURGE_IN_PROGRESS";
+    earlySurgeSignal = "SURGE_IN_PROGRESS";
+    if (rvol > 20) earlySurgeReasonArr.push("RVOL 20배 이상 — 이미 폭발한 후");
+    else earlySurgeReasonArr.push(`상승률 ${change.toFixed(1)}%로 급등 진행 중`);
+  } else if (change >= -2 && change <= 8 && rvol >= 3 && rvol <= 10) {
+    surgeTimingClassification = "EARLY_SURGE_SETUP";
+    earlySurgeSignal = "EARLY_SURGE_SETUP";
+    earlySurgeScore = 50;
+    if (rvol >= 5) {
+      earlySurgeScore += 20;
+      earlySurgeReasonArr.push("RVOL 5배 이상 강한 예열");
+    } else {
+      earlySurgeScore += 10;
+      earlySurgeReasonArr.push("RVOL 3~10배 초기 예열 구간");
+    }
+    if (change >= 0 && change <= 4) {
+      earlySurgeScore += 15;
+      earlySurgeReasonArr.push("상승률 초기 구간 유지");
+    }
+    if (distanceFromDayHighPct !== null && distanceFromDayHighPct < 5) {
+      earlySurgeScore += 10;
+      earlySurgeReasonArr.push("고점 근처 유지");
+    }
+  } else {
+    surgeTimingClassification = "NEUTRAL";
+  }
+
+  return {
+    surgeTimingClassification,
+    distanceFromDayHighPct,
+    earlySurgeMode: "early_surge_v1",
+    earlySurgeScore: Math.min(100, Math.round(earlySurgeScore)),
+    earlySurgeReason: earlySurgeReasonArr.slice(0, 3),
+    earlySurgeSignal,
+  };
+}
+
 function tradeGroupNumber(item, ...keys) {
   for (const key of keys) {
     const value = num(item?.[key]) ?? num(item?.technical?.[key]);
@@ -1716,10 +1820,26 @@ function evaluateTradeGrouping(item = {}) {
     ? (watchSignals.length ? watchSignals.join(" | ") : null)
     : null;
 
+  const tradeBlockReasonKo = tradeBlocked
+    ? buildTradeBlockReasonKo(blockSignals, change, rvol)
+    : null;
+  const tradeBlockSummaryKo = tradeBlocked
+    ? (change !== null && change >= 20
+      ? "오늘 이미 크게 상승했습니다. 고점 추격 위험이 큽니다."
+      : change !== null && change >= 15
+        ? "상승 과열 구간입니다. 신규 진입은 위험합니다."
+        : rvol !== null && rvol > 100
+          ? "거래량이 이미 과도하게 폭발했습니다."
+          : "복합 위험 신호가 감지되었습니다.")
+    : null;
+
   return {
     tradeBlockScore: Math.round(clamp(tradeBlockScore)),
     tradeBlockReason,
     tradeBlockSignals: blockSignals,
+    tradeBlockReasonKo,
+    tradeBlockSummaryKo,
+    riskExplanationKo: tradeBlockReasonKo,
     watchlistReason,
     reentryWaitReason,
     tradeGrouping: tradeBlocked ? "TRADE_BLOCK" : watchlistReason ? "REENTRY_WATCH" : "NONE",
@@ -1749,7 +1869,11 @@ function sortReentryWatchCandidates(items = []) {
 function deriveScannerArrays(payload) {
   if (!payload || typeof payload !== "object" || !payload.data || typeof payload.data !== "object") return payload;
   payload.data.items = Array.isArray(payload.data.items)
-    ? payload.data.items.map((item) => ({ ...item, ...evaluateTradeGrouping(item) }))
+    ? payload.data.items.map((item) => ({
+        ...item,
+        ...evaluateTradeGrouping(item),
+        ...buildSurgeTimingClassification(item),
+      }))
     : [];
   const items = payload.data.items;
   const ranked = sortByPriority(items);
@@ -1787,6 +1911,7 @@ function deriveScannerArrays(payload) {
   payload.data.accumulationCandidates = buildAccumulationCandidates(accumulationSourceItems, SCANNER_ACCUMULATION_LIMIT);
   payload.data.accumulationRankingMode = "accumulation_operational_v1";
   payload.data.accumulationRankingAppliedTo = ["accumulationCandidates"];
+  payload.data.earlySurgeMode = "early_surge_v1";
   payload.data.accumulationRankingFallback = "accumulationRankScore > compressionScore > higherLowScore > vwapScore > rvol > stableChange > dataQuality";
   if (!Array.isArray(payload.data.underOneCandidates)) {
     const underOneRanked = ranked
@@ -2881,6 +3006,8 @@ function buildPreMoveCandidate(item) {
   if (change < -3 || change > 8) return null;
   if (change > 10) return null;
   if (relativeVolume < 1.2 || relativeVolume > 6) return null;
+  const preMoveRangeAudit = deriveRangeAuditFields(item);
+  if (preMoveRangeAudit.highDropPercent !== null && preMoveRangeAudit.highDropPercent >= 12) return null;
   if (item.isOverheated === true || item.isChasingRisk === true) return null;
   if (stage === "OVERHEATED" || stage === "CHASING_RISK") return null;
 
@@ -4143,6 +4270,16 @@ function buildBaseScannerItem(quote, sourceTags = []) {
     price,
     volume,
   });
+
+  // Prevent "급등 전 조짐" stageLabel for already-surged stocks
+  const rawChange = changePercent ?? 0;
+  if (rawChange >= 20) {
+    scores.stage = "LATE_CHASE_RISK";
+    scores.stageLabel = "추격 위험";
+  } else if (rawChange >= 15) {
+    scores.stage = "MOMENTUM_EXPANSION";
+    scores.stageLabel = "이미 상승 진행";
+  }
 
   return {
     symbol,
