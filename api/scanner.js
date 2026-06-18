@@ -952,6 +952,276 @@ function buildUnderOneOperationalScore(item) {
   };
 }
 
+function overOneRvolScore(relativeVolume) {
+  const rvol = num(relativeVolume);
+  if (rvol === null || rvol < 1) return { score: 0, label: null };
+  if (rvol < 2) return { score: 8, label: null };
+  if (rvol < 3) return { score: 14, label: null };
+  if (rvol < 5) return { score: 22, label: "Over-one volume expansion" };
+  if (rvol < 10) return { score: 27, label: "Over-one volume expansion" };
+  return { score: 30, label: "Over-one volume expansion" };
+}
+
+function overOneChangeScore(changePercent) {
+  const change = num(changePercent);
+  if (change === null || change < 0) return { score: 0, label: null };
+  if (change < 1) return { score: 5, label: null };
+  if (change < 3) return { score: 12, label: null };
+  if (change < 8) return { score: 25, label: "Good over-one change range" };
+  if (change < 15) return { score: 22, label: "Good over-one change range" };
+  if (change < 25) return { score: 12, label: null };
+  if (change < 50) return { score: 4, label: "Overextended for over-one" };
+  return { score: 0, label: "Overextended for over-one" };
+}
+
+function overOnePriceBandScore(price) {
+  const value = num(price);
+  if (value === null || value < 1) return { score: 0, label: null };
+  if (value < 3) return { score: 15, label: "Good 1-20 price band" };
+  if (value < 5) return { score: 15, label: "Good 1-20 price band" };
+  if (value < 20) return { score: 12, label: "Good 1-20 price band" };
+  if (value < 50) return { score: 7, label: null };
+  if (value < 100) return { score: 4, label: "High price: lower priority" };
+  return { score: 0, label: "High price: lower priority" };
+}
+
+function overOneBaseQualityScore(item) {
+  const operational = num(item?.operationalRankScore);
+  if (operational !== null) {
+    if (operational >= 70) return 15;
+    if (operational >= 50) return 10;
+    if (operational >= 30) return 5;
+    return 0;
+  }
+  const finalScore = num(item?.finalSelectionScore) ?? num(item?.marketPrioritySortScore);
+  if (finalScore === null) return 0;
+  if (finalScore >= 70) return 10;
+  if (finalScore >= 50) return 7;
+  if (finalScore >= 30) return 4;
+  return 0;
+}
+
+function overOneTechnicalBoost(value, highThreshold, midThreshold, highPoints, midPoints) {
+  const parsed = num(value);
+  if (parsed === null) return 0;
+  if (parsed >= highThreshold) return highPoints;
+  if (parsed >= midThreshold) return midPoints;
+  return 0;
+}
+
+function overOneTechnicalScore(item) {
+  const entry = overOneTechnicalBoost(item?.entrySuitability, 65, 45, 5, 3);
+  const volumeQuality = overOneTechnicalBoost(item?.volumeQualityScore, 60, 45, 5, 3);
+  const volumeAcceleration = overOneTechnicalBoost(item?.volumeAccelerationScore, 60, 45, 3, 2);
+  const higherLow = overOneTechnicalBoost(item?.higherLowScore, 58, 45, 2, 1);
+  return Math.min(entry + volumeQuality + volumeAcceleration + higherLow, 15);
+}
+
+function overOneStructurePenalty(symbol) {
+  if (!isUnderOneStructureRiskSymbol(symbol)) return { penalty: 0, labels: [] };
+  return {
+    penalty: 20,
+    labels: ["Structure risk for over-one"],
+  };
+}
+
+function overOneRiskPenalty({ price, changePercent, relativeVolume, isChasingRisk, isOverheated }) {
+  const priceValue = num(price);
+  const change = num(changePercent);
+  const rvol = num(relativeVolume);
+  let penalty = 0;
+  const labels = [];
+
+  if (change !== null && change >= 50) {
+    penalty += 25;
+    labels.push("Overextended for over-one");
+  } else if (change !== null && change >= 25) {
+    penalty += 10;
+    labels.push("Overextended for over-one");
+  }
+  if (rvol !== null && rvol < 1) {
+    penalty += 10;
+  }
+  if (priceValue !== null && priceValue >= 100) {
+    penalty += 15;
+    labels.push("High price: lower priority");
+  } else if (priceValue !== null && priceValue >= 50) {
+    penalty += 5;
+    labels.push("High price: lower priority");
+  }
+  if (isChasingRisk === true) {
+    penalty += 25;
+    labels.push("Overextended for over-one");
+  }
+  if (isOverheated === true) {
+    penalty += 25;
+    labels.push("Overextended for over-one");
+  }
+
+  return {
+    penalty: Math.min(penalty, 35),
+    labels,
+  };
+}
+
+function overOneQualityBucket({
+  symbol,
+  overOneOperationalRankScore,
+  relativeVolume,
+  changePercent,
+  price,
+  isChasingRisk,
+  isOverheated,
+}) {
+  const score = num(overOneOperationalRankScore) ?? 0;
+  const rvol = num(relativeVolume);
+  const change = num(changePercent);
+  const priceValue = num(price);
+  const structureRisk = isUnderOneStructureRiskSymbol(symbol);
+
+  if (structureRisk
+    || score < 25
+    || rvol === null
+    || rvol < 1
+    || isChasingRisk === true
+    || isOverheated === true) {
+    return { bucket: 3, label: "Over-one quality bucket: fallback" };
+  }
+  if (!structureRisk
+    && score >= 65
+    && rvol >= 3
+    && change !== null
+    && change >= 1
+    && change <= 15
+    && priceValue !== null
+    && priceValue >= 1
+    && priceValue <= 20
+    && isChasingRisk !== true
+    && isOverheated !== true) {
+    return { bucket: 0, label: "Over-one quality bucket: primary" };
+  }
+  if (!structureRisk
+    && score >= 45
+    && rvol >= 2
+    && change !== null
+    && change >= 1
+    && change <= 20
+    && priceValue !== null
+    && priceValue >= 1
+    && priceValue <= 50) {
+    return { bucket: 1, label: "Over-one quality bucket: usable" };
+  }
+  if (!structureRisk
+    && score >= 25
+    && rvol >= 1
+    && change !== null
+    && change >= 0) {
+    return { bucket: 2, label: "Over-one quality bucket: weak" };
+  }
+  return { bucket: 3, label: "Over-one quality bucket: fallback" };
+}
+
+function buildOverOneOperationalScore(item) {
+  const priceValue = item?.price ?? item?.preMarketPrice ?? item?.regularMarketPrice;
+  const changePercent = item?.changePercent ?? item?.preMarketChangePercent;
+  const relativeVolume = item?.relativeVolume ?? item?.volumeRatio ?? item?.rvol;
+  const rvol = overOneRvolScore(relativeVolume);
+  const change = overOneChangeScore(changePercent);
+  const price = overOnePriceBandScore(priceValue);
+  const baseQualityScore = overOneBaseQualityScore(item);
+  const technicalScore = overOneTechnicalScore(item);
+  const riskPenalty = overOneRiskPenalty({
+    price: priceValue,
+    changePercent,
+    relativeVolume,
+    isChasingRisk: item?.isChasingRisk,
+    isOverheated: item?.isOverheated,
+  });
+  const structurePenalty = overOneStructurePenalty(item?.symbol);
+  const rawTotal = rvol.score
+    + change.score
+    + price.score
+    + baseQualityScore
+    + technicalScore
+    - riskPenalty.penalty
+    - structurePenalty.penalty;
+  const overOneOperationalRankScore = Math.round(clamp(rawTotal));
+  const qualityBucket = overOneQualityBucket({
+    symbol: item?.symbol,
+    overOneOperationalRankScore,
+    relativeVolume,
+    changePercent,
+    price: priceValue,
+    isChasingRisk: item?.isChasingRisk,
+    isOverheated: item?.isOverheated,
+  });
+  const overOneOperationalScoreBreakdown = {
+    rvolScore: rvol.score,
+    changeScore: change.score,
+    priceBandScore: price.score,
+    baseQualityScore,
+    technicalScore,
+    riskPenalty: -riskPenalty.penalty,
+    structurePenalty: -structurePenalty.penalty,
+    rawTotal,
+    qualityBucket: qualityBucket.bucket,
+    total: overOneOperationalRankScore,
+    diagnosticOnly: true,
+    excludedFields: [
+      "tradeValueKrw",
+      "vwapDistancePercent",
+      "closePositionInRange",
+      "sessionMovePercent",
+    ],
+  };
+  const overOneOperationalReasons = [
+    rvol.label,
+    change.label,
+    price.label,
+    ...riskPenalty.labels,
+    ...structurePenalty.labels,
+    qualityBucket.label,
+    "diagnostic only: not used for sorting",
+  ].filter(Boolean);
+  return {
+    overOneOperationalRankScore,
+    overOneQualityBucket: qualityBucket.bucket,
+    overOneOperationalScoreBreakdown,
+    overOneOperationalReasons: [...new Set(overOneOperationalReasons)],
+    overOneOperationalRankSource: "overOneOperationalV1",
+  };
+}
+
+function getOverOneOperationalRankScore(item) {
+  const overOneScore = num(item?.overOneOperationalRankScore);
+  if (overOneScore !== null) return overOneScore;
+  const operational = num(item?.operationalRankScore);
+  if (operational !== null) return operational;
+  const experimental = num(item?.experimentalRankScore);
+  if (experimental !== null) return experimental;
+  const finalScore = num(item?.finalSelectionScore);
+  if (finalScore !== null) return finalScore;
+  const marketPriority = num(item?.marketPrioritySortScore);
+  if (marketPriority !== null) return marketPriority;
+  return 0;
+}
+
+function sortOverOneCandidatesByOperationalRank(items = []) {
+  return items
+    .slice()
+    .sort((a, b) => {
+      const bucketDiff = (num(a?.overOneQualityBucket) ?? 3) - (num(b?.overOneQualityBucket) ?? 3);
+      if (bucketDiff !== 0) return bucketDiff;
+      const scoreDiff = getOverOneOperationalRankScore(b) - getOverOneOperationalRankScore(a);
+      if (scoreDiff !== 0) return scoreDiff;
+      const rvolDiff = (num(b?.relativeVolume) ?? 0) - (num(a?.relativeVolume) ?? 0);
+      if (rvolDiff !== 0) return rvolDiff;
+      const changeDiff = (num(b?.changePercent) ?? 0) - (num(a?.changePercent) ?? 0);
+      if (changeDiff !== 0) return changeDiff;
+      return (num(b?.operationalRankScore) ?? 0) - (num(a?.operationalRankScore) ?? 0);
+    });
+}
+
 function getUnderOneOperationalRankScore(item) {
   const underOneScore = num(item?.underOneOperationalRankScore);
   if (underOneScore !== null) return underOneScore;
@@ -1055,6 +1325,11 @@ function sanitizeScannerItem(item, { debug = false } = {}) {
     underOneOperationalScoreBreakdown: item.underOneOperationalScoreBreakdown ?? null,
     underOneOperationalReasons: Array.isArray(item.underOneOperationalReasons) ? item.underOneOperationalReasons : [],
     underOneOperationalRankSource: item.underOneOperationalRankSource ?? null,
+    overOneOperationalRankScore: item.overOneOperationalRankScore ?? null,
+    overOneQualityBucket: item.overOneQualityBucket ?? null,
+    overOneOperationalScoreBreakdown: item.overOneOperationalScoreBreakdown ?? null,
+    overOneOperationalReasons: Array.isArray(item.overOneOperationalReasons) ? item.overOneOperationalReasons : [],
+    overOneOperationalRankSource: item.overOneOperationalRankSource ?? null,
     marketPrioritySortScore: item.marketPrioritySortScore ?? null,
     volumeQualitySortScore: item.volumeQualitySortScore ?? null,
     surgePrecursorScore: item.surgePrecursorScore ?? null,
@@ -1233,6 +1508,16 @@ function deriveScannerArrays(payload) {
         return bPriority - aPriority;
       });
     payload.data.overOneCandidates = preferred.slice(0, SCANNER_OVER_ONE_LIMIT);
+  }
+  if (Array.isArray(payload.data.overOneCandidates)) {
+    payload.data.overOneCandidates = payload.data.overOneCandidates.map((item) => ({
+      ...item,
+      ...buildOverOneOperationalScore(item),
+    }));
+    payload.data.overOneCandidates = sortOverOneCandidatesByOperationalRank(payload.data.overOneCandidates);
+    payload.data.overOneRankingMode = "over_one_operational_v1";
+    payload.data.overOneRankingAppliedTo = ["overOneCandidates"];
+    payload.data.overOneRankingFallback = "operationalRankScore > experimentalRankScore > finalSelectionScore > marketPrioritySortScore";
   }
   if (!Array.isArray(payload.data.reboundWatchCandidates)) {
     payload.data.reboundWatchCandidates = ranked
