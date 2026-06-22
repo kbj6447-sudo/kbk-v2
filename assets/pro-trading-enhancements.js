@@ -236,6 +236,96 @@ function sessionDebugHtml(item = {}) {
     </div>`;
 }
 
+function formatKstClock(value) {
+  if (!value) return "-";
+  const match = String(value).match(/(\d{2}:\d{2})/);
+  return match?.[1] || String(value);
+}
+
+function scoreReasonBadge(type) {
+  if (type === "negative") return "-";
+  if (type === "warning") return "주의";
+  return "+";
+}
+
+function diagnosticSummaryHtml(item = {}) {
+  const dataQuality = item.dataQuality || {};
+  const scannerMode = item.scannerMode || {};
+  const signalLifecycle = item.signalLifecycle || {};
+  const reasons = Array.isArray(item.scoreReasons) ? item.scoreReasons.slice(0, 5) : [];
+  if (!dataQuality.reliability && !scannerMode.mode && !signalLifecycle.status && !reasons.length) return "";
+  return `
+    <div class="kbk-diagnostic-box">
+      <div class="kbk-diagnostic-grid">
+        <div><span>데이터 신뢰도</span><b>${textEscape(dataQuality.reliabilityKo || reliabilityLabel(item))}</b></div>
+        <div><span>현재 모드</span><b>${textEscape(scannerMode.modeKo || "-")}</b></div>
+        <div><span>모드 이유</span><b>${textEscape(scannerMode.reasonKo || "-")}</b></div>
+        <div><span>신호 발생</span><b>${textEscape(formatKstClock(signalLifecycle.signalCreatedAtKst))}</b></div>
+        <div><span>신호 유효</span><b>${textEscape(signalLifecycle.validUntilKst ? `${formatKstClock(signalLifecycle.validUntilKst)}까지` : "-")}</b></div>
+        <div><span>현재 상태</span><b>${textEscape(signalLifecycle.statusKo || "-")}</b></div>
+      </div>
+      ${reasons.length ? `<div class="kbk-diagnostic-reasons">${reasons.map((reason) => `<span class="kbk-diagnostic-chip ${textEscape(reason.type || "positive")}">${scoreReasonBadge(reason.type)} ${textEscape(reason.labelKo || "-")}${reason.valueKo ? ` · ${textEscape(reason.valueKo)}` : ""}</span>`).join("")}</div>` : ""}
+    </div>
+  `;
+}
+
+function backtestScannerSummaryHtml(payload = {}) {
+  const baselineAudit = payload?.baselineAudit || {};
+  const items = Array.isArray(payload?.items) ? payload.items.slice(0, 3) : [];
+  if (!baselineAudit.generatedAtKst && !items.length) return "";
+  return `
+    <div class="kbk-backtest-baseline">
+      <strong>현재 스캐너 baseline</strong><br>
+      ${textEscape(baselineAudit.scannerVersion || "baseline")} · 생성 ${textEscape(baselineAudit.generatedAtKst || "-")} · 필터 변경 ${baselineAudit.filterChanged === false ? "없음" : "있음"}
+      ${baselineAudit.purposeKo ? `<div class="kbk-backtest-baseline-copy">${textEscape(baselineAudit.purposeKo)}</div>` : ""}
+      ${items.length ? `<div class="kbk-backtest-baseline-list">${items.map((item) => {
+        const mode = item?.scannerMode?.modeKo || "관찰 대기";
+        const reliability = item?.dataQuality?.reliabilityKo || reliabilityLabel(item);
+        const status = item?.signalLifecycle?.statusKo || "-";
+        return `<div><b>${textEscape(item.symbol || "-")}</b><span>${textEscape(mode)} · ${textEscape(reliability)} · ${textEscape(status)}</span></div>`;
+      }).join("")}</div>` : ""}
+    </div>
+  `;
+}
+
+function diagnosticInlineText(item = {}) {
+  const dataQuality = item.dataQuality || {};
+  const scannerMode = item.scannerMode || {};
+  const signalLifecycle = item.signalLifecycle || {};
+  const reasons = Array.isArray(item.scoreReasons) ? item.scoreReasons.slice(0, 3).map((reason) => reason?.labelKo).filter(Boolean) : [];
+  const summary = [
+    `데이터 ${dataQuality.reliabilityKo || reliabilityLabel(item)}`,
+    scannerMode.modeKo || "모드 미확인",
+    signalLifecycle.statusKo || "상태 미확인",
+  ].filter(Boolean).join(" · ");
+  const detail = reasons.join(", ");
+  return {
+    summary,
+    detail,
+  };
+}
+
+function diagnosticInlineHtml(item = {}, options = {}) {
+  const { compact = false } = options;
+  const dataQuality = item.dataQuality || {};
+  const scannerMode = item.scannerMode || {};
+  const signalLifecycle = item.signalLifecycle || {};
+  const reasons = Array.isArray(item.scoreReasons) ? item.scoreReasons.slice(0, compact ? 2 : 3) : [];
+  const summary = diagnosticInlineText(item);
+  const signalLine = compact
+    ? `신호 ${formatKstClock(signalLifecycle.signalCreatedAtKst)} / ${signalLifecycle.statusKo || "-"}`
+    : `신호: ${formatKstClock(signalLifecycle.signalCreatedAtKst)} 발생 / ${signalLifecycle.statusKo || "-"} · 유효 ${signalLifecycle.validUntilKst ? `${formatKstClock(signalLifecycle.validUntilKst)}까지` : "-"}`;
+  return `
+    <div class="kbk-diagnostic-inline ${compact ? "compact" : ""}">
+      <div class="kbk-diagnostic-inline-summary">진단: ${textEscape(summary.summary)}</div>
+      ${scannerMode.reasonKo ? `<div class="kbk-diagnostic-inline-meta">이유: ${textEscape(scannerMode.reasonKo)}</div>` : ""}
+      <div class="kbk-diagnostic-inline-meta">${textEscape(signalLine)}</div>
+      ${reasons.length ? `<div class="kbk-diagnostic-inline-meta">근거: ${reasons.map((reason) => textEscape(reason.labelKo || "-")).join(", ")}</div>` : ""}
+      ${!compact && dataQuality.warningKo ? `<div class="kbk-diagnostic-inline-meta warning">주의: ${textEscape(dataQuality.warningKo)}</div>` : ""}
+    </div>
+  `;
+}
+
 function livePriceOf(item) {
   return toNumber(item?.normalizedLivePriceUsd)
     ?? toNumber(item?.price)
@@ -1209,6 +1299,25 @@ function ensureStyles() {
     .kbk-pro-top-grid div{background:#f8fafc;border-radius:10px;padding:9px}
     .kbk-pro-top-grid span{display:block;color:#64748b;font-size:.76rem}
     .kbk-pro-top-grid b{display:block;margin-top:4px;color:#0f172a}
+    .kbk-diagnostic-box{background:#f8fafc;border:1px solid rgba(15,23,42,.08);border-radius:10px;padding:10px;display:grid;gap:8px}
+    .kbk-diagnostic-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+    .kbk-diagnostic-grid div{background:#fff;border-radius:8px;padding:8px 9px}
+    .kbk-diagnostic-grid span{display:block;color:#64748b;font-size:.72rem;font-weight:800}
+    .kbk-diagnostic-grid b{display:block;margin-top:4px;color:#0f172a;font-size:.8rem;line-height:1.45}
+    .kbk-diagnostic-reasons{display:flex;flex-wrap:wrap;gap:6px}
+    .kbk-diagnostic-chip{display:inline-flex;align-items:center;border-radius:999px;padding:5px 8px;font-size:.72rem;font-weight:900;line-height:1.2;background:#ecfeff;color:#155e75;border:1px solid rgba(14,116,144,.18)}
+    .kbk-diagnostic-chip.negative{background:#fff7ed;color:#c2410c;border-color:#fdba74}
+    .kbk-diagnostic-chip.warning{background:#fef3c7;color:#92400e;border-color:#fcd34d}
+    .kbk-diagnostic-inline{margin-top:8px;padding:8px 10px;border-radius:10px;background:#f8fafc;border:1px solid rgba(15,23,42,.08);display:grid;gap:4px}
+    .kbk-diagnostic-inline.compact{padding:6px 8px;border-radius:8px}
+    .kbk-diagnostic-inline-summary{color:#0f172a;font-size:.76rem;font-weight:900;line-height:1.4}
+    .kbk-diagnostic-inline-meta{color:#475569;font-size:.72rem;font-weight:800;line-height:1.45}
+    .kbk-diagnostic-inline-meta.warning{color:#92400e}
+    .kbk-backtest-baseline{margin-top:12px;background:#f8fafc;border:1px solid rgba(15,23,42,.08);border-radius:12px;padding:12px 14px;color:#0f172a;line-height:1.55}
+    .kbk-backtest-baseline-copy{margin-top:6px;color:#475569;font-size:.84rem;font-weight:700}
+    .kbk-backtest-baseline-list{display:grid;gap:8px;margin-top:10px}
+    .kbk-backtest-baseline-list div{display:flex;justify-content:space-between;gap:12px;background:#fff;border:1px solid rgba(15,23,42,.08);border-radius:10px;padding:8px 10px}
+    .kbk-backtest-baseline-list span{color:#475569;font-size:.8rem;font-weight:700;text-align:right}
     .kbk-pro-top-card .kbk-session-debug{grid-template-columns:repeat(5,minmax(0,1fr));margin-top:0}
     .kbk-pro-top-meta{display:grid;grid-template-columns:1fr 1fr 150px;gap:8px}
     .kbk-pro-top-meta div{background:#f8fafc;border:1px solid rgba(15,23,42,.08);border-radius:10px;padding:9px}
@@ -1255,6 +1364,8 @@ function ensureStyles() {
       .candidate-table,.signal-table,.debug-table{min-width:760px!important}
       .kbk-pre-move-grid{grid-template-columns:1fr}
       .kbk-pro-top-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .kbk-diagnostic-grid{grid-template-columns:1fr}
+      .kbk-backtest-baseline-list div{display:grid}
       .kbk-pro-top-score{font-size:1.65rem}
       .kbk-pro-top-meta{grid-template-columns:1fr}
       .kbk-pro-basis{grid-template-columns:1fr}
@@ -1297,8 +1408,8 @@ function ensureRouteLinks() {
   if (!menu) return;
 
   const configs = [
-    { label: "백테스트", path: "/backtest", target: "backtest-panel" },
-    { label: "AI 분석", path: "/ai-analysis", target: "debug-panel" },
+    { label: "백테스트", path: "/backtest", target: "backtest-panel", hardNavigate: true },
+    { label: "AI 분석", path: "/ai-analysis", target: "debug-panel", hardNavigate: true },
     { label: "통합 최종 후보", path: "/top-picks", target: "kbk-pro-top-picks" },
   ];
 
@@ -1314,11 +1425,17 @@ function ensureRouteLinks() {
     }
     if (!node.dataset.kbkRouteBound) {
       node.dataset.kbkRouteBound = "true";
-      node.addEventListener("click", (event) => {
+      const navigate = (event) => {
         event.preventDefault();
+        if (config.hardNavigate) {
+          window.location.assign(config.path);
+          return;
+        }
         history.pushState({}, "", config.path);
         handleRoute();
-      });
+      };
+      node.addEventListener("click", navigate);
+      node.onclick = navigate;
     }
   }
 }
@@ -1639,6 +1756,7 @@ async function renderTopPicksOnly(renderPhase = "initial") {
             <span>${displayRvolText(displayItem)}</span>
           </div>
           ${sessionDebugHtml(displayItem)}
+          ${diagnosticSummaryHtml(displayItem)}
           <div class="kbk-pro-top-grid">
             <div><span>최종 선별</span><b>${formatScore(selectionMetrics.finalSelectionScore)}점</b></div>
             <div><span>신규 진입</span><b>${formatScore(selectionMetrics.entrySuitability)}점</b></div>
@@ -2273,6 +2391,7 @@ async function renderBacktestExpectation() {
   box.textContent = "스캔 스냅샷 기반 백테스트 통계를 불러오는 중입니다.";
   target.prepend(box);
   try {
+    const scanner = await fetchJson("/api/scanner").catch(() => null);
     let summary = await fetchJson("/api/backtest/summary");
     if (!Number(summary.evaluatedCount || 0)) {
       await fetch("/api/top-picks-snapshot", {
@@ -2307,6 +2426,7 @@ async function renderBacktestExpectation() {
     box.innerHTML = `
       <strong>스캔 스냅샷 백테스트 요약</strong><br>
       평가 완료 ${compact(summary.evaluatedCount)}건 · 저장 스냅샷 ${compact(summary.snapshotCount)}개 · 평균 현재 수익률 ${pct(summary.avgReturnNow)}
+      ${backtestScannerSummaryHtml(scanner)}
       <div class="table-shell" style="margin-top:12px">
         <table class="backtest-table">
           <thead><tr><th>점수 구간</th><th>건수</th><th>평균 현재 수익률</th><th>+5% 적중률</th><th>+10% 적중률</th><th>-10% 실패율</th></tr></thead>
@@ -2680,12 +2800,99 @@ function scheduleStageAwareApply() {
   }, 120);
 }
 
+let diagnosticsEnhanceTimer = 0;
+
+async function scannerDiagnosticsMap() {
+  const payload = await fetchJson("/api/scanner").catch(() => null);
+  const items = payload?.items || payload?.data?.items || [];
+  return new Map(items
+    .filter((item) => item?.symbol)
+    .map((item) => [String(item.symbol).toUpperCase(), item]));
+}
+
+function extractSymbolFromContainer(node) {
+  if (!node) return null;
+  if (node.dataset?.symbol) return String(node.dataset.symbol).trim().toUpperCase();
+  const direct = [
+    node.querySelector("h3"),
+    node.querySelector("strong"),
+    node.querySelector("b"),
+    node.querySelector("td strong"),
+    node.querySelector("td b"),
+  ].filter(Boolean);
+  for (const element of direct) {
+    const text = String(element.textContent || "").trim().toUpperCase();
+    if (/^[A-Z][A-Z0-9.-]{0,10}$/.test(text)) return text;
+  }
+  const text = String(node.textContent || "").toUpperCase();
+  const match = text.match(/\b[A-Z][A-Z0-9.-]{1,10}\b/);
+  return match?.[0] || null;
+}
+
+function patchDiagnosticCard(container, item, options = {}) {
+  if (!container || !item) return;
+  let host = container.querySelector(".kbk-diagnostic-inline-host");
+  if (!host) {
+    host = document.createElement("div");
+    host.className = "kbk-diagnostic-inline-host";
+    container.appendChild(host);
+  }
+  host.innerHTML = diagnosticInlineHtml(item, options);
+}
+
+function patchDiagnosticTableRow(row, item) {
+  if (!row || !item || row.dataset.kbkDiagnosticPatched === "skip") return;
+  const cells = row.querySelectorAll("td");
+  const targetCell = cells[1] || cells[0];
+  if (!targetCell) return;
+  let host = targetCell.querySelector(".kbk-diagnostic-inline-host");
+  if (!host) {
+    host = document.createElement("div");
+    host.className = "kbk-diagnostic-inline-host";
+    targetCell.appendChild(host);
+  }
+  host.innerHTML = diagnosticInlineHtml(item, { compact: true });
+}
+
+async function enhanceDiagnosticsForVisiblePanels() {
+  const itemMap = await scannerDiagnosticsMap();
+  if (!itemMap.size) return;
+
+  document.querySelectorAll(".cpick-card").forEach((card) => {
+    const symbol = extractSymbolFromContainer(card);
+    const item = symbol ? itemMap.get(symbol) : null;
+    if (item) patchDiagnosticCard(card, item, { compact: false });
+  });
+
+  document.querySelectorAll(".stock-card, .setup-card").forEach((card) => {
+    if (card.closest("#kbk-pro-top-picks")) return;
+    const symbol = extractSymbolFromContainer(card);
+    const item = symbol ? itemMap.get(symbol) : null;
+    if (item) patchDiagnosticCard(card, item, { compact: true });
+  });
+
+  document.querySelectorAll(".candidate-table tbody tr, .signal-table tbody tr").forEach((row) => {
+    if (row.classList.contains("candidate-explainer-row")) return;
+    const symbol = extractSymbolFromContainer(row);
+    const item = symbol ? itemMap.get(symbol) : null;
+    if (item) patchDiagnosticTableRow(row, item);
+  });
+}
+
+function scheduleDiagnosticsEnhancement() {
+  window.clearTimeout(diagnosticsEnhanceTimer);
+  diagnosticsEnhanceTimer = window.setTimeout(() => {
+    enhanceDiagnosticsForVisiblePanels().catch(() => null);
+  }, 450);
+}
+
 function boot() {
   ensureStyles();
   addRefreshShortcut();
   ensureRouteLinks();
   handleRoute();
   clarifyEmptyAccumulation();
+  scheduleDiagnosticsEnhancement();
   patchFloatingPointText();
   ensureExchangeRateStatus();
   window.setTimeout(applyStageAwareAccumulationPage, 200);
@@ -2696,6 +2903,10 @@ function boot() {
     ensureRouteLinks();
     clarifyEmptyAccumulation();
     enhanceMonitorPanel();
+    scheduleDiagnosticsEnhancement();
+    if (window.location.pathname === "/backtest" || window.location.pathname === "/ai-analysis") {
+      handleRoute();
+    }
     if (document.getElementById("exchange-rate") && !window.__kbkExchangeState) {
       ensureExchangeRateStatus();
     }

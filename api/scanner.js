@@ -2012,6 +2012,8 @@ function isDebugScannerRequest(req) {
   const requestUrl = new URL(req?.url || "/api/scanner", "http://localhost");
   return requestUrl.searchParams.get("debug") === "1";
 }
+const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
+const BASELINE_SCANNER_VERSION = "baseline_before_filter_relax_v1";
 
 function formatScannerDetails(details = {}) {
   return Object.entries(details)
@@ -2343,8 +2345,318 @@ function confidenceLabel(value) {
   return "낮음";
 }
 
+function kstDate(date = new Date()) {
+  return new Date(date.getTime() + KST_OFFSET_MS);
+}
+
+function formatKstDateTime(date = new Date()) {
+  const shifted = kstDate(date);
+  const year = shifted.getUTCFullYear();
+  const month = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(shifted.getUTCDate()).padStart(2, "0");
+  const hour = String(shifted.getUTCHours()).padStart(2, "0");
+  const minute = String(shifted.getUTCMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hour}:${minute}`;
+}
+
+function addMinutes(date, minutes) {
+  return new Date(date.getTime() + minutes * 60 * 1000);
+}
+
+function extractItemRvol(item = {}) {
+  return num(item?.rvol ?? item?.relativeVolume ?? item?.volumeRatio);
+}
+
+function resolveScannerMarketState(rawState, now = new Date()) {
+  const raw = String(rawState || "").toUpperCase();
+  if (raw === "PRE" || raw === "PREPRE" || raw === "PREMARKET") {
+    return { marketState: "premarket", marketStateKo: "프리마켓" };
+  }
+  if (raw === "POST" || raw === "POSTPOST" || raw === "AFTER" || raw === "AFTERHOURS") {
+    return { marketState: "afterhours", marketStateKo: "애프터마켓" };
+  }
+  if (raw === "REGULAR") {
+    const parts = getKstParts(now);
+    const totalMinutes = parts.hour * 60 + parts.minute;
+    if (totalMinutes >= 22 * 60 + 30 && totalMinutes < 23 * 60) {
+      return { marketState: "open_drive", marketStateKo: "장초반" };
+    }
+    return { marketState: "regular", marketStateKo: "장중" };
+  }
+
+  const parts = getKstParts(now);
+  const totalMinutes = parts.hour * 60 + parts.minute;
+  if (totalMinutes >= 17 * 60 && totalMinutes < 22 * 60 + 30) {
+    return { marketState: "premarket", marketStateKo: "프리마켓" };
+  }
+  if (totalMinutes >= 22 * 60 + 30 && totalMinutes < 23 * 60) {
+    return { marketState: "open_drive", marketStateKo: "장초반" };
+  }
+  if (totalMinutes >= 23 * 60 || totalMinutes < 5 * 60) {
+    return { marketState: "regular", marketStateKo: "장중" };
+  }
+  if (totalMinutes >= 5 * 60 && totalMinutes < 9 * 60) {
+    return { marketState: "afterhours", marketStateKo: "애프터마켓" };
+  }
+  return { marketState: "offhours", marketStateKo: "장외 대기" };
+}
+
+function hasIntradayFlowSignal(item = {}, commonSignals = {}) {
+  const directKeys = [
+    "momentum",
+    "intradayFlow",
+    "oneMinuteTrend",
+    "threeMinuteTrend",
+    "fiveMinuteTrend",
+    "oneMinuteMomentum",
+    "threeMinuteMomentum",
+    "fiveMinuteMomentum",
+  ];
+  if (directKeys.some((key) => item?.[key] !== undefined && item?.[key] !== null && item?.[key] !== "")) {
+    return true;
+  }
+  if (directKeys.some((key) => item?.technical?.[key] !== undefined && item?.technical?.[key] !== null && item?.technical?.[key] !== "")) {
+    return true;
+  }
+  return [
+    commonSignals?.vwapHoldMinutes,
+    commonSignals?.vwapReclaimScore,
+    commonSignals?.higherLowScore,
+    commonSignals?.volumeTrendScore,
+  ].some((value) => num(value) !== null);
+}
+
+function buildDataQuality(item = {}, commonSignals = {}) {
+  const price = scannerLivePriceUsd(item);
+  const rawVolume = Math.max(num(item.volume) ?? 0, num(item.preMarketVolume) ?? 0, num(item.regularMarketVolume) ?? 0, num(item.postMarketVolume) ?? 0);
+  const rvol = extractItemRvol(item);
+  const tradeValueKrw = num(item.tradeValueKrw)
+    ?? num(item.tradingValueKrw)
+    ?? num(item.amountKrw)
+    ?? (price !== null && rawVolume > 0 ? price * rawVolume * (num(item.usdKrw) ?? num(item.exchangeRate) ?? 1350) : null);
+  const vwap = num(item.vwap) ?? num(item?.technical?.vwap);
+  const hasPrice = price !== null && price > 0;
+  const hasVolume = rawVolume > 0;
+  const hasRelativeVolume = rvol !== null && rvol > 0;
+  const hasTradeValue = tradeValueKrw !== null && tradeValueKrw > 0;
+  const hasVwap = vwap !== null || item.aboveVwap === true || item.aboveVwap === false || num(item.vwapDistancePercent) !== null || num(item?.technical?.vwapDistancePercent) !== null;
+  const hasIntradayFlow = hasIntradayFlowSignal(item, commonSignals);
+  const missingFields = [];
+  if (!hasPrice) missingFields.push("price");
+  if (!hasVolume) missingFields.push("volume");
+  if (!hasRelativeVolume) missingFields.push("relativeVolume");
+  if (!hasTradeValue) missingFields.push("tradeValueKrw");
+  if (!hasVwap) missingFields.push("vwap");
+  if (!hasIntradayFlow) missingFields.push("intradayFlow");
+
+  let reliability = "low";
+  if (!hasPrice) reliability = "invalid";
+  else if (hasVolume && hasRelativeVolume && hasTradeValue && (hasVwap || hasIntradayFlow)) reliability = "high";
+  else if (hasVolume && hasTradeValue) reliability = "medium";
+
+  const warningKo = reliability === "invalid"
+    ? "가격 데이터가 없거나 0 이하입니다"
+    : !hasIntradayFlow
+      ? "1~5분 수급 데이터 부족"
+      : missingFields.length
+        ? `일부 데이터 누락: ${missingFields.join(", ")}`
+        : null;
+
+  return {
+    hasPrice,
+    hasVolume,
+    hasRelativeVolume,
+    hasTradeValue,
+    hasVwap,
+    hasIntradayFlow,
+    reliability,
+    reliabilityKo: reliability === "high" ? "높음" : reliability === "medium" ? "보통" : reliability === "invalid" ? "무효" : "낮음",
+    missingFields,
+    warningKo,
+  };
+}
+
+function buildScannerMode(item = {}, now = new Date()) {
+  const rvol = extractItemRvol(item);
+  const state = resolveScannerMarketState(item.marketState ?? item.sessionType, now);
+  if (rvol === null) {
+    return {
+      mode: "data_gap_watch",
+      modeKo: "데이터 부족 관찰",
+      reasonKo: `${state.marketStateKo} 구간이지만 RVOL 데이터가 없습니다`,
+      marketState: state.marketState,
+      marketStateKo: state.marketStateKo,
+      rvol: null,
+    };
+  }
+  if (rvol >= 5) {
+    if (state.marketState === "premarket") {
+      return {
+        mode: "strong_premarket_signal",
+        modeKo: "강력 선취매 모드",
+        reasonKo: `RVOL ${rvol.toFixed(1)}배 + 프리마켓 거래량 집중`,
+        marketState: state.marketState,
+        marketStateKo: state.marketStateKo,
+        rvol,
+      };
+    }
+    if (state.marketState === "open_drive") {
+      return {
+        mode: "open_drive_breakout_signal",
+        modeKo: "장초반 돌파 모드",
+        reasonKo: `RVOL ${rvol.toFixed(1)}배 + 장초반 돌파 흐름`,
+        marketState: state.marketState,
+        marketStateKo: state.marketStateKo,
+        rvol,
+      };
+    }
+    if (state.marketState === "regular") {
+      return {
+        mode: "intraday_breakout_signal",
+        modeKo: "장중 돌파 모드",
+        reasonKo: `RVOL ${rvol.toFixed(1)}배 + 장중 거래량 재유입`,
+        marketState: state.marketState,
+        marketStateKo: state.marketStateKo,
+        rvol,
+      };
+    }
+    if (state.marketState === "afterhours") {
+      return {
+        mode: "afterhours_activation_signal",
+        modeKo: "장후 활성 신호 모드",
+        reasonKo: `RVOL ${rvol.toFixed(1)}배 + 애프터마켓 반응`,
+        marketState: state.marketState,
+        marketStateKo: state.marketStateKo,
+        rvol,
+      };
+    }
+  }
+  if (rvol >= 2) {
+    return {
+      mode: "watchlist_strengthened",
+      modeKo: "관찰 강화 모드",
+      reasonKo: `RVOL ${rvol.toFixed(1)}배로 감시는 필요하지만 확정 신호 단계는 아닙니다`,
+      marketState: state.marketState,
+      marketStateKo: state.marketStateKo,
+      rvol,
+    };
+  }
+  return {
+    mode: "watchlist_pending",
+    modeKo: "관찰 대기",
+    reasonKo: `RVOL ${rvol.toFixed(1)}배로 추가 거래량 확인이 필요합니다`,
+    marketState: state.marketState,
+    marketStateKo: state.marketStateKo,
+    rvol,
+  };
+}
+
+function buildSignalLifecycle(item = {}, scannerMode = {}, now = new Date()) {
+  const signalCreatedAt = new Date(now.getTime());
+  let validUntil = null;
+  let noteKo = "관찰 대기 상태입니다";
+
+  if (scannerMode.mode === "strong_premarket_signal") {
+    const shifted = kstDate(signalCreatedAt);
+    shifted.setUTCHours(22, 45, 0, 0);
+    validUntil = new Date(shifted.getTime() - KST_OFFSET_MS);
+    noteKo = "장 시작 후 15분까지 유효";
+  } else if (scannerMode.mode === "open_drive_breakout_signal") {
+    validUntil = addMinutes(signalCreatedAt, 15);
+    noteKo = "발생 후 15분 유효";
+  } else if (scannerMode.mode === "intraday_breakout_signal") {
+    validUntil = addMinutes(signalCreatedAt, 20);
+    noteKo = "발생 후 20분 유효";
+  } else if (scannerMode.mode === "afterhours_activation_signal") {
+    validUntil = addMinutes(signalCreatedAt, 15);
+    noteKo = "발생 후 15분 유효";
+  }
+
+  const active = validUntil && validUntil.getTime() >= now.getTime();
+  const inactive = !validUntil;
+  const status = inactive ? "standby" : active ? "active" : "expired";
+  const statusKo = inactive ? "관찰 대기" : active ? "유효" : "유효 시간 초과";
+  const symbol = String(item.symbol || "UNKNOWN").toUpperCase();
+  const signalId = `${symbol}-${formatKstDateTime(signalCreatedAt).replace(/[-: ]/g, "").slice(0, 12)}`;
+
+  return {
+    signalId,
+    signalCreatedAtKst: formatKstDateTime(signalCreatedAt),
+    signalMode: scannerMode.mode,
+    signalModeKo: scannerMode.modeKo,
+    validUntilKst: validUntil ? formatKstDateTime(validUntil) : null,
+    status,
+    statusKo,
+    noteKo,
+  };
+}
+
+function buildScoreReasons(item = {}, dataQuality = {}, scannerMode = {}, signalLifecycle = {}, topPickEvaluation = {}) {
+  const reasons = [];
+  const tradeValueKrw = num(item.tradeValueKrw);
+  const rvol = extractItemRvol(item);
+  const vwap = num(item.vwap) ?? num(item?.technical?.vwap);
+  const price = scannerLivePriceUsd(item);
+  const riskScore = num(item.riskScore) ?? num(topPickEvaluation.topPickChaseRisk);
+  const changePercent = num(item.changePercent) ?? num(item.preMarketChangePercent);
+
+  if (tradeValueKrw !== null) {
+    reasons.push({
+      type: "positive",
+      labelKo: "거래대금 증가",
+      valueKo: `${Math.round(tradeValueKrw / 100000000) / 10}억`,
+    });
+  }
+  if (rvol !== null) {
+    reasons.push({
+      type: "positive",
+      labelKo: `RVOL ${rvol.toFixed(1)}배`,
+      valueKo: scannerMode.mode.includes("watch") ? "관찰" : "강화",
+    });
+  }
+  if (price !== null && vwap !== null) {
+    reasons.push({
+      type: price >= vwap ? "positive" : "negative",
+      labelKo: price >= vwap ? "VWAP 위 유지" : "VWAP 아래 위치",
+      valueKo: price >= vwap ? "유지" : "주의",
+    });
+  }
+  if (changePercent !== null && Math.abs(changePercent) >= 8) {
+    reasons.push({
+      type: changePercent > 0 ? "positive" : "negative",
+      labelKo: `등락률 ${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(1)}%`,
+      valueKo: Math.abs(changePercent) >= 15 ? "강함" : "반응",
+    });
+  }
+  if (riskScore !== null && riskScore >= 70) {
+    reasons.push({
+      type: "negative",
+      labelKo: "단기 과열 위험",
+      valueKo: `${Math.round(riskScore)}점`,
+    });
+  }
+  if (dataQuality.warningKo) {
+    reasons.push({
+      type: "warning",
+      labelKo: dataQuality.warningKo,
+      valueKo: signalLifecycle.status === "active" ? "주의" : "관찰",
+    });
+  }
+
+  return reasons.slice(0, 6);
+}
+
+function buildBaselineAudit(now = new Date()) {
+  return {
+    scannerVersion: BASELINE_SCANNER_VERSION,
+    generatedAtKst: formatKstDateTime(now),
+    purposeKo: "필터 완화 전 현재 기준 성능 기록용",
+    filterChanged: false,
+  };
+}
+
 function getKstParts(date) {
-  const shifted = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+  const shifted = kstDate(date);
   return {
     hour: shifted.getUTCHours(),
     minute: shifted.getUTCMinutes(),
@@ -4354,6 +4666,8 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
   const headers = req?.headers || {};
   const includeDebug = includeDebugOption === true || (includeDebugOption !== false && isDebugScannerRequest(req));
   const requestId = headerValue(headers, "x-request-id") || makeRequestId("scanner");
+  const generatedAt = new Date();
+  const baselineAudit = buildBaselineAudit(generatedAt);
   console.log(`[SCANNER] start requestId=${requestId}`);
   try {
     const baseStartedAt = Date.now();
@@ -4530,6 +4844,9 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
           scannerScore,
           finalProbabilityScore,
         };
+        const dataQuality = buildDataQuality(responseItem, commonSignals);
+        const scannerMode = buildScannerMode(responseItem, generatedAt);
+        const signalLifecycle = buildSignalLifecycle(responseItem, scannerMode, generatedAt);
         if (symbolKey === "RMSG") {
           console.log("[SCANNER:RMSG:SESSION_FIELDS] " + JSON.stringify({
             symbol: responseItem.symbol,
@@ -4580,6 +4897,12 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
           ...responseItem,
           ...topPickEvaluation,
           ...experimentalScore,
+          dataQuality,
+          scannerMode,
+          signalLifecycle,
+          scoreReasons: buildScoreReasons(responseItem, dataQuality, scannerMode, signalLifecycle, topPickEvaluation),
+          baselineAudit,
+          ...experimentalScore,
           forbiddenPenalty,
           finalSelectionScore: Math.round(clamp(finalSelectionScore - dataQualityPenalty)),
           operationalRankScore,
@@ -4628,8 +4951,11 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
       });
 
       payload.data.preMoveCandidates = buildPreMoveCandidates(payload.data.items);
+      payload.data.baselineAudit = baselineAudit;
+      payload.data.preMoveCandidates = buildPreMoveCandidates(payload.data.items);
     }
     sanitizeScannerPayload(payload, { debug: includeDebug });
+    payload.data.baselineAudit = baselineAudit;
     attachQuickAudit(payload);
     logScannerStep("completed", requestStartedAt, {
       requestId,
