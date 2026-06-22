@@ -317,6 +317,8 @@ function diagnosticInlineHtml(item = {}, options = {}) {
   const summary = diagnosticInlineText(item);
   const liveReasons = Array.isArray(item.liveTradeReasons) ? item.liveTradeReasons.slice(0, compact ? 2 : 4) : [];
   const liveWarnings = Array.isArray(item.liveTradeWarnings) ? item.liveTradeWarnings.slice(0, compact ? 1 : 4) : [];
+  const accelerationReasons = Array.isArray(item.accelerationReasons) ? item.accelerationReasons.slice(0, compact ? 2 : 3) : [];
+  const accelerationWarnings = Array.isArray(item.accelerationWarnings) ? item.accelerationWarnings.slice(0, compact ? 1 : 2) : [];
   const signalLine = compact
     ? `신호 ${formatKstClock(signalLifecycle.signalCreatedAtKst)} / ${signalLifecycle.statusKo || "-"}`
     : `신호: ${formatKstClock(signalLifecycle.signalCreatedAtKst)} 발생 / ${signalLifecycle.statusKo || "-"} · 유효 ${signalLifecycle.validUntilKst ? `${formatKstClock(signalLifecycle.validUntilKst)}까지` : "-"}`;
@@ -326,6 +328,9 @@ function diagnosticInlineHtml(item = {}, options = {}) {
       ${item.liveTradeLabel ? `<div class="kbk-diagnostic-inline-meta">상태: ${textEscape(item.liveTradeLabel)} · 신뢰도 ${textEscape(item.liveTradeConfidence ?? "-")}점</div>` : ""}
       ${liveReasons.length ? `<div class="kbk-diagnostic-inline-meta">근거: ${liveReasons.map(textEscape).join(", ")}</div>` : ""}
       ${liveWarnings.length ? `<div class="kbk-diagnostic-inline-meta warning">주의: ${liveWarnings.map(textEscape).join(", ")}</div>` : ""}
+      ${item.accelerationLabel ? `<div class="kbk-diagnostic-inline-meta">가속도: ${textEscape(item.accelerationLabel)}${item.accelerationScore !== null && item.accelerationScore !== undefined ? ` · ${textEscape(item.accelerationScore)}점` : ""}</div>` : ""}
+      ${accelerationReasons.length ? `<div class="kbk-diagnostic-inline-meta">가속 근거: ${accelerationReasons.map(textEscape).join(", ")}</div>` : ""}
+      ${accelerationWarnings.length ? `<div class="kbk-diagnostic-inline-meta warning">가속 주의: ${accelerationWarnings.map(textEscape).join(", ")}</div>` : ""}
       ${scannerMode.reasonKo ? `<div class="kbk-diagnostic-inline-meta">이유: ${textEscape(scannerMode.reasonKo)}</div>` : ""}
       <div class="kbk-diagnostic-inline-meta">${textEscape(signalLine)}</div>
       ${!liveReasons.length && reasons.length ? `<div class="kbk-diagnostic-inline-meta">근거: ${reasons.map((reason) => textEscape(reason.labelKo || "-")).join(", ")}</div>` : ""}

@@ -3464,6 +3464,56 @@ function evaluateLiveTradeState(item = {}, dataQuality = {}, scoreReasons = []) 
   };
 }
 
+function evaluateDerivedAcceleration(item = {}) {
+  const mode = "derived_acceleration_v1";
+  const rvol = num(item.relativeVolume ?? item.rvol ?? item.volumeRatio);
+  const volume = num(item.volume ?? item.preMarketVolume);
+  const tradeValueKrw = num(item.tradeValueKrw);
+  const change = num(item.changePercent ?? item.preMarketChangePercent);
+  const vwapDistance = num(item.vwapDistancePercent ?? item?.technical?.vwapDistancePercent);
+  const finalScore = num(item.finalSelectionScore ?? item.finalProbabilityScore ?? item.scannerScore);
+  const closePosition = num(item.closePositionInRange);
+  const highDrop = num(item.highDropPercent);
+  const available = [rvol, volume, tradeValueKrw, change, vwapDistance, finalScore].filter((value) => value !== null).length;
+  if (available < 3 || (rvol === null && volume === null && tradeValueKrw === null)) {
+    return {
+      accelerationState: "data_limited",
+      accelerationLabel: "가속도 데이터 부족",
+      accelerationScore: null,
+      accelerationReasons: [],
+      accelerationWarnings: ["단기 봉 데이터 또는 핵심 거래량 지표 부족"],
+      accelerationMode: mode,
+    };
+  }
+  let score = 0;
+  const reasons = [];
+  const warnings = ["1분/5분봉 직접 계산 아님"];
+  if (rvol !== null && rvol >= 3) { score += 30; reasons.push(`RVOL ${rvol.toFixed(1)}배 상승`); }
+  else if (rvol !== null && rvol >= 1.5) { score += 20; reasons.push("RVOL 증가"); }
+  else if (volume !== null && volume > 0) { score += 8; reasons.push("거래량 확인"); }
+  if (tradeValueKrw !== null && tradeValueKrw >= 500_000_000) { score += 15; reasons.push("거래대금 유지"); }
+  else if (tradeValueKrw !== null && tradeValueKrw >= 100_000_000) { score += 8; reasons.push("거래대금 확보"); }
+  if (change !== null && change >= 5 && change <= 25) { score += 20; reasons.push("단기 상승 압력"); }
+  else if (change !== null && change > 0) { score += 10; reasons.push("상승 흐름 유지"); }
+  if (item.aboveVwap === true || (vwapDistance !== null && vwapDistance >= 0)) { score += 15; reasons.push("VWAP 위 유지"); }
+  else if (vwapDistance !== null && vwapDistance >= -1.5) { score += 10; reasons.push("VWAP 근처"); }
+  if ((closePosition !== null && closePosition >= 45) || (highDrop !== null && highDrop <= 15)) score += 15;
+  if (finalScore !== null && finalScore >= 68) { score += 10; reasons.push("기존 선별 점수 양호"); }
+  if (item.liveTradeState !== "chasing_risk" && item.liveTradeState !== "risk_excluded") score += 10;
+  else warnings.push(item.liveTradeState === "risk_excluded" ? "위험 제외 상태" : "추격 위험 상태");
+  const finalScoreValue = Math.round(clamp(score));
+  const state = finalScoreValue >= 75 ? "strong" : finalScoreValue >= 55 ? "moderate" : "weak";
+  const label = state === "strong" ? "추정 가속도: 강함" : state === "moderate" ? "추정 가속도: 보통" : "추정 가속도: 약함";
+  return {
+    accelerationState: state,
+    accelerationLabel: label,
+    accelerationScore: finalScoreValue,
+    accelerationReasons: reasons.slice(0, 3),
+    accelerationWarnings: warnings.slice(0, 3),
+    accelerationMode: mode,
+  };
+}
+
 function preMoveLabelKo(stage) {
   const labels = {
     COMPRESSION_BUILD: "가격 압축 예열",
@@ -5177,6 +5227,7 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
         const topPickEvaluation = evaluateTopPickForSnapshot(responseItem);
         const scoreReasons = buildScoreReasons(responseItem, dataQuality, scannerMode, signalLifecycle, topPickEvaluation);
         const liveTrade = evaluateLiveTradeState({ ...responseItem, ...topPickEvaluation, ...panicOversold }, dataQuality, scoreReasons);
+        const acceleration = evaluateDerivedAcceleration({ ...responseItem, ...topPickEvaluation, ...panicOversold, ...liveTrade });
         const forbiddenPenalty = computeForbiddenPenalty(topPickEvaluation.topPickVerdict, topPickEvaluation.topPickChaseRisk);
         const marketPrioritySortScore = (num(topPickEvaluation.finalSelectionScore ?? responseItem.finalSelectionScore) ?? finalProbabilityScore)
           + earlyMomentumBonus
@@ -5206,6 +5257,7 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
           signalLifecycle,
           ...panicOversold,
           ...liveTrade,
+          ...acceleration,
           scoreReasons,
           baselineAudit,
           ...experimentalScore,
