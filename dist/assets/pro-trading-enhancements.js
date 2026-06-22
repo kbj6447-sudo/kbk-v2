@@ -295,8 +295,8 @@ function diagnosticInlineText(item = {}) {
   const reasons = Array.isArray(item.scoreReasons) ? item.scoreReasons.slice(0, 3).map((reason) => reason?.labelKo).filter(Boolean) : [];
   const summary = [
     `데이터 ${dataQuality.reliabilityKo || reliabilityLabel(item)}`,
-    scannerMode.modeKo || "모드 미확인",
-    signalLifecycle.statusKo || "상태 미확인",
+    scannerMode.modeKo || "판단 모드 확인 필요",
+    signalLifecycle.statusKo || "신호 확인 중",
   ].filter(Boolean).join(" · ");
   const detail = reasons.join(", ");
   return {

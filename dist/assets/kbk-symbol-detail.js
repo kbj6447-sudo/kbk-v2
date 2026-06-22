@@ -342,10 +342,10 @@ function localReSurgeSetupScore(bars, higherLowScore, vwapHoldScore, vwapReclaim
 function higherLowLabel(score) {
   const value = num(score);
   if (value === null) return "데이터 부족";
-  if (value >= 90) return "媛뺥븿";
-  if (value >= 70) return "蹂댄넻";
-  if (value >= 40) return "以묐┰";
-  return "?놁쓬";
+  if (value >= 90) return "강함";
+  if (value >= 70) return "보통";
+  if (value >= 40) return "중립";
+  return "낮음";
 }
 
 function vwapHoldText(minutes) {
@@ -356,10 +356,10 @@ function vwapHoldText(minutes) {
 function strengthLabel(score) {
   const value = num(score);
   if (value === null) return "데이터 부족";
-  if (value >= 90) return "媛뺥븿";
-  if (value >= 70) return "?묓샇";
+  if (value >= 90) return "강함";
+  if (value >= 70) return "양호";
   if (value >= 40) return "관찰";
-  return "?쏀븿";
+  return "약함";
 }
 
 function cardScore(card) {
@@ -389,24 +389,24 @@ function analyzeSignal(quote, bars) {
 
   let action = "관찰 후 알림 대기";
   let tone = "neutral";
-  let reason = "嫄곕옒?됯낵 媛寃?援ъ“??媛먯떆??留뚰븯吏留? ?ㅼ젣 吏꾩엯 ?꾩뿉???뚮┝ ???ъ?吏? VWAP 諛섏쓳???ㅼ떆 ?뺤씤?댁빞 ?⑸땲??";
+  let reason = "거래량과 가격 구조는 감시할 만하지만, 실제 진입 전에는 눌림·지지·VWAP 반응을 다시 확인하세요.";
 
   if (risk >= 80 || change >= 120) {
-    action = "?좉퇋 吏꾩엯 由ъ뒪???믪쓬";
+    action = "추격 진입 위험 높음";
     tone = "danger";
-    reason = "?뱀씪 ?곸듅瑜??먮뒗 由ъ뒪???먯닔媛 ?믪븘 異붽꺽 留ㅼ닔蹂대떎 ?뚮┝怨?吏吏 ?뺤씤???곗꽑?낅땲??";
+    reason = "당일 상승률 또는 위험 점수가 높습니다. 추격 매수보다 눌림과 지지 확인을 우선하세요.";
   } else if (trend === "?곸듅" && vwap === "VWAP 위" && probability >= 65 && risk < 65) {
-    action = "?⑦? 愿???꾨낫";
+    action = "단타 관심 후보";
     tone = "strong";
-    reason = "?곸듅 ?먮쫫怨?VWAP ?곗쐞媛 媛숈씠 ?≫? ?덉뼱, 吏곸쟾 怨좎젏 ?뚰뙆 ?먮뒗 吏㏃? ?뚮┝ ???ъ긽?뱀쓣 ?뺤씤???꾨낫?낅땲??";
+    reason = "상승 흐름과 VWAP 위 유지가 함께 확인됐습니다. 직전 고점 돌파 또는 눌림 후 재상승을 확인하세요.";
   } else if (vwap === "VWAP 아래") {
     action = "VWAP 회복 대기";
     tone = "wait";
-    reason = "?꾩옱??VWAP ?꾨옒?쇱꽌 諛붾줈 ?곕씪媛湲곕낫???뚮났 ???좎??섎뒗吏 蹂대뒗 履쎌씠 ?덉쟾?⑸땲??";
+    reason = "현재 VWAP 아래입니다. 바로 따라가기보다 회복과 지지 여부를 먼저 확인하는 편이 안전합니다.";
   } else if (pattern >= 70 && probability >= 55) {
-    action = "?⑦꽩 媛먯떆 ?꾨낫";
+    action = "패턴 감시 후보";
     tone = "watch";
-    reason = "?좎궗 湲됰벑 ?⑦꽩怨??뺣쪧 ?먯닔???댁븘 ?덉쑝?? 泥닿껐 媛뺣룄? 諛뺤뒪沅??뚰뙆瑜?異붽?濡??뺤씤?댁빞 ?⑸땲??";
+    reason = "유사 급등 패턴과 확률 점수가 높습니다. 체결 강도와 박스권 돌파를 추가로 확인하세요.";
   }
 
   const position = closePosition === null ? "위치 확인 중" : closePosition >= 75 ? "상단권" : closePosition >= 45 ? "박스권 중앙" : "하단권";
@@ -470,7 +470,7 @@ function fallbackBars(quote) {
 
 function chartSvg(bars, signal) {
   const usable = bars.length ? bars : fallbackBars(lastQuote);
-  if (!usable.length) return `<div class="kbk-empty-chart">李⑦듃 ?곗씠?곕? 湲곕떎由щ뒗 以묒엯?덈떎.</div>`;
+  if (!usable.length) return `<div class="kbk-empty-chart">차트 데이터를 불러오는 중입니다.</div>`;
 
   const width = 760;
   const height = 260;
@@ -492,10 +492,10 @@ function chartSvg(bars, signal) {
   `;
 
   return `
-    <svg class="kbk-detail-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(selectedSymbol)} ?ㅼ떆媛?李⑦듃">
+    <svg class="kbk-detail-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(selectedSymbol)} 실시간 차트">
       <path class="kbk-chart-area" d="${area}"></path>
       <path class="kbk-chart-line" d="${path}"></path>
-      ${level(signal.support, "kbk-line-support", "吏吏")}
+      ${level(signal.support, "kbk-line-support", "지지")}
       ${level(signal.resistance, "kbk-line-resistance", "저항")}
       ${level(vwapValue(lastQuote), "kbk-line-vwap", "VWAP")}
     </svg>
@@ -512,7 +512,7 @@ function detailHtml(quote, bars, loading = false) {
   return `
     <div class="kbk-detail-head">
       <div>
-        <p class="kbk-kicker">?좏깮 醫낅ぉ ?곸꽭 媛먯떆</p>
+        <p class="kbk-kicker">선택 종목 상세 감시</p>
         <h3>${esc(quote.symbol ?? selectedSymbol)} <span>${esc(quote.name ?? "")}</span></h3>
         <p>${esc(signal.reason)}</p>
       </div>
@@ -520,7 +520,7 @@ function detailHtml(quote, bars, loading = false) {
         <strong>${scoreText}</strong>
         <span>${badge}</span>
       </div>
-      <button type="button" class="kbk-detail-close" aria-label="?곸꽭 ?リ린">횞</button>
+      <button type="button" class="kbk-detail-close" aria-label="상세 닫기">×</button>
     </div>
 
     <div class="kbk-detail-price">
@@ -529,14 +529,14 @@ function detailHtml(quote, bars, loading = false) {
       <span>${displayVolumeText(signal.volume)}</span>
       <span>${esc(signal.vwap)}</span>
       <span>Higher Lows: ${esc(signal.higherLowLabel)}</span>
-      <span>VWAP ?좎?: ${esc(vwapHoldText(signal.vwapHoldMinutes))}</span>
-      <span>?ъ긽??以鍮꾨룄: ${Math.round(signal.reSurgeSetupScore)}??/span>
-      ${loading ? `<span class="kbk-live-chip">?ㅼ떆媛?媛깆떊 以?/span>` : ""}
+      <span>VWAP 유지: ${esc(vwapHoldText(signal.vwapHoldMinutes))}</span>
+      <span>재상승 준비도: ${Math.round(signal.reSurgeSetupScore)}점</span>
+      ${loading ? `<span class="kbk-live-chip">실시간 갱신 중</span>` : ""}
     </div>
 
     <section class="kbk-signal-panel kbk-${signal.tone}">
       <div>
-        <span>?좏깮 醫낅ぉ ?ㅼ떆媛?李⑦듃/?쒓렇??/span>
+        <span>선택 종목 실시간 차트/신호</span>
         <strong>${esc(signal.action)}</strong>
       </div>
       <div class="kbk-signal-grid">
@@ -554,9 +554,9 @@ function detailHtml(quote, bars, loading = false) {
     </section>
 
     <section class="kbk-explain-grid">
-      <div><span>媛쒕퀎 ?ㅻ챸</span><p>${esc(quote.symbol ?? selectedSymbol)}???꾩옱 ${esc(signal.trend)} ?먮쫫, ${esc(signal.vwap)} ?곹깭?낅땲?? ?먯닔留?蹂댁? 留먭퀬 嫄곕옒???좎?, 怨좎젏 ?뚰뙆 ?ㅽ뙣 ?щ?, ?뚮┝ ???ъ긽?뱀쓣 媛숈씠 蹂댁뀛???⑸땲??</p></div>
-      <div><span>由ъ뒪???ㅻ챸</span><p>異붽꺽 ?꾪뿕 ${Math.round(signal.risk)}?? ?좎궗 ?⑦꽩 ${Math.round(signal.pattern)}?먯엯?덈떎. ?곸듅瑜좎씠 ??醫낅ぉ? ?좏샇媛 醫뗭븘???좉퇋 吏꾩엯 由ъ뒪?ш? 鍮좊Ⅴ寃?而ㅼ쭛?덈떎.</p></div>
-      <div><span>?뺤씤 ?쒖꽌</span><p>1. VWAP ?뚮났/?좎? 2. Higher Lows ?좎? 3. 吏곸쟾 怨좎젏 ?뚰뙆 4. ?뚮┝ ??嫄곕옒??媛먯냼 5. ?ъ긽??嫄곕옒??利앷? ?쒖꽌濡??뺤씤?섏꽭??</p></div>
+      <div><span>개별 설명</span><p>${esc(quote.symbol ?? selectedSymbol)}은 현재 ${esc(signal.trend)} 흐름이며 ${esc(signal.vwap)} 상태입니다. 점수뿐 아니라 거래량 추이, 직전 고점 돌파 여부, 눌림 후 재상승 가능성을 함께 확인하세요.</p></div>
+      <div><span>위험 설명</span><p>추격 위험 ${Math.round(signal.risk)}점, 유사 패턴 ${Math.round(signal.pattern)}점입니다. 상승률이 큰 종목은 신호가 좋아도 추격 진입 위험이 빠르게 커질 수 있습니다.</p></div>
+      <div><span>확인 순서</span><p>1. VWAP 돌파·유지 2. Higher Lows 유지 3. 직전 고점 돌파 4. 눌림 구간 거래량 감소 5. 재상승 구간 거래량 증가 순서로 확인하세요.</p></div>
     </section>
   `;
 }
@@ -700,7 +700,7 @@ async function refreshDetail(symbol, loading = false) {
   const shell = ensureShell();
   shell.hidden = false;
   if (loading && !lastQuote) {
-    shell.innerHTML = `<div class="kbk-detail-head"><div><p class="kbk-kicker">?좏깮 醫낅ぉ ?곸꽭 媛먯떆</p><h3>${esc(requestedSymbol)}</h3><p>?ㅼ떆媛??쒖꽭? 遺꾨큺 李⑦듃瑜?遺덈윭?ㅻ뒗 以묒엯?덈떎.</p></div><button type="button" class="kbk-detail-close" aria-label="?곸꽭 ?リ린">횞</button></div>`;
+    shell.innerHTML = `<div class="kbk-detail-head"><div><p class="kbk-kicker">선택 종목 상세 감시</p><h3>${esc(requestedSymbol)}</h3><p>실시간 시세와 분봉 차트를 불러오는 중입니다.</p></div><button type="button" class="kbk-detail-close" aria-label="상세 닫기">×</button></div>`;
   }
 
   try {
@@ -722,8 +722,8 @@ async function refreshDetail(symbol, loading = false) {
     if (selectedSymbol !== requestedSymbol) return;
     shell.innerHTML = `
       <div class="kbk-detail-head">
-        <div><p class="kbk-kicker">?좏깮 醫낅ぉ ?곸꽭 媛먯떆</p><h3>${esc(requestedSymbol)}</h3><p>${esc(error.message || "?곸꽭 ?곗씠?곕? 遺덈윭?ㅼ? 紐삵뻽?듬땲??")}</p></div>
-        <button type="button" class="kbk-detail-close" aria-label="?곸꽭 ?リ린">횞</button>
+        <div><p class="kbk-kicker">선택 종목 상세 감시</p><h3>${esc(requestedSymbol)}</h3><p>${esc(error.message || "상세 데이터를 불러오지 못했습니다.")}</p></div>
+        <button type="button" class="kbk-detail-close" aria-label="상세 닫기">×</button>
       </div>
     `;
   } finally {
@@ -797,11 +797,11 @@ function ensureClarifierStyles() {
 function clarifierContent(pathname) {
   if (pathname.includes("/scanner/surge-watch") || pathname.includes("/surge-watch")) {
     return `
-      <strong>??벑 媛먯떆 ?꾨낫??留ㅼ닔 ?좏샇媛 ?꾨땲???쒖?吏곸엫 媛먯떆 ?깃툒?앹엯?덈떎.</strong>
-      <p>?ш린?쒖쓽 愿??媛뺥븳 媛먯떆???곸듅瑜? ?댁뒪/怨듭떆, 嫄곕옒?? 紐⑤찘???媛뺥빐 怨꾩냽 蹂?醫낅ぉ?대씪???살엯?덈떎. ?대? 留롮씠 ?ㅻⅨ 醫낅ぉ??媛먯떆 ?꾨낫???????덉쑝硫? ?ㅼ젣 ?좉퇋 吏꾩엯 ?щ????뚮┝, VWAP ?ъ?吏, 怨쇱뿴 ?꾪뿕???곕줈 ?뺤씤?댁빞 ?⑸땲??</p>
+      <strong>급등 감시 후보는 매수 신호가 아니라 추세 진입을 관찰하는 목록입니다.</strong>
+      <p>여기서의 관심·강한 감시는 상승률, 뉴스·공시, 거래량, 모멘텀을 종합해 계속 볼 종목이라는 뜻입니다. 많이 오른 종목은 실제 진입 전 눌림, VWAP 재지지, 과열 위험을 별도로 확인하세요.</p>
       <div class="kbk-clarifier-grid">
-        <div><span>愿??/span><b>?吏곸엫???덉뼱 媛먯떆</b></div>
-        <div><span>媛뺥븳 媛먯떆</span><b>二쇰룄二?媛?μ꽦 ?뺤씤</b></div>
+        <div><span>관심</span><b>움직임이 있어 감시</b></div>
+        <div><span>강한 감시</span><b>주도주 가능성 확인</b></div>
         <div><span>留ㅼ닔 ?먮떒</span><b>?꾩쭅 ?꾨떂, ?먮━ ?뺤씤 ?꾩슂</b></div>
       </div>
     `;
@@ -1533,11 +1533,11 @@ function renderTopPickLoading() {
   panel.innerHTML = `
     <section class="kbk-top-hero">
       <p>Integrated Top Picks</p>
-      <h2>???ㅼ틦?덈? ?⑹퀜 ?꾩옱 媛??愿쒖갖? 醫낅ぉ留?異붾┰?덈떎.</h2>
-      <p>?⑦? ?쒓렇?? ??벑 媛먯떆, 留ㅼ쭛/吏꾩엯 ?곹빀?꾨? ?④퍡 蹂닿퀬 怨쇱뿴怨?異붽꺽 ?꾪뿕??媛먯젏?⑸땲??</p>
-      <button type="button" class="kbk-page-refresh kbk-top-refresh" data-kbk-page-refresh>?덈줈怨좎묠</button>
+      <h2>여러 조건을 종합해 현재 관심 있게 볼 종목만 보여드립니다.</h2>
+      <p>단타 신호, 급등 감시, 매집·진입 적합성을 함께 보고 과열·추격 위험은 감점합니다.</p>
+      <button type="button" class="kbk-page-refresh kbk-top-refresh" data-kbk-page-refresh>새로고침</button>
     </section>
-    <section class="kbk-top-loading">?듯빀 ?꾨낫瑜??ㅼ떆媛꾩쑝濡?怨꾩궛?섎뒗 以묒엯?덈떎.</section>
+    <section class="kbk-top-loading">통합 후보를 실시간으로 계산하는 중입니다.</section>
   `;
 }
 
@@ -1550,9 +1550,9 @@ function renderTopPicks(picks, updatedAt) {
   panel.innerHTML =
     '<section class="kbk-top-hero">'
     + '<p>Integrated Top Picks</p>'
-    + '<h2>?듯빀 理쒖쥌 ?꾨낫</h2>'
+    + '<h2>통합 최종 후보</h2>'
     + '<p>?⑦? ?쒓렇?? ??벑 媛먯떆, 留ㅼ쭛 ?먯닔瑜??⑹튂怨?嫄곕옒?됀룹닔湲?媛?띉룰린???⑦꽩?쇰줈 ?좎젙 ?댁쑀瑜?蹂댁뿬以띾땲??</p>'
-    + '<button type="button" class="kbk-page-refresh kbk-top-refresh" data-kbk-page-refresh>?덈줈怨좎묠</button>'
+    + '<button type="button" class="kbk-page-refresh kbk-top-refresh" data-kbk-page-refresh>새로고침</button>'
     + '</section>'
     + '<section class="kbk-top-note">'
     + (top ? ('?꾩옱 1?꾨뒗 ' + esc(top.symbol) + ' ?낅땲?? 移대뱶瑜??쇱튂硫?嫄곕옒???덉쭏쨌?섍툒 媛?띉룰린???⑦꽩?쇰줈 ???곸쐞?몄? ?뺤씤?????덉뒿?덈떎.') : '?꾩옱 ?듯빀 湲곗????듦낵???꾨낫媛 ?놁뒿?덈떎.')
@@ -1581,8 +1581,8 @@ function renderTopPicks(picks, updatedAt) {
         +     '<span>' + esc(pick.vwap) + '</span>'
         +   '</div>'
         +   '<div class="kbk-top-metrics">'
-        +     '<div><span>?⑦? ?먯닔</span><b>' + formatScore(pick.scalpScore) + '??/b></div>'
-        +     '<div><span>??벑 ?먯닔</span><b>' + formatScore(pick.surgeScore) + '??/b></div>'
+        +     '<div><span>단타 점수</span><b>' + formatScore(pick.scalpScore) + '점</b></div>'
+        +     '<div><span>급등 점수</span><b>' + formatScore(pick.surgeScore) + '점</b></div>'
         +     '<div><span>嫄곕옒???덉쭏</span><b>' + (pick.dataQualityStatus === 'insufficient-data' ? '데이터 부족' : formatScore(pick.volumeQualityScore)) + '??/b></div>'
         +     '<div><span>?섍툒 媛??/span><b>' + formatScore(pick.surgeAccelerationScore) + '??/b></div>'
         +   '</div>'
@@ -1592,16 +1592,16 @@ function renderTopPicks(picks, updatedAt) {
         +   '<div class="kbk-top-detail" hidden>'
         +     '<div class="kbk-top-detail-grid">'
         +       '<section class="kbk-top-detail-section" style="grid-column:1/-1">'
-        +         '<h4>?좎젙 ?댁쑀</h4>'
+        +         '<h4>선정 이유</h4>'
         +         '<div class="kbk-top-explain">' + renderTopPickExplainHtml(pick) + '</div>'
         +         '<ul style="margin-top:12px">' + pick.detailReasons.map((reason) => '<li>' + esc(reason) + '</li>').join('') + '</ul>'
         +       '</section>'
         +       '<section class="kbk-top-detail-section kbk-top-caution">'
-        +         '<h4>二쇱쓽 ?붿씤</h4>'
+        +         '<h4>주의 요인</h4>'
         +         '<ul>' + pick.cautions.map((reason) => '<li>??' + esc(reason) + '</li>').join('') + '</ul>'
         +       '</section>'
         +       '<section class="kbk-top-detail-section">'
-        +         '<h4>理쒖쥌 ?먮떒</h4>'
+        +         '<h4>최종 판단</h4>'
         +         '<div class="kbk-top-judgement ' + verdictTone + '">' + esc(pick.verdict) + '</div>'
         +         '<ul>'
         +           '<li>통합 점수: ' + formatScore(pick.displayFinalScore ?? pick.finalScore) + '점</li>'
@@ -1734,7 +1734,7 @@ async function loadTopPicks() {
   })().catch((error) => {
     if (!isTopPicksActive() || renderToken !== topPicksRenderToken) return;
     const activePanel = topPickPanel();
-    if (activePanel) activePanel.innerHTML = `<section class="kbk-top-empty">?듯빀 ?꾨낫 怨꾩궛 ?ㅽ뙣: ${esc(error.message)}</section>`;
+    if (activePanel) activePanel.innerHTML = `<section class="kbk-top-empty">통합 후보 계산 실패: ${esc(error.message)}</section>`;
   }).finally(() => {
     if (renderToken === topPicksRenderToken) {
       topPicksLoadPromise = null;
@@ -1750,7 +1750,7 @@ function syncTopPicksMenu() {
     button.id = "kbk-top-picks-menu";
     button.type = "button";
     button.className = "menu-link menu-button";
-    button.textContent = "?듯빀 理쒖쥌 ?꾨낫";
+    button.textContent = "통합 최종 후보";
     button.addEventListener("click", () => {
       if (isTopPicksActive() && topPicksLoadPromise) return;
       window.location.hash = "top-picks";
