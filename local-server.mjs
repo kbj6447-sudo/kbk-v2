@@ -12,7 +12,14 @@ const apiHandlers = {
   "/api/history": require("./api/history"),
   "/api/exchange": require("./api/exchange"),
 };
-const upstreamBase = String(process.env.KBK_API_UPSTREAM || "").trim().replace(/\/$/, "");
+const localApiHandlers = new Map([
+  ["/api/top-picks-snapshot", require("./api/top-picks-snapshot.js")],
+  ["/api/backtest/summary", require("./api/backtest/summary.js")],
+  ["/api/backtest/snapshots", require("./api/backtest/snapshots.js")],
+]);
+const upstreamBase = String(
+  process.env.KBK_API_UPSTREAM || process.env.LOCAL_PROXY_UPSTREAM || "",
+).trim().replace(/\/$/, "");
 const apiLogPath = join(root, "work", "local-server-api.log");
 
 const contentTypes = {
@@ -25,6 +32,10 @@ const contentTypes = {
 function send(res, status, body, type = "text/plain; charset=utf-8") {
   res.writeHead(status, { "content-type": type, "cache-control": "no-store" });
   res.end(body);
+}
+
+function sendJson(res, status, payload) {
+  send(res, status, JSON.stringify(payload, null, 2), "application/json; charset=utf-8");
 }
 
 function createApiResponse(res) {
@@ -83,6 +94,36 @@ async function proxyApi(req, res, url) {
   res.end(body);
 }
 
+async function readJsonBody(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  if (!chunks.length) return {};
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function makeLocalRes() {
+  return {
+    statusCode: 200,
+    headers: {},
+    body: null,
+    setHeader(name, value) {
+      this.headers[String(name).toLowerCase()] = value;
+    },
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.body = payload;
+      return this;
+    },
+  };
+}
+
 createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://localhost:${port}`);
@@ -95,12 +136,34 @@ createServer(async (req, res) => {
     }
 
     if (url.pathname.startsWith("/api/")) {
+      const localHandler = localApiHandlers.get(url.pathname);
+      if (localHandler) {
+        const localReq = {
+          method: req.method || "GET",
+          url: `${url.pathname}${url.search}`,
+          headers: req.headers || {},
+          query: Object.fromEntries(url.searchParams.entries()),
+          body: await readJsonBody(req),
+        };
+        const localRes = makeLocalRes();
+        await logApiRequest(url, "local-route");
+        await localHandler(localReq, localRes);
+        sendJson(res, localRes.statusCode, localRes.body ?? { ok: false, message: "Empty local response" });
+        return;
+      }
+
       if (upstreamBase) {
         await logApiRequest(url, "proxy");
         await proxyApi(req, res, url);
         return;
       }
-      send(res, 404, `No local handler for ${url.pathname}. Set KBK_API_UPSTREAM to enable explicit proxy fallback.`);
+
+      sendJson(res, 503, {
+        ok: false,
+        local: true,
+        code: "LOCAL_PROXY_DISABLED",
+        message: "로컬 API 프록시가 비활성화되어 있습니다. KBK_API_UPSTREAM 또는 LOCAL_PROXY_UPSTREAM 설정이 필요합니다.",
+      });
       return;
     }
 
