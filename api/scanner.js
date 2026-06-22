@@ -3271,6 +3271,108 @@ function evaluateTopPickForSnapshot(item) {
   };
 }
 
+const PANIC_OVERSOLD_RISK_KEYWORDS = [
+  { keywords: ["delisting", "non-compliance", "nasdaq notice"], label: "상장폐지/나스닥 요건 위험" },
+  { keywords: ["reverse split", "stock split"], label: "역분할/주식병합" },
+  { keywords: ["offering", "public offering", "registered direct offering", "atm offering"], label: "유상증자/공모" },
+  { keywords: ["warrant"], label: "워런트 부담" },
+  { keywords: ["bankruptcy", "going concern"], label: "파산/계속기업 위험" },
+  { keywords: ["clinical trial failed", "fda failure"], label: "임상/FDA 실패" },
+  { keywords: ["investigation", "restatement", "sec filing issue"], label: "조사/회계 이슈" },
+  { keywords: ["halt", "suspension"], label: "거래정지 위험" },
+];
+
+function panicOversoldTextSources(item = {}) {
+  const values = [
+    ...(Array.isArray(item.riskFlags) ? item.riskFlags : []),
+    ...(Array.isArray(item.scoreReasons) ? item.scoreReasons.flatMap((reason) => [reason?.labelKo, reason?.label, reason?.valueKo, reason?.value]) : []),
+    ...(Array.isArray(item.selectionReasons) ? item.selectionReasons : []),
+    ...(Array.isArray(item.sourceTags) ? item.sourceTags : []),
+    ...(Array.isArray(item.newsFlags) ? item.newsFlags : []),
+    ...(Array.isArray(item.filingFlags) ? item.filingFlags : []),
+  ];
+  return values.filter(Boolean).map((value) => String(value).toLowerCase());
+}
+
+function evaluatePanicOversoldSignal(item = {}, dataQuality = {}) {
+  const mode = "panic_oversold_rebound_v1";
+  const price = num(item.price ?? item.preMarketPrice ?? item.regularMarketPrice);
+  const dayHigh = num(item.dayHigh);
+  const dayLow = num(item.dayLow);
+  const change = num(item.changePercent ?? item.preMarketChangePercent);
+  const rvol = num(item.relativeVolume ?? item.rvol ?? item.volumeRatio);
+  const volume = num(item.volume ?? item.preMarketVolume);
+  const tradeValueKrw = num(item.tradeValueKrw);
+  const vwap = num(item.vwap ?? item.technical?.vwap);
+  const texts = panicOversoldTextSources(item);
+  const fatalFlags = [...new Set(PANIC_OVERSOLD_RISK_KEYWORDS
+    .filter(({ keywords }) => keywords.some((keyword) => texts.some((text) => text.includes(keyword))))
+    .map(({ label }) => label))];
+  const requiredDataMissing = price === null || dayHigh === null || dayLow === null || dayHigh <= dayLow || (rvol === null && volume === null && tradeValueKrw === null);
+  const reasons = [];
+  const riskFlags = [...fatalFlags];
+
+  if (!texts.length) riskFlags.push("공시/뉴스 별도 확인 필요");
+  if (fatalFlags.length) {
+    return {
+      panicOversoldSignal: false,
+      panicOversoldScore: 0,
+      panicOversoldLabel: "위험 제외",
+      panicOversoldReasons: [],
+      panicOversoldRiskFlags: riskFlags,
+      panicOversoldExcluded: true,
+      panicOversoldMode: mode,
+    };
+  }
+  if (requiredDataMissing || dataQuality?.reliability === "low") {
+    return {
+      panicOversoldSignal: false,
+      panicOversoldScore: 0,
+      panicOversoldLabel: "판단 보류",
+      panicOversoldReasons: ["고점/저점 또는 거래량 데이터 부족"],
+      panicOversoldRiskFlags: riskFlags,
+      panicOversoldExcluded: false,
+      panicOversoldMode: mode,
+    };
+  }
+
+  const highDropPercent = Math.max(0, ((dayHigh - price) / dayHigh) * 100);
+  const closePositionInRange = ((price - dayLow) / Math.max(dayHigh - dayLow, 0.000001)) * 100;
+  const vwapDistancePercent = vwap !== null && vwap > 0 ? ((price - vwap) / vwap) * 100 : null;
+  let score = 0;
+  if (highDropPercent >= 35) { score += 20; reasons.push("고점 대비 급락"); }
+  else if (highDropPercent >= 20) { score += 16; reasons.push("고점 대비 큰 낙폭"); }
+  else if (highDropPercent >= 12) { score += 10; reasons.push("고점 대비 하락 확대"); }
+  if (change !== null && change <= -20) { score += 15; reasons.push("단기 투매 구간"); }
+  else if (change !== null && change <= -10) { score += 10; reasons.push("단기 하락 과도"); }
+  if (rvol !== null && rvol >= 3) { score += 20; reasons.push("상대거래량 유지"); }
+  else if (rvol !== null && rvol >= 1.5) { score += 14; reasons.push("거래량 유지"); }
+  else if (tradeValueKrw !== null && tradeValueKrw >= 500_000_000) { score += 12; reasons.push("거래대금 유지"); }
+  if (closePositionInRange <= 25) { score += 20; reasons.push("당일 저점 부근 방어"); }
+  else if (closePositionInRange <= 40) { score += 12; reasons.push("저점권 유지"); }
+  if (vwapDistancePercent !== null && vwapDistancePercent >= -5) { score += 10; reasons.push("VWAP 회복 거리 확인 가능"); }
+  else if (vwapDistancePercent === null) riskFlags.push("VWAP 확인 필요");
+  score += 10;
+  if (tradeValueKrw !== null && tradeValueKrw >= 100_000_000) score += 5;
+  else if (tradeValueKrw !== null && tradeValueKrw < 50_000_000) riskFlags.push("저유동성 주의");
+  const hasPanicDrop = highDropPercent >= 12 && (change === null || change <= -5);
+  const finalScore = Math.round(clamp(score));
+  const label = !hasPanicDrop || finalScore < 50
+    ? "조건 부족"
+    : finalScore >= 80 ? "강한 반등 감시"
+      : finalScore >= 65 ? "반등 감시"
+        : "관찰";
+  return {
+    panicOversoldSignal: label === "강한 반등 감시" || label === "반등 감시",
+    panicOversoldScore: finalScore,
+    panicOversoldLabel: label,
+    panicOversoldReasons: reasons.slice(0, 4),
+    panicOversoldRiskFlags: [...new Set(riskFlags)].slice(0, 4),
+    panicOversoldExcluded: false,
+    panicOversoldMode: mode,
+  };
+}
+
 function preMoveLabelKo(stage) {
   const labels = {
     COMPRESSION_BUILD: "가격 압축 예열",
@@ -4955,6 +5057,7 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
         const dataQuality = buildDataQuality(responseItem, commonSignals);
         const scannerMode = buildScannerMode(responseItem, generatedAt);
         const signalLifecycle = buildSignalLifecycle(responseItem, scannerMode, generatedAt);
+        const panicOversold = evaluatePanicOversoldSignal(responseItem, dataQuality);
         if (symbolKey === "RMSG") {
           console.log("[SCANNER:RMSG:SESSION_FIELDS] " + JSON.stringify({
             symbol: responseItem.symbol,
@@ -5008,6 +5111,7 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
           dataQuality,
           scannerMode,
           signalLifecycle,
+          ...panicOversold,
           scoreReasons: buildScoreReasons(responseItem, dataQuality, scannerMode, signalLifecycle, topPickEvaluation),
           baselineAudit,
           ...experimentalScore,

@@ -662,6 +662,22 @@ function renderFinalDecisionHeroHtml(decision, escapeHtml = (v) => String(v ?? "
   `;
 }
 
+function renderPanicOversoldHtml(item, escapeHtml = (v) => String(v ?? "")) {
+  const label = item?.panicOversoldLabel;
+  if (!label || label === "조건 부족") return "";
+  const score = Number.isFinite(Number(item?.panicOversoldScore)) ? `${Math.round(Number(item.panicOversoldScore))}점` : "판단 보류";
+  const reasons = Array.isArray(item?.panicOversoldReasons) ? item.panicOversoldReasons.slice(0, 4) : [];
+  const flags = Array.isArray(item?.panicOversoldRiskFlags) ? item.panicOversoldRiskFlags.slice(0, 4) : [];
+  const tone = item?.panicOversoldExcluded ? "block" : item?.panicOversoldSignal ? "watch" : "hold";
+  return `
+    <div class="kbk-pro-top-panic kbk-pro-top-panic-${tone}">
+      <strong>공포과매도: ${escapeHtml(label)}</strong><span>점수 ${escapeHtml(score)}</span>
+      ${reasons.length ? `<p>근거: ${reasons.map(escapeHtml).join(" · ")}</p>` : ""}
+      ${flags.length ? `<p>주의: ${flags.map(escapeHtml).join(" · ")}</p>` : ""}
+    </div>
+  `;
+}
+
 function formatKrwFromUsdDollar(dollarUsd) {
   const usd = toNumber(dollarUsd);
   const rate = currentUsdKrw();
@@ -1751,6 +1767,7 @@ async function renderTopPicksOnly(renderPhase = "initial") {
             <span class="kbk-badge group">${textEscape(selectionMetrics.selectionGroup)}</span>
             ${selectionMetrics.riskBadges.map((badge) => `<span class="kbk-badge risk">${textEscape(badge)}</span>`).join("")}
           </div>
+          ${renderPanicOversoldHtml(displayItem, textEscape)}
           <div class="price-row">
             <strong>${displayPrice !== null ? topPickKrwPrice(displayPrice) : "-"}</strong>
             <span>${displayChange !== null ? pct(displayChange) : "-"}</span>
