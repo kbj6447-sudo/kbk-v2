@@ -917,9 +917,9 @@ function formatKrwFromUsdDollar(dollarUsd) {
   const usd = num(dollarUsd);
   if (usd === null || usd <= 0) return null;
   const krw = usd * usdKrw;
-  if (krw >= 100_000_000) return `??${(krw / 100_000_000).toFixed(1)}????;
-  if (krw >= 10_000_000) return `??${Math.round(krw / 10_000_000)}泥쒕쭔 ??;
-  return `??${fmt.format(Math.round(krw))}??;
+  if (krw >= 100_000_000) return `약 ${ (krw / 100_000_000).toFixed(1)}억원`;
+  if (krw >= 10_000_000) return `약 ${Math.round(krw / 10_000_000)}천만원`;
+  return `약 ${fmt.format(Math.round(krw))}원`;
 }
 
 function computeVolumeQualityScore(item, price, volume, rvol) {
@@ -1013,7 +1013,7 @@ function buildTopPickExplainSections(item, pick, volumeQuality, surgeAcceleratio
   const cautions = [];
 
   if (volumeQuality.contributed) {
-    volumeQualityLines.push(`嫄곕옒???덉쭏 ?먯닔 ${volumeQuality.score}??);
+    volumeQualityLines.push(`嫄곕옒???덉쭏 ?먯닔 ${volumeQuality.score}??`);
     if (pick.volume >= 500_000) {
       volumeQualityLines.push(`嫄곕옒??${compact(pick.volume)}`);
     }
@@ -1022,7 +1022,7 @@ function buildTopPickExplainSections(item, pick, volumeQuality, surgeAcceleratio
       volumeQualityLines.push(`嫄곕옒?湲?${dollarText}`);
     }
     if (pick.rvol >= 1.5 && volumeQuality.rvolScore >= 48) {
-      volumeQualityLines.push(`RVOL ${pick.rvol.toFixed(1)}諛곕줈 ?됯퇏 ?鍮?嫄곕옒媛 遺숈뿀?듬땲??);
+      volumeQualityLines.push(`RVOL ${pick.rvol.toFixed(1)}諛곕줈 ?됯퇏 ?鍮?嫄곕옒媛 遺숈뿀?듬땲??`);
     }
   }
 
@@ -1035,9 +1035,9 @@ function buildTopPickExplainSections(item, pick, volumeQuality, surgeAcceleratio
       surgeAccelerationLines.push(`理쒓렐 1遺?嫄곕옒??${surgeAcceleration.accel1m.toFixed(1)}諛?利앷?`);
     }
     if (surgeAcceleration.strong) {
-      surgeAccelerationLines.push(`湲됰벑 媛?띾룄 ?먯닔 ${surgeAcceleration.score}??);
+      surgeAccelerationLines.push(`湲됰벑 媛?띾룄 ?먯닔 ${surgeAcceleration.score}??`);
     } else if (surgeAcceleration.moderate) {
-      surgeAccelerationLines.push(`?섍툒 媛???먯닔 ${surgeAcceleration.score}??);
+      surgeAccelerationLines.push(`?섍툒 媛???먯닔 ${surgeAcceleration.score}??`);
     }
     if (
       surgeAcceleration.volumeAccelerationScore >= 65
@@ -1560,7 +1560,7 @@ function renderTopPicks(picks, updatedAt) {
       const displayScore = pick.displayFinalScore ?? pick.finalScore;
       const displayScoreText = formatScore(displayScore);
       const scoreGrade = topPickScoreGrade(displayScore);
-      const verdictTone = pick.verdict === '留ㅼ닔 媛?? || pick.verdict === '理쒖슦???⑦? ?꾨낫' ? 'buy' : pick.verdict === '愿李? || pick.verdict === '?곸쐞 媛먯떆 ?꾨낫' ? 'watch' : 'block';
+      const verdictTone = pick.verdict === '留ㅼ닔 媛??' || pick.verdict === '理쒖슦???⑦? ?꾨낫' ? 'buy' : pick.verdict === '愿李?' || pick.verdict === '?곸쐞 媛먯떆 ?꾨낫' ? 'watch' : 'block';
       return ''
         + '<article class="kbk-top-card" data-top-pick-card="' + esc(pick.symbol) + '" tabindex="0" role="button" aria-expanded="false">'
         +   renderFinalDecisionHeroHtml(pick.finalDecision, esc)
@@ -1569,7 +1569,7 @@ function renderTopPicks(picks, updatedAt) {
         +       '<h3>' + esc(pick.symbol) + '</h3>'
         +       '<p>' + esc(pick.name) + '</p>'
         +     '</div>'
-        +     '<div class="kbk-top-score">' + displayScoreText + '점 <small>(' + esc(scoreGrade) + ')</small><span>' + (index === 0 ? '1?? : esc(pick.verdict)) + '</span></div>'
+        +     '<div class="kbk-top-score">' + displayScoreText + '점 <small>(' + esc(scoreGrade) + ')</small><span>' + (index === 0 ? '1위' : esc(pick.verdict)) + '</span></div>'
         +   '</div>'
         +   '<div class="kbk-top-row">'
         +     '<strong>' + pricePairText(pick.displayPrice ?? pick.price) + '</strong>'
@@ -1703,7 +1703,7 @@ async function loadTopPicks() {
       .filter((item) => item?.symbol && item.included !== false)
       .map(scoreTopPick)
       .filter((pick) => pick.change >= 3)
-      .filter((pick) => pick.vwap.includes("위") || pick.vwap.includes("근처"))
+  .filter((pick) => pick.vwap.includes("위") || pick.vwap.includes("근처"))
       .filter((pick) => pick.trend === "?곸듅")
       .filter((pick) => pick.volume >= 500_000 || pick.rvol >= 3)
       .filter((pick) => !pick.setupBias?.underDollarLowRvol || pick.setupBias?.strongEarlySignal)
