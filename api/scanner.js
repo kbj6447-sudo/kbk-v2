@@ -3373,6 +3373,97 @@ function evaluatePanicOversoldSignal(item = {}, dataQuality = {}) {
   };
 }
 
+function evaluateLiveTradeState(item = {}, dataQuality = {}, scoreReasons = []) {
+  const mode = "live_trade_state_v1";
+  const price = num(item.price ?? item.preMarketPrice ?? item.regularMarketPrice);
+  const change = num(item.changePercent ?? item.preMarketChangePercent);
+  const rvol = num(item.relativeVolume ?? item.rvol ?? item.volumeRatio);
+  const volume = num(item.volume ?? item.preMarketVolume);
+  const tradeValueKrw = num(item.tradeValueKrw);
+  const vwapDistance = num(item.vwapDistancePercent ?? item?.technical?.vwapDistancePercent);
+  const finalScore = num(item.finalSelectionScore ?? item.topPickDisplayFinalScore ?? item.finalProbabilityScore ?? item.scannerScore) ?? 0;
+  const chaseRisk = num(item.chaseRisk ?? item.topPickChaseRisk ?? item.riskScore) ?? 0;
+  const texts = [
+    ...panicOversoldTextSources(item),
+    ...scoreReasons.flatMap((reason) => [reason?.labelKo, reason?.valueKo]),
+  ].filter(Boolean).map((value) => String(value).toLowerCase());
+  const hasFlow = (rvol !== null && rvol > 0) || (volume !== null && volume > 0) || (tradeValueKrw !== null && tradeValueKrw > 0);
+  const isDataLimited = price === null || change === null || !hasFlow || dataQuality?.reliability === "invalid";
+  const criticalRisk = item.panicOversoldExcluded === true;
+  const hotRisk = chaseRisk >= 75
+    || (change !== null && change >= 45)
+    || texts.some((text) => /chasing|overheated|extended|추격|과열|고점 부근/.test(text));
+  const vwapNearOrAbove = item.aboveVwap === true || (vwapDistance !== null && vwapDistance >= -1.5);
+  const liquidEnough = (tradeValueKrw === null || tradeValueKrw >= 100_000_000)
+    && (rvol === null || rvol >= 1);
+  const baseReasons = [];
+  const warnings = [];
+  if (vwapNearOrAbove) baseReasons.push("VWAP 위 또는 근처");
+  else warnings.push("VWAP 회복 확인 필요");
+  if (rvol !== null && rvol >= 1.5) baseReasons.push(`RVOL ${rvol.toFixed(1)}배 유지`);
+  else if (volume !== null && volume > 0) baseReasons.push("거래량 확인");
+  if (tradeValueKrw !== null && tradeValueKrw >= 100_000_000) baseReasons.push("거래대금 확보");
+  if (item.panicOversoldSignal === true && item.panicOversoldExcluded !== true) {
+    return {
+      liveTradeState: "rebound_watch",
+      liveTradeLabel: "반등 감시",
+      liveTradeConfidence: Math.round(num(item.panicOversoldScore) ?? 50),
+      liveTradeReasons: [...item.panicOversoldReasons ?? [], ...baseReasons].slice(0, 4),
+      liveTradeWarnings: [...item.panicOversoldRiskFlags ?? [], "반등 확인 전 진입 주의"].filter(Boolean).slice(0, 4),
+      liveTradeMode: mode,
+    };
+  }
+  if (criticalRisk) {
+    return {
+      liveTradeState: "risk_excluded",
+      liveTradeLabel: "위험 제외",
+      liveTradeConfidence: 0,
+      liveTradeReasons: [],
+      liveTradeWarnings: Array.isArray(item.panicOversoldRiskFlags) ? item.panicOversoldRiskFlags.slice(0, 4) : ["치명 위험 신호"],
+      liveTradeMode: mode,
+    };
+  }
+  if (isDataLimited) {
+    const missing = [price === null ? "가격" : null, change === null ? "등락률" : null, !hasFlow ? "거래량/거래대금" : null].filter(Boolean);
+    return {
+      liveTradeState: "data_limited",
+      liveTradeLabel: "데이터 부족",
+      liveTradeConfidence: 0,
+      liveTradeReasons: [],
+      liveTradeWarnings: [`핵심 데이터 부족: ${missing.join(", ") || "확인 필요"}`],
+      liveTradeMode: mode,
+    };
+  }
+  if (hotRisk) {
+    return {
+      liveTradeState: "chasing_risk",
+      liveTradeLabel: "추격 위험",
+      liveTradeConfidence: Math.round(Math.max(0, 100 - chaseRisk)),
+      liveTradeReasons: change !== null && change >= 45 ? ["단기 급등 과열"] : ["고점권 또는 과열 신호"],
+      liveTradeWarnings: ["눌림 확인 전 진입 주의", ...warnings].slice(0, 4),
+      liveTradeMode: mode,
+    };
+  }
+  if (finalScore >= 68 && vwapNearOrAbove && liquidEnough) {
+    return {
+      liveTradeState: "entry_candidate",
+      liveTradeLabel: "진입 후보",
+      liveTradeConfidence: Math.round(Math.min(100, finalScore)),
+      liveTradeReasons: [...baseReasons, "추격 위험 낮음"].slice(0, 4),
+      liveTradeWarnings: warnings,
+      liveTradeMode: mode,
+    };
+  }
+  return {
+    liveTradeState: "wait",
+    liveTradeLabel: "대기",
+    liveTradeConfidence: Math.round(Math.min(100, Math.max(0, finalScore))),
+    liveTradeReasons: baseReasons.length ? baseReasons : ["기본 후보 조건 유지"],
+    liveTradeWarnings: [...warnings, "방향 또는 진입 조건 확인 필요"].slice(0, 4),
+    liveTradeMode: mode,
+  };
+}
+
 function preMoveLabelKo(stage) {
   const labels = {
     COMPRESSION_BUILD: "가격 압축 예열",
@@ -5084,6 +5175,8 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
           }));
         }
         const topPickEvaluation = evaluateTopPickForSnapshot(responseItem);
+        const scoreReasons = buildScoreReasons(responseItem, dataQuality, scannerMode, signalLifecycle, topPickEvaluation);
+        const liveTrade = evaluateLiveTradeState({ ...responseItem, ...topPickEvaluation, ...panicOversold }, dataQuality, scoreReasons);
         const forbiddenPenalty = computeForbiddenPenalty(topPickEvaluation.topPickVerdict, topPickEvaluation.topPickChaseRisk);
         const marketPrioritySortScore = (num(topPickEvaluation.finalSelectionScore ?? responseItem.finalSelectionScore) ?? finalProbabilityScore)
           + earlyMomentumBonus
@@ -5112,7 +5205,8 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
           scannerMode,
           signalLifecycle,
           ...panicOversold,
-          scoreReasons: buildScoreReasons(responseItem, dataQuality, scannerMode, signalLifecycle, topPickEvaluation),
+          ...liveTrade,
+          scoreReasons,
           baselineAudit,
           ...experimentalScore,
           forbiddenPenalty,

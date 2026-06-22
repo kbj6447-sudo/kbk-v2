@@ -293,11 +293,14 @@ function diagnosticInlineText(item = {}) {
   const scannerMode = item.scannerMode || {};
   const signalLifecycle = item.signalLifecycle || {};
   const reasons = Array.isArray(item.scoreReasons) ? item.scoreReasons.slice(0, 3).map((reason) => reason?.labelKo).filter(Boolean) : [];
-  const summary = [
-    `데이터 ${dataQuality.reliabilityKo || reliabilityLabel(item)}`,
-    scannerMode.modeKo || "판단 모드 확인 필요",
-    signalLifecycle.statusKo || "신호 확인 중",
-  ].filter(Boolean).join(" · ");
+  const liveLabel = item.liveTradeLabel || item.panicOversoldLabel || null;
+  const summary = liveLabel
+    ? `단타 상태 ${liveLabel}`
+    : [
+      `데이터 ${dataQuality.reliabilityKo || reliabilityLabel(item)}`,
+      scannerMode.modeKo || "판단 모드 확인 필요",
+      signalLifecycle.statusKo || "신호 확인 중",
+    ].filter(Boolean).join(" · ");
   const detail = reasons.join(", ");
   return {
     summary,
@@ -312,15 +315,20 @@ function diagnosticInlineHtml(item = {}, options = {}) {
   const signalLifecycle = item.signalLifecycle || {};
   const reasons = Array.isArray(item.scoreReasons) ? item.scoreReasons.slice(0, compact ? 2 : 3) : [];
   const summary = diagnosticInlineText(item);
+  const liveReasons = Array.isArray(item.liveTradeReasons) ? item.liveTradeReasons.slice(0, compact ? 2 : 4) : [];
+  const liveWarnings = Array.isArray(item.liveTradeWarnings) ? item.liveTradeWarnings.slice(0, compact ? 1 : 4) : [];
   const signalLine = compact
     ? `신호 ${formatKstClock(signalLifecycle.signalCreatedAtKst)} / ${signalLifecycle.statusKo || "-"}`
     : `신호: ${formatKstClock(signalLifecycle.signalCreatedAtKst)} 발생 / ${signalLifecycle.statusKo || "-"} · 유효 ${signalLifecycle.validUntilKst ? `${formatKstClock(signalLifecycle.validUntilKst)}까지` : "-"}`;
   return `
     <div class="kbk-diagnostic-inline ${compact ? "compact" : ""}">
       <div class="kbk-diagnostic-inline-summary">진단: ${textEscape(summary.summary)}</div>
+      ${item.liveTradeLabel ? `<div class="kbk-diagnostic-inline-meta">상태: ${textEscape(item.liveTradeLabel)} · 신뢰도 ${textEscape(item.liveTradeConfidence ?? "-")}점</div>` : ""}
+      ${liveReasons.length ? `<div class="kbk-diagnostic-inline-meta">근거: ${liveReasons.map(textEscape).join(", ")}</div>` : ""}
+      ${liveWarnings.length ? `<div class="kbk-diagnostic-inline-meta warning">주의: ${liveWarnings.map(textEscape).join(", ")}</div>` : ""}
       ${scannerMode.reasonKo ? `<div class="kbk-diagnostic-inline-meta">이유: ${textEscape(scannerMode.reasonKo)}</div>` : ""}
       <div class="kbk-diagnostic-inline-meta">${textEscape(signalLine)}</div>
-      ${reasons.length ? `<div class="kbk-diagnostic-inline-meta">근거: ${reasons.map((reason) => textEscape(reason.labelKo || "-")).join(", ")}</div>` : ""}
+      ${!liveReasons.length && reasons.length ? `<div class="kbk-diagnostic-inline-meta">근거: ${reasons.map((reason) => textEscape(reason.labelKo || "-")).join(", ")}</div>` : ""}
       ${!compact && dataQuality.warningKo ? `<div class="kbk-diagnostic-inline-meta warning">주의: ${textEscape(dataQuality.warningKo)}</div>` : ""}
     </div>
   `;
