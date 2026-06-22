@@ -899,7 +899,9 @@ function stageMetaOf(item, changeOverride = null) {
 }
 
 function scannerFetchOptions(url) {
-  return String(url || "").includes("/api/scanner") ? { cache: "default" } : { cache: "no-store" };
+  const path = String(url || "");
+  if (path.includes("/api/exchange")) return { cache: "no-store" };
+  return { cache: "default" };
 }
 
 function formatScore(value, fallback = "-") {

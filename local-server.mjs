@@ -17,9 +17,12 @@ const localApiHandlers = new Map([
   ["/api/backtest/summary", require("./api/backtest/summary.js")],
   ["/api/backtest/snapshots", require("./api/backtest/snapshots.js")],
 ]);
-const upstreamBase = String(
+const proxyToggleRaw = String(process.env.LOCAL_SERVER_PROXY_UPSTREAM || "").trim().toLowerCase();
+const proxyEnabled = proxyToggleRaw === "1" || proxyToggleRaw === "true";
+const configuredUpstreamBase = String(
   process.env.KBK_API_UPSTREAM || process.env.LOCAL_PROXY_UPSTREAM || "",
 ).trim().replace(/\/$/, "");
+const upstreamBase = configuredUpstreamBase || (proxyEnabled ? "https://kbk-theta-accumulation.vercel.app" : "");
 const apiLogPath = join(root, "work", "local-server-api.log");
 
 const contentTypes = {
@@ -162,7 +165,7 @@ createServer(async (req, res) => {
         ok: false,
         local: true,
         code: "LOCAL_PROXY_DISABLED",
-        message: "로컬 API 프록시가 비활성화되어 있습니다. KBK_API_UPSTREAM 또는 LOCAL_PROXY_UPSTREAM 설정이 필요합니다.",
+        message: "로컬 API 프록시가 비활성화되어 있습니다. LOCAL_SERVER_PROXY_UPSTREAM=1 또는 KBK_API_UPSTREAM/LOCAL_PROXY_UPSTREAM 설정이 필요합니다.",
       });
       return;
     }
@@ -186,5 +189,5 @@ createServer(async (req, res) => {
   }
 }).listen(port, () => {
   console.log(`Local scanner server: http://localhost:${port}`);
-  console.log(`API proxy fallback: ${upstreamBase || "disabled"}`);
+  console.log(`API proxy fallback: ${upstreamBase || "disabled"} (enabled=${proxyEnabled ? "yes" : "no"})`);
 });

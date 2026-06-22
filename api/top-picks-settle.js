@@ -1,4 +1,5 @@
 const quoteHandler = require("./quote");
+const historyHandler = require("./history");
 const {
   ensureStore,
   saveSnapshot,
@@ -14,12 +15,6 @@ function num(value) {
 function average(values) {
   if (!values.length) return null;
   return Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(4));
-}
-
-function verdictBucket(verdict) {
-  if (verdict === "매수 가능") return "buy";
-  if (verdict === "진입 금지") return "block";
-  return "watch";
 }
 
 function makeMockRes() {
@@ -41,6 +36,71 @@ function makeMockRes() {
   };
 }
 
+function toTimeMs(value) {
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function valueFromBar(bar, key) {
+  const direct = num(bar?.[key]);
+  if (direct !== null) return direct;
+  if (key === "timestamp") {
+    const parsed = Date.parse(String(bar?.time || ""));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function nearestPriceAt(bars, targetMs) {
+  if (!Number.isFinite(targetMs)) return null;
+  let candidate = null;
+  let smallestDiff = Number.POSITIVE_INFINITY;
+  for (const bar of bars) {
+    const ts = valueFromBar(bar, "timestamp");
+    const close = valueFromBar(bar, "close");
+    if (!Number.isFinite(ts) || close === null) continue;
+    const diff = Math.abs(ts - targetMs);
+    if (diff < smallestDiff) {
+      smallestDiff = diff;
+      candidate = close;
+    }
+  }
+  if (!Number.isFinite(smallestDiff)) return null;
+  return smallestDiff <= 20 * 60 * 1000 ? candidate : null;
+}
+
+function detectFirstBarrierHit(bars, entryMs, stopLossPrice, takeProfitPrice) {
+  if (!Number.isFinite(entryMs)) return null;
+  if (stopLossPrice === null && takeProfitPrice === null) return null;
+  for (const bar of bars) {
+    const ts = valueFromBar(bar, "timestamp");
+    if (!Number.isFinite(ts) || ts < entryMs) continue;
+    const high = valueFromBar(bar, "high");
+    const low = valueFromBar(bar, "low");
+    const open = valueFromBar(bar, "open");
+    const close = valueFromBar(bar, "close");
+    const hitStop = stopLossPrice !== null && low !== null && low <= stopLossPrice;
+    const hitTakeProfit = takeProfitPrice !== null && high !== null && high >= takeProfitPrice;
+    if (hitStop && hitTakeProfit) {
+      const pivot = open ?? close ?? takeProfitPrice;
+      const distStop = Math.abs(pivot - stopLossPrice);
+      const distTakeProfit = Math.abs(pivot - takeProfitPrice);
+      return {
+        at: new Date(ts).toISOString(),
+        barrier: distTakeProfit <= distStop ? "takeProfit" : "stopLoss",
+        ambiguousSameBar: true,
+      };
+    }
+    if (hitTakeProfit) {
+      return { at: new Date(ts).toISOString(), barrier: "takeProfit", ambiguousSameBar: false };
+    }
+    if (hitStop) {
+      return { at: new Date(ts).toISOString(), barrier: "stopLoss", ambiguousSameBar: false };
+    }
+  }
+  return null;
+}
+
 async function invokeQuote(symbol) {
   const req = {
     method: "GET",
@@ -57,68 +117,219 @@ async function invokeQuote(symbol) {
   return num(data.price ?? data.preMarketPrice ?? data.regularMarketPrice);
 }
 
-function settleSnapshot(snapshot) {
-  const buckets = {
-    buy: [],
-    watch: [],
-    block: [],
+async function invokeHistory(symbol, fromIso) {
+  const req = {
+    method: "GET",
+    url: `/api/history?symbol=${encodeURIComponent(symbol)}&from=${encodeURIComponent(fromIso)}&interval=1m`,
+    headers: { "x-kis-caller": "top-picks-settle" },
+    query: {
+      symbol,
+      from: fromIso,
+      interval: "1m",
+    },
   };
-  const gradeBuckets = {
-    S: [],
-    A: [],
-    B: [],
-    C: [],
-    D: [],
-  };
-  for (const item of snapshot.items) {
-    if (item.returnPct === null || item.returnPct === undefined) continue;
-    buckets[verdictBucket(item.verdict)].push(item.returnPct);
-    const grade = String(item.grade || "").toUpperCase();
-    if (gradeBuckets[grade]) gradeBuckets[grade].push(item.returnPct);
+  const res = makeMockRes();
+  await historyHandler(req, res);
+  if (res.statusCode >= 400 || !res.body?.ok) {
+    throw new Error(res.body?.message || `history failed: ${symbol}`);
   }
-  snapshot.summary = {
-    buyAvgReturn: average(buckets.buy),
-    watchAvgReturn: average(buckets.watch),
-    blockAvgReturn: average(buckets.block),
-    buyCount: buckets.buy.length,
-    watchCount: buckets.watch.length,
-    blockCount: buckets.block.length,
-    gradeSAvgReturn: average(gradeBuckets.S),
-    gradeAAvgReturn: average(gradeBuckets.A),
-    gradeBAvgReturn: average(gradeBuckets.B),
-    gradeCAvgReturn: average(gradeBuckets.C),
-    gradeDAvgReturn: average(gradeBuckets.D),
-    gradeSCount: gradeBuckets.S.length,
-    gradeACount: gradeBuckets.A.length,
-    gradeBCount: gradeBuckets.B.length,
-    gradeCCount: gradeBuckets.C.length,
-    gradeDCount: gradeBuckets.D.length,
+  return Array.isArray(res.body?.data?.bars) ? res.body.data.bars : [];
+}
+
+function updateItemTracking(item, bars, nowMs) {
+  const entryPrice = num(item.entryPrice ?? item.priceAtScan);
+  const stopLossPrice = num(item.stopLossPrice);
+  const takeProfitPrice = num(item.takeProfitPrice);
+  const entryMs = toTimeMs(item.scanTime || item.timestamp);
+  const tracking = item.tracking && typeof item.tracking === "object" ? item.tracking : {};
+  const windows = tracking.windows && typeof tracking.windows === "object" ? tracking.windows : {};
+  const firstBarrierHit = detectFirstBarrierHit(bars, entryMs, stopLossPrice, takeProfitPrice);
+  const nextWindows = {};
+
+  for (const [windowKey, windowInfo] of Object.entries(windows)) {
+    const targetMs = toTimeMs(windowInfo?.targetTime);
+    const due = Number.isFinite(targetMs) && targetMs <= nowMs;
+    if (!due) {
+      nextWindows[windowKey] = windowInfo;
+      continue;
+    }
+    if (windowInfo?.status === "ok" || windowInfo?.status === "insufficient") {
+      nextWindows[windowKey] = windowInfo;
+      continue;
+    }
+    const checkpointPrice = nearestPriceAt(bars, targetMs);
+    const returnPct = checkpointPrice !== null && entryPrice !== null && entryPrice > 0
+      ? Number((((checkpointPrice - entryPrice) / entryPrice) * 100).toFixed(4))
+      : null;
+    nextWindows[windowKey] = {
+      ...windowInfo,
+      status: checkpointPrice === null ? "insufficient" : "ok",
+      price: checkpointPrice,
+      returnPct,
+      firstBarrierHit: firstBarrierHit?.barrier ?? null,
+      reachedStopLoss: firstBarrierHit?.barrier === "stopLoss",
+      reachedTakeProfit: firstBarrierHit?.barrier === "takeProfit",
+      settledAt: new Date().toISOString(),
+    };
+  }
+
+  const eod = tracking.eod && typeof tracking.eod === "object" ? tracking.eod : null;
+  let nextEod = eod;
+  if (eod) {
+    const targetMs = toTimeMs(eod.targetTime);
+    const due = Number.isFinite(targetMs) && targetMs <= nowMs;
+    if (due && eod.status !== "ok" && eod.status !== "insufficient") {
+      const checkpointPrice = nearestPriceAt(bars, targetMs);
+      const returnPct = checkpointPrice !== null && entryPrice !== null && entryPrice > 0
+        ? Number((((checkpointPrice - entryPrice) / entryPrice) * 100).toFixed(4))
+        : null;
+      nextEod = {
+        ...eod,
+        status: checkpointPrice === null ? "insufficient" : "ok",
+        price: checkpointPrice,
+        returnPct,
+        firstBarrierHit: firstBarrierHit?.barrier ?? null,
+        reachedStopLoss: firstBarrierHit?.barrier === "stopLoss",
+        reachedTakeProfit: firstBarrierHit?.barrier === "takeProfit",
+        settledAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  const orderedCheckpoints = ["m60", "m30", "m10", "m5"];
+  let selectedCheckpoint = null;
+  let selectedReturn = null;
+  for (const checkpoint of orderedCheckpoints) {
+    const info = nextWindows[checkpoint];
+    if (info?.status === "ok" && num(info.returnPct) !== null) {
+      selectedCheckpoint = checkpoint;
+      selectedReturn = num(info.returnPct);
+      break;
+    }
+  }
+  if (selectedReturn === null && nextEod?.status === "ok") {
+    selectedCheckpoint = "eod";
+    selectedReturn = num(nextEod.returnPct);
+  }
+  const sufficient = selectedReturn !== null;
+  const barrier = firstBarrierHit?.barrier ?? null;
+  const finalResult = !sufficient
+    ? "데이터 부족"
+    : barrier === "takeProfit"
+      ? "익절 선도달"
+      : barrier === "stopLoss"
+        ? "손절 선도달"
+        : selectedReturn >= 0
+          ? "수익"
+          : "손실";
+
+  const nextTracking = {
+    ...tracking,
+    windows: nextWindows,
+    eod: nextEod,
+    final: {
+      status: sufficient ? "ok" : "insufficient",
+      selectedCheckpoint,
+      returnPct: selectedReturn,
+      result: finalResult,
+      dataQuality: sufficient ? "실측" : "데이터 부족",
+      firstBarrierHit: barrier,
+      firstBarrierHitAt: firstBarrierHit?.at ?? null,
+    },
   };
-  return snapshot;
+
+  const pendingTargets = [
+    ...Object.values(nextWindows).filter((windowInfo) => windowInfo?.status === "pending"),
+    ...(nextEod?.status === "pending" ? [nextEod] : []),
+  ]
+    .map((windowInfo) => String(windowInfo.targetTime || ""))
+    .filter(Boolean)
+    .sort();
+
+  return {
+    ...item,
+    tracking: nextTracking,
+    returnPct: selectedReturn,
+    exitPrice: selectedCheckpoint === "eod"
+      ? num(nextEod?.price)
+      : num(nextWindows?.[selectedCheckpoint]?.price),
+    dataQuality: sufficient ? "실측" : "데이터 부족",
+    nextResolveAfter: pendingTargets[0] || null,
+  };
+}
+
+function summarizeSnapshot(snapshot) {
+  const returns = snapshot.items
+    .map((item) => num(item?.tracking?.final?.returnPct))
+    .filter((value) => value !== null);
+  const wins = returns.filter((value) => value > 0);
+  const losses = returns.filter((value) => value < 0);
+  const winRate = returns.length ? Number(((wins.length / returns.length) * 100).toFixed(2)) : null;
+  const avgWin = wins.length ? average(wins) : null;
+  const avgLoss = losses.length ? Number(Math.abs(average(losses)).toFixed(4)) : null;
+  const profitLossRatio = avgWin !== null && avgLoss !== null && avgLoss > 0
+    ? Number((avgWin / avgLoss).toFixed(4))
+    : null;
+  const enoughStats = returns.length >= 5 && wins.length > 0 && losses.length > 0;
+  return {
+    evaluatedCount: returns.length,
+    winRate: enoughStats ? winRate : null,
+    avgReturn: enoughStats ? average(returns) : null,
+    avgWinReturn: enoughStats ? avgWin : null,
+    avgLossReturn: enoughStats ? avgLoss : null,
+    profitLossRatio: enoughStats ? profitLossRatio : null,
+    dataStatus: enoughStats ? "ok" : "데이터 부족",
+  };
 }
 
 async function resolveSnapshot(snapshot) {
   const next = JSON.parse(JSON.stringify(snapshot));
   next.resolvedAt = new Date().toISOString();
-  let failures = 0;
+  const nowMs = Date.now();
+  const quoteCache = new Map();
+  const historyCache = new Map();
+  next.items = await Promise.all((Array.isArray(next.items) ? next.items : []).map(async (item) => {
+    const symbol = String(item?.symbol || "").toUpperCase();
+    if (!symbol) return item;
+    const fromIso = item.scanTime || item.timestamp || new Date(nowMs - 6 * 60 * 60 * 1000).toISOString();
 
-  next.items = await Promise.all(next.items.map(async (item) => {
-    const resolved = { ...item, exitPrice: null, returnPct: null };
-    try {
-      const exitPrice = await invokeQuote(item.symbol);
-      resolved.exitPrice = exitPrice;
-      if (resolved.entryPrice !== null && resolved.entryPrice > 0 && exitPrice !== null) {
-        resolved.returnPct = Number((((exitPrice - resolved.entryPrice) / resolved.entryPrice) * 100).toFixed(4));
-      }
-    } catch (error) {
-      failures += 1;
-      resolved.error = error instanceof Error ? error.message : "quote failed";
+    if (!historyCache.has(symbol)) {
+      historyCache.set(symbol, invokeHistory(symbol, fromIso).catch(() => []));
     }
-    return resolved;
+    if (!quoteCache.has(symbol)) {
+      quoteCache.set(symbol, invokeQuote(symbol).catch(() => null));
+    }
+
+    const bars = await historyCache.get(symbol);
+    const withTracking = updateItemTracking(item, bars, nowMs);
+    if (num(withTracking?.tracking?.final?.returnPct) === null) {
+      const quotePrice = await quoteCache.get(symbol);
+      if (quotePrice !== null && num(withTracking.entryPrice) > 0) {
+        const fallbackReturn = Number((((quotePrice - withTracking.entryPrice) / withTracking.entryPrice) * 100).toFixed(4));
+        withTracking.tracking.final = {
+          ...withTracking.tracking.final,
+          status: "ok",
+          selectedCheckpoint: withTracking.tracking.final.selectedCheckpoint || "quote",
+          returnPct: fallbackReturn,
+          result: fallbackReturn >= 0 ? "수익(현재가)" : "손실(현재가)",
+          dataQuality: "실측",
+        };
+        withTracking.returnPct = fallbackReturn;
+        withTracking.exitPrice = quotePrice;
+      }
+    }
+    return withTracking;
   }));
 
-  next.status = failures === next.items.length ? "failed" : "completed";
-  return settleSnapshot(next);
+  const pendingResolveAfter = next.items
+    .map((item) => item?.nextResolveAfter || null)
+    .filter(Boolean)
+    .sort()[0] || null;
+
+  next.resolveAfter = pendingResolveAfter;
+  next.status = pendingResolveAfter ? "pending" : "completed";
+  next.summary = summarizeSnapshot(next);
+  return next;
 }
 
 async function handler(req, res) {

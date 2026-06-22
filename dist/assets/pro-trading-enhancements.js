@@ -405,7 +405,9 @@ function stageMetaOf(item, changeOverride = null) {
 }
 
 function scannerFetchOptions(url) {
-  return String(url || "").includes("/api/scanner") ? { cache: "default" } : { cache: "no-store" };
+  const path = String(url || "");
+  if (path.includes("/api/exchange")) return { cache: "no-store" };
+  return { cache: "default" };
 }
 
 function clampTopPickScore(value, min = 0, max = 100) {
@@ -2402,15 +2404,26 @@ async function renderBacktestExpectation() {
       summary = await fetchJson("/api/backtest/summary");
     }
     const bands = Array.isArray(summary.scoreBands) ? summary.scoreBands : [];
+    const categoryStats = Array.isArray(summary.categoryStats) ? summary.categoryStats : [];
     const recent = Array.isArray(summary.recentResults) ? summary.recentResults.slice(0, 8) : [];
     const bandRows = bands.map((band) => `
       <tr>
         <td>${band.scoreRange}</td>
         <td>${compact(band.sampleCount)}</td>
-        <td>${pct(band.avgReturnNow)}</td>
-        <td>${band.hitRatePlus5 === null ? "-" : pct(band.hitRatePlus5)}</td>
-        <td>${band.hitRatePlus10 === null ? "-" : pct(band.hitRatePlus10)}</td>
-        <td>${band.failRateMinus10 === null ? "-" : pct(band.failRateMinus10)}</td>
+        <td>${band.dataStatus === "데이터 부족" ? "데이터 부족" : pct(band.avgReturnNow)}</td>
+        <td>${band.dataStatus === "데이터 부족" ? "데이터 부족" : pct(band.hitRatePlus5)}</td>
+        <td>${band.dataStatus === "데이터 부족" ? "데이터 부족" : pct(band.hitRatePlus10)}</td>
+        <td>${band.dataStatus === "데이터 부족" ? "데이터 부족" : pct(band.failRateMinus10)}</td>
+      </tr>
+    `).join("");
+    const categoryRows = categoryStats.map((row) => `
+      <tr>
+        <td>${textEscape(row.category || "-")}</td>
+        <td>${compact(row.sampleCount)}</td>
+        <td>${row.dataStatus === "데이터 부족" ? "데이터 부족" : pct(row.winRate)}</td>
+        <td>${row.dataStatus === "데이터 부족" ? "데이터 부족" : pct(row.avgWinReturn)}</td>
+        <td>${row.dataStatus === "데이터 부족" ? "데이터 부족" : pct(-Math.abs(toNumber(row.avgLossReturn) ?? 0))}</td>
+        <td>${row.dataStatus === "데이터 부족" ? "데이터 부족" : compact(row.profitLossRatio)}</td>
       </tr>
     `).join("");
     const resultRows = recent.map((item) => `
@@ -2420,17 +2433,23 @@ async function renderBacktestExpectation() {
         <td>${item.actionSignal || item.decision || "-"}</td>
         <td>${money(item.priceAtScan)}</td>
         <td>${money(item.priceNow)}</td>
-        <td>${pct(item.returnNow)}</td>
+        <td>${item.dataQuality === "데이터 부족" ? "데이터 부족" : pct(item.returnNow)}</td>
       </tr>
     `).join("");
     box.innerHTML = `
       <strong>스캔 스냅샷 백테스트 요약</strong><br>
-      평가 완료 ${compact(summary.evaluatedCount)}건 · 저장 스냅샷 ${compact(summary.snapshotCount)}개 · 평균 현재 수익률 ${pct(summary.avgReturnNow)}
+      평가 완료 ${compact(summary.evaluatedCount)}건 · 저장 스냅샷 ${compact(summary.snapshotCount)}개 · 평균 현재 수익률 ${summary.statsDataStatus === "데이터 부족" ? "데이터 부족" : pct(summary.avgReturnNow)}
       ${backtestScannerSummaryHtml(scanner)}
       <div class="table-shell" style="margin-top:12px">
         <table class="backtest-table">
           <thead><tr><th>점수 구간</th><th>건수</th><th>평균 현재 수익률</th><th>+5% 적중률</th><th>+10% 적중률</th><th>-10% 실패율</th></tr></thead>
           <tbody>${bandRows || `<tr><td colspan="6">아직 평가 가능한 스냅샷이 없습니다.</td></tr>`}</tbody>
+        </table>
+      </div>
+      <div class="table-shell" style="margin-top:12px">
+        <table class="backtest-table">
+          <thead><tr><th>카테고리</th><th>표본</th><th>승률</th><th>평균 수익률</th><th>평균 손실률</th><th>손익비</th></tr></thead>
+          <tbody>${categoryRows || `<tr><td colspan="6">카테고리별 통계를 계산할 데이터가 부족합니다.</td></tr>`}</tbody>
         </table>
       </div>
       <div class="table-shell" style="margin-top:12px">

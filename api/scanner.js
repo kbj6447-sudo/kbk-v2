@@ -1,5 +1,13 @@
 const quoteHandler = require("./quote");
 const historyHandler = require("./history");
+const {
+  ensureStore: ensureSnapshotStore,
+  saveSnapshot: saveCandidateSnapshot,
+  toSafeSnapshotId,
+  cleanupDedupe: cleanupSnapshotDedupe,
+  hasRecentDedupe: hasRecentSnapshotDedupe,
+  markDedupe: markSnapshotDedupe,
+} = require("../lib/top-picks-snapshot-store");
 const ENRICH_SYMBOL_LIMIT = 30;
 const PRE_MOVE_CANDIDATE_LIMIT = 30;
 const SCANNER_SUCCESS_TTL_MS = 120 * 1000;
@@ -14,6 +22,8 @@ const SCANNER_TOP_PICKS_LIMIT = 20;
 const SCANNER_REBOUND_WATCH_LIMIT = 30;
 const SCANNER_TRADE_BLOCK_LIMIT = 20;
 const SCANNER_REENTRY_WATCH_LIMIT = 30;
+const SCANNER_SNAPSHOT_CATEGORY_LIMIT = 25;
+const SCANNER_SNAPSHOT_DEDUPE_WINDOW_MS = 2 * 60 * 1000;
 const scannerSuccessCacheByMode = {
   default: null,
   debug: null,
@@ -26,6 +36,104 @@ const scannerInFlightPromiseByMode = {
   default: null,
   debug: null,
 };
+
+function addMinutes(iso, minutes) {
+  return new Date(new Date(iso).getTime() + minutes * 60 * 1000).toISOString();
+}
+
+function scannerSnapshotScore(item) {
+  return num(item?.finalSelectionScore)
+    ?? num(item?.topPickDisplayFinalScore)
+    ?? num(item?.topPickFinalScore)
+    ?? num(item?.finalProbabilityScore)
+    ?? num(item?.scannerScore)
+    ?? 0;
+}
+
+function toScannerCandidateLogItem(item, timestamp, rank) {
+  const entryPrice = num(item?.price ?? item?.preMarketPrice ?? item?.regularMarketPrice);
+  const stopLossPrice = num(item?.stopLossPrice ?? item?.atrStopPrice) ?? (entryPrice !== null ? Number((entryPrice * 0.97).toFixed(4)) : null);
+  const takeProfitPrice = num(item?.takeProfitPrice ?? item?.targetPrice) ?? (entryPrice !== null ? Number((entryPrice * 1.05).toFixed(4)) : null);
+  return {
+    rank,
+    timestamp,
+    scanTime: timestamp,
+    symbol: item?.symbol,
+    ticker: item?.symbol,
+    category: item?.selectionGroup ?? item?.stage ?? "top-picks",
+    score: scannerSnapshotScore(item),
+    finalSelectionScore: num(item?.finalSelectionScore),
+    entryPrice,
+    stopLossPrice,
+    takeProfitPrice,
+    price: entryPrice,
+    priceAtScan: entryPrice,
+    changePercent: num(item?.changePercent ?? item?.preMarketChangePercent),
+    changePercentAtScan: num(item?.changePercent ?? item?.preMarketChangePercent),
+    volume: num(item?.volume ?? item?.preMarketVolume ?? item?.regularMarketVolume),
+    tradeValueKrw: num(item?.tradeValueKrw),
+    relativeVolume: num(item?.rvol ?? item?.relativeVolume ?? item?.volumeRatio),
+    vwapState: item?.technical?.vwapState ?? item?.vwapState ?? null,
+    scannerMode: item?.scannerMode?.mode ?? null,
+    signalState: item?.signalLifecycle?.status ?? item?.statusBadge ?? item?.selectionGroup ?? null,
+    dataQuality: item?.dataQuality?.reliabilityKo ?? item?.dataQualityStatus ?? "미확인",
+    riskFlags: Array.isArray(item?.riskFlags) ? item.riskFlags : [],
+    tracking: {
+      windows: {
+        m5: { minutes: 5, targetTime: addMinutes(timestamp, 5), status: "pending", price: null, returnPct: null, firstBarrierHit: null, reachedStopLoss: false, reachedTakeProfit: false },
+        m10: { minutes: 10, targetTime: addMinutes(timestamp, 10), status: "pending", price: null, returnPct: null, firstBarrierHit: null, reachedStopLoss: false, reachedTakeProfit: false },
+        m30: { minutes: 30, targetTime: addMinutes(timestamp, 30), status: "pending", price: null, returnPct: null, firstBarrierHit: null, reachedStopLoss: false, reachedTakeProfit: false },
+        m60: { minutes: 60, targetTime: addMinutes(timestamp, 60), status: "pending", price: null, returnPct: null, firstBarrierHit: null, reachedStopLoss: false, reachedTakeProfit: false },
+      },
+      eod: { targetTime: addMinutes(timestamp, 360), status: "pending", price: null, returnPct: null, firstBarrierHit: null, reachedStopLoss: false, reachedTakeProfit: false },
+      final: { status: "pending", selectedCheckpoint: null, returnPct: null, result: "데이터 부족", dataQuality: "데이터 부족" },
+    },
+  };
+}
+
+async function captureScannerCandidateSnapshot(payload = {}) {
+  try {
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    if (!items.length) return;
+    await ensureSnapshotStore();
+    cleanupSnapshotDedupe(Date.now(), SCANNER_SNAPSHOT_DEDUPE_WINDOW_MS);
+    const grouped = new Map();
+    for (const item of items) {
+      if (!item?.symbol) continue;
+      const category = String(item?.selectionGroup ?? item?.stage ?? "top-picks");
+      if (!grouped.has(category)) grouped.set(category, []);
+      grouped.get(category).push(item);
+    }
+    const selected = [];
+    for (const categoryItems of grouped.values()) {
+      selected.push(...categoryItems
+        .slice()
+        .sort((a, b) => scannerSnapshotScore(b) - scannerSnapshotScore(a))
+        .slice(0, SCANNER_SNAPSHOT_CATEGORY_LIMIT));
+    }
+    const deduped = selected.filter((item) => {
+      const key = `${String(item.symbol || "").toUpperCase()}:${String(item.selectionGroup ?? item.stage ?? "top-picks")}:${Math.floor(Date.now() / SCANNER_SNAPSHOT_DEDUPE_WINDOW_MS)}`;
+      if (hasRecentSnapshotDedupe(key, Date.now(), SCANNER_SNAPSHOT_DEDUPE_WINDOW_MS)) return false;
+      markSnapshotDedupe(key, Date.now());
+      return true;
+    });
+    if (!deduped.length) return;
+    const capturedAt = new Date().toISOString();
+    const snapshotId = toSafeSnapshotId(`auto-${payload.updatedAt || capturedAt}`);
+    await saveCandidateSnapshot({
+      snapshotId,
+      capturedAt,
+      sourceUpdatedAt: payload.updatedAt || null,
+      source: payload.source || "scanner",
+      status: "pending",
+      resolveAfter: addMinutes(capturedAt, 5),
+      notes: ["auto-captured from /api/scanner"],
+      items: deduped.map((item, index) => toScannerCandidateLogItem(item, capturedAt, index + 1)),
+    });
+  } catch (error) {
+    console.log("[SCANNER] auto snapshot skipped", error instanceof Error ? error.message : String(error));
+  }
+}
 
 function sanitizeScannerReasonList(reasons) {
   if (!Array.isArray(reasons)) return [];
@@ -4957,6 +5065,7 @@ async function buildScannerResponse(req, { includeDebug: includeDebugOption } = 
     sanitizeScannerPayload(payload, { debug: includeDebug });
     payload.data.baselineAudit = baselineAudit;
     attachQuickAudit(payload);
+    await captureScannerCandidateSnapshot(payload.data);
     logScannerStep("completed", requestStartedAt, {
       requestId,
       status: 200,

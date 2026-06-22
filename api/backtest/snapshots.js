@@ -1,15 +1,44 @@
-const quoteHandler = require("../quote");
 const {
   ensureStore,
   listSnapshots,
   loadSnapshot,
 } = require("../../lib/top-picks-snapshot-store");
+const settleHandler = require("../top-picks-settle");
 const {
   num,
   normalizeSnapshotItem,
-  attachCurrentResult,
-  mapWithLimit,
 } = require("../../lib/backtest-snapshot-utils");
+
+async function buildRows(maxSnapshots, maxItems) {
+  const indexItems = (await listSnapshots()).slice(0, maxSnapshots);
+  const snapshots = (await Promise.all(indexItems.map((item) => loadSnapshot(item.snapshotId)))).filter(Boolean);
+  const rows = [];
+
+  for (const snapshot of snapshots) {
+    for (const item of Array.isArray(snapshot.items) ? snapshot.items : []) {
+      if (!item?.symbol) continue;
+      rows.push({
+        snapshotId: snapshot.snapshotId,
+        status: snapshot.status,
+        resolvedAt: snapshot.resolvedAt ?? null,
+        ...normalizeSnapshotItem(item, snapshot),
+        returnPct: num(item?.tracking?.final?.returnPct ?? item.returnPct),
+        returnNow: num(item?.tracking?.final?.returnPct ?? item.returnPct),
+        priceNow: num(item.exitPrice),
+        exitPrice: num(item.exitPrice),
+        selectedCheckpoint: item?.tracking?.final?.selectedCheckpoint ?? null,
+        result: item?.tracking?.final?.result ?? "데이터 부족",
+        dataQuality: item?.tracking?.final?.dataQuality ?? "데이터 부족",
+        firstBarrierHit: item?.tracking?.final?.firstBarrierHit ?? null,
+        firstBarrierHitAt: item?.tracking?.final?.firstBarrierHitAt ?? null,
+        evaluated: item?.tracking?.final?.status === "ok",
+      });
+      if (rows.length >= maxItems) break;
+    }
+    if (rows.length >= maxItems) break;
+  }
+  return rows;
+}
 
 function makeMockRes() {
   return {
@@ -30,56 +59,16 @@ function makeMockRes() {
   };
 }
 
-async function invokeQuote(symbol) {
+async function settleDueSnapshots() {
   const req = {
-    method: "GET",
-    url: `/api/quote?symbol=${encodeURIComponent(symbol)}`,
+    method: "POST",
+    url: "/api/top-picks-settle",
     headers: {},
-    query: { symbol },
+    body: {},
+    query: {},
   };
   const res = makeMockRes();
-  await quoteHandler(req, res);
-  if (res.statusCode >= 400 || !res.body?.ok) {
-    throw new Error(res.body?.message || `quote failed: ${symbol}`);
-  }
-  const data = res.body?.data ?? {};
-  return num(data.price ?? data.preMarketPrice ?? data.regularMarketPrice);
-}
-
-async function buildRows(maxSnapshots, maxItems) {
-  const indexItems = (await listSnapshots()).slice(0, maxSnapshots);
-  const snapshots = (await Promise.all(indexItems.map((item) => loadSnapshot(item.snapshotId)))).filter(Boolean);
-  const rows = [];
-
-  for (const snapshot of snapshots) {
-    for (const item of Array.isArray(snapshot.items) ? snapshot.items : []) {
-      if (!item?.symbol) continue;
-      rows.push({
-        snapshotId: snapshot.snapshotId,
-        status: snapshot.status,
-        resolvedAt: snapshot.resolvedAt ?? null,
-        ...normalizeSnapshotItem(item, snapshot),
-        returnPct: num(item.returnPct),
-        exitPrice: num(item.exitPrice),
-      });
-      if (rows.length >= maxItems) break;
-    }
-    if (rows.length >= maxItems) break;
-  }
-
-  const priceCache = new Map();
-  return mapWithLimit(rows, 4, async (row) => {
-    let currentPrice = row.exitPrice;
-    if (!priceCache.has(row.symbol)) {
-      try {
-        priceCache.set(row.symbol, await invokeQuote(row.symbol));
-      } catch (error) {
-        priceCache.set(row.symbol, currentPrice ?? null);
-      }
-    }
-    currentPrice = priceCache.get(row.symbol);
-    return attachCurrentResult(row, currentPrice);
-  });
+  await settleHandler(req, res);
 }
 
 async function handler(req, res) {
@@ -90,10 +79,11 @@ async function handler(req, res) {
   await ensureStore();
 
   try {
+    await settleDueSnapshots();
     const maxSnapshots = Math.max(1, Math.min(20, num(req.query?.snapshots) ?? 5));
     const maxItems = Math.max(1, Math.min(200, num(req.query?.limit) ?? 80));
     const items = await buildRows(maxSnapshots, maxItems);
-    const evaluatedCount = items.filter((item) => item.evaluated).length;
+    const evaluatedCount = items.filter((item) => item.evaluated === true).length;
 
     return res.status(200).json({
       ok: true,

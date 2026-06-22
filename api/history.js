@@ -4,6 +4,25 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+const HISTORY_SUCCESS_TTL_MS = 45 * 1000;
+const HISTORY_FAILURE_TTL_MS = 12 * 1000;
+
+function cacheKey(symbol, interval, fromMs) {
+  const bucket = Math.floor(fromMs / 60_000);
+  return `${String(symbol || "").toUpperCase()}|${interval}|${bucket}`;
+}
+
+function getHistoryRuntime() {
+  if (!globalThis.__KBK_HISTORY_RUNTIME__) {
+    globalThis.__KBK_HISTORY_RUNTIME__ = {
+      success: new Map(),
+      failure: new Map(),
+      inFlight: new Map(),
+    };
+  }
+  return globalThis.__KBK_HISTORY_RUNTIME__;
+}
+
 const { KIS_BASE_URL, getKisAccessToken } = require("../lib/kisToken");
 
 function makeRequestId(prefix) {
@@ -501,7 +520,6 @@ async function fetchYahooHistory(symbol, intervalInfo, fromMs) {
 
 module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("cache-control", "no-store");
 
   try {
     const url = new URL(req.url, "https://kbk-theta-accumulation.vercel.app");
@@ -517,6 +535,26 @@ module.exports = async function handler(req, res) {
 
     const fromMs = from ? new Date(from).getTime() : Date.now() - 6 * 60 * 60 * 1000;
     const safeFromMs = Number.isFinite(fromMs) ? fromMs : Date.now() - 6 * 60 * 60 * 1000;
+    const key = cacheKey(symbol, intervalInfo.normalized, safeFromMs);
+    const runtime = getHistoryRuntime();
+    const now = Date.now();
+    const successCached = runtime.success.get(key);
+    if (successCached && now < successCached.expiresAt) {
+      res.setHeader("cache-control", "public, s-maxage=20, stale-while-revalidate=40");
+      return res.status(200).json(successCached.payload);
+    }
+    const failureCached = runtime.failure.get(key);
+    if (failureCached && now < failureCached.expiresAt) {
+      res.setHeader("cache-control", "public, s-maxage=4");
+      return res.status(502).json(failureCached.payload);
+    }
+    if (runtime.inFlight.has(key)) {
+      const shared = await runtime.inFlight.get(key);
+      res.setHeader("cache-control", shared.ok ? "public, s-maxage=20, stale-while-revalidate=40" : "public, s-maxage=4");
+      return res.status(shared.ok ? 200 : 502).json(shared.payload);
+    }
+
+    const work = (async () => {
     const sessionType = getSessionType(new Date());
 
     let exchangeName = "";
@@ -532,7 +570,9 @@ module.exports = async function handler(req, res) {
     }
 
     if (kisHistory.ok) {
-      return res.status(200).json({
+      return {
+        ok: true,
+        payload: {
         ok: true,
         data: {
           symbol,
@@ -550,12 +590,15 @@ module.exports = async function handler(req, res) {
           barsWithVolume: kisHistory.bars.filter((bar) => bar.volume !== null && bar.volume > 0).length,
           bars: kisHistory.bars,
         },
-      });
+      },
+      };
     }
 
     const yahooHistory = await fetchYahooHistory(symbol, intervalInfo, safeFromMs);
 
-    return res.status(200).json({
+    return {
+      ok: true,
+      payload: {
       ok: true,
       data: {
         symbol: yahooHistory.symbol,
@@ -575,12 +618,39 @@ module.exports = async function handler(req, res) {
         barsWithVolume: yahooHistory.barsWithVolume,
         bars: yahooHistory.bars,
       },
+    },
+    };
+    })();
+
+    runtime.inFlight.set(key, work);
+    let settled;
+    try {
+      settled = await work;
+    } finally {
+      runtime.inFlight.delete(key);
+    }
+    if (settled.ok) {
+      runtime.success.set(key, {
+        expiresAt: Date.now() + HISTORY_SUCCESS_TTL_MS,
+        payload: settled.payload,
+      });
+      runtime.failure.delete(key);
+      res.setHeader("cache-control", "public, s-maxage=20, stale-while-revalidate=40");
+      return res.status(200).json(settled.payload);
+    }
+    runtime.failure.set(key, {
+      expiresAt: Date.now() + HISTORY_FAILURE_TTL_MS,
+      payload: settled.payload,
     });
+    res.setHeader("cache-control", "public, s-maxage=4");
+    return res.status(502).json(settled.payload);
   } catch (error) {
-    return res.status(502).json({
+    const payload = {
       ok: false,
       code: "HANDLER_ERROR",
       message: error instanceof Error ? error.message : "history handler failed",
-    });
+    };
+    res.setHeader("cache-control", "public, s-maxage=4");
+    return res.status(502).json(payload);
   }
 };
