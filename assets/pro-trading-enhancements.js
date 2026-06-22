@@ -1513,6 +1513,25 @@ function showAllPanels() {
   if (top) top.remove();
 }
 
+let backtestAutoScrollDone = false;
+let backtestAutoScrollTimer = null;
+
+function cancelBacktestAutoScroll() {
+  if (backtestAutoScrollTimer !== null) {
+    window.clearTimeout(backtestAutoScrollTimer);
+    backtestAutoScrollTimer = null;
+  }
+  backtestAutoScrollDone = true;
+}
+
+window.addEventListener("wheel", cancelBacktestAutoScroll, { passive: true });
+window.addEventListener("touchstart", cancelBacktestAutoScroll, { passive: true });
+window.addEventListener("keydown", (event) => {
+  if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", "Space"].includes(event.key)) {
+    cancelBacktestAutoScroll();
+  }
+});
+
 function routeScroll(targetId, message) {
   showAllPanels();
   const target = document.getElementById(targetId);
@@ -1523,7 +1542,17 @@ function routeScroll(targetId, message) {
     note.textContent = message;
     target.parentElement?.insertBefore(note, target);
   }
-  window.setTimeout(() => target.scrollIntoView({ block: "start", behavior: "smooth" }), 120);
+  if (targetId === "backtest-panel") {
+    if (!backtestAutoScrollDone) {
+      backtestAutoScrollDone = true;
+      backtestAutoScrollTimer = window.setTimeout(() => {
+        backtestAutoScrollTimer = null;
+        target.scrollIntoView({ block: "start", behavior: "smooth" });
+      }, 120);
+    }
+  } else {
+    window.setTimeout(() => target.scrollIntoView({ block: "start", behavior: "smooth" }), 120);
+  }
   if (targetId === "backtest-panel") window.setTimeout(renderBacktestExpectation, 300);
 }
 
