@@ -1852,7 +1852,7 @@ function updateSurgeCardQuote(card, quote, livePrice = null) {
     stamp.className = "kbk-live-quote-stamp";
     priceRow.appendChild(stamp);
   }
-  stamp.textContent = `?ㅼ떆媛?${new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
+  stamp.textContent = new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
   card.classList.add("kbk-live-quote-updated");
 }
 
