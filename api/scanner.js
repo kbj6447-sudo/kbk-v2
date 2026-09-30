@@ -8,6 +8,7 @@ const {
   hasRecentDedupe: hasRecentSnapshotDedupe,
   markDedupe: markSnapshotDedupe,
 } = require("../lib/top-picks-snapshot-store");
+const tossClient = require("../lib/tossClient");
 const ENRICH_SYMBOL_LIMIT = 30;
 const PRE_MOVE_CANDIDATE_LIMIT = 30;
 const SCANNER_SUCCESS_TTL_MS = 120 * 1000;
@@ -4519,7 +4520,65 @@ async function fetchBatchQuoteMap(symbols) {
   return map;
 }
 
+// 토스 키가 설정된 PC 실행 환경에서는 토스 1분봉을 우선 사용하고, 없거나 실패하면 Yahoo 결과를 그대로 쓴다.
+// 점수 계산 로직은 바꾸지 않고, 입력 봉 데이터의 출처만 바꾼다(최근 90봉, Yahoo 와 같은 형식).
 async function fetchChartSnapshot(symbol) {
+  if (!symbol) return {};
+  const yahooPromise = fetchYahooChartSnapshot(symbol);
+  if (!tossClient.isEnabled()) return yahooPromise;
+
+  const [yahoo, tossBars] = await Promise.all([
+    yahooPromise,
+    tossClient.getMinuteBars(symbol, 120).catch((error) => {
+      console.log(`[SCANNER] toss candles skipped ${symbol}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }),
+  ]);
+  if (!Array.isArray(tossBars) || tossBars.length < 5) return yahoo;
+
+  const bars = tossBars.slice(-90).map((bar) => ({
+    time: bar.time,
+    open: positive(bar.open) ?? positive(bar.close),
+    high: positive(bar.high) ?? positive(bar.close),
+    low: positive(bar.low) ?? positive(bar.close),
+    close: positive(bar.close),
+    volume: positive(bar.volume),
+  })).filter((bar) => bar.close !== null);
+  if (bars.length < 5) return yahoo;
+
+  const latest = bars.at(-1);
+  const latestMs = Date.parse(latest.time);
+  const yahooLatestMs = yahoo?.priceUpdatedAt ? Date.parse(yahoo.priceUpdatedAt) : null;
+  // 토스 봉이 Yahoo 보다 3분 이상 늦으면(예: 프리마켓 봉 미제공) Yahoo 를 유지한다.
+  if (Number.isFinite(yahooLatestMs) && yahooLatestMs - latestMs > 3 * 60 * 1000) {
+    return { ...yahoo, tossChartSkipped: "stale" };
+  }
+
+  const vwapEvaluation = buildVwapEvaluations(bars, 30);
+  const barVolumeSum = bars.reduce((sum, bar) => sum + (bar.volume ?? 0), 0) || null;
+  return {
+    ...yahoo,
+    latestClose: latest.close,
+    latestBarAge: Math.max(0, Math.round((Date.now() - latestMs) / 60000)),
+    priceUpdatedAt: new Date(latestMs).toISOString(),
+    volume: num(yahoo?.volume) ?? barVolumeSum,
+    bars,
+    commonSignals: {
+      ...calculateCommonSignals(bars),
+      vwapSource: vwapEvaluation.vwapSource,
+      volumeAccelerationSource: "toss-1m",
+    },
+    historySource: "toss",
+    volumeSource: yahoo?.volumeSource ?? "toss-1m-sum",
+    sessionType: getSessionType(new Date()),
+    kisMarketCode: yahoo?.kisMarketCode ?? null,
+    kisBarCount: bars.length,
+    vwap: vwapEvaluation.evaluated.at(-1)?.vwap ?? null,
+    vwapSource: vwapEvaluation.vwapSource,
+  };
+}
+
+async function fetchYahooChartSnapshot(symbol) {
   if (!symbol) return {};
   try {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1m&includePrePost=true`;
@@ -4762,7 +4821,65 @@ async function collectBaseScannerQuotes() {
       if (nextVolume > existingVolume) existing.quote = quote;
     }
   }));
+  await addTossRankingQuotes(quoteBySymbol);
   return quoteBySymbol;
+}
+
+// 토스 랭킹(시장 전체 기준)으로 후보 종목을 추가한다.
+// 이후 fetchBaseScannerPayload 에서 Yahoo 일괄 시세가 있으면 그 값으로 덮어쓰고,
+// Yahoo 가 실패한 종목만 아래 토스 값으로 채운다.
+const TOSS_RANKING_SOURCES = [
+  { type: "MARKET_TRADING_VOLUME", duration: "realtime", sourceTag: "toss-rank-volume-realtime" },
+  { type: "MARKET_TRADING_AMOUNT", duration: "realtime", sourceTag: "toss-rank-amount-realtime" },
+  // 급상승 순위는 실시간을 지원하지 않아 1일 기준을 사용한다.
+  { type: "TOP_GAINERS", duration: "1d", sourceTag: "toss-rank-gainers-1d" },
+];
+const TOSS_RANKING_COUNT = 50;
+
+function buildQuoteFromTossRanking(entry, type) {
+  const isPeriodBasis = type === "TOP_GAINERS" || type === "TOP_LOSERS";
+  return {
+    symbol: entry.symbol,
+    shortName: entry.symbol,
+    currency: entry.currency || "USD",
+    regularMarketPrice: entry.lastPrice,
+    regularMarketPreviousClose: isPeriodBasis ? null : entry.basePrice,
+    regularMarketChangePercent: entry.changePercent,
+    regularMarketVolume: entry.tradingVolume,
+    tossTradingAmount: entry.tradingAmount,
+    tossRank: entry.rank,
+  };
+}
+
+async function addTossRankingQuotes(quoteBySymbol) {
+  if (!tossClient.isEnabled()) return;
+  let added = 0;
+  for (const { type, duration, sourceTag } of TOSS_RANKING_SOURCES) {
+    try {
+      const { items } = await tossClient.getRankings({
+        type,
+        duration,
+        marketCountry: "US",
+        count: TOSS_RANKING_COUNT,
+      });
+      for (const entry of items) {
+        if (!entry.symbol || entry.lastPrice === null) continue;
+        const existing = quoteBySymbol.get(entry.symbol);
+        if (existing) {
+          existing.sourceTags.add(sourceTag);
+          continue;
+        }
+        quoteBySymbol.set(entry.symbol, {
+          quote: buildQuoteFromTossRanking(entry, type),
+          sourceTags: new Set([sourceTag]),
+        });
+        added += 1;
+      }
+    } catch (error) {
+      console.log(`[SCANNER] toss ranking ${type} skipped: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  console.log(`[SCANNER] toss ranking added ${added} new symbols`);
 }
 
 function scannerLivePriceUsd(item) {
@@ -4999,6 +5116,7 @@ async function fetchBaseScannerPayload() {
     data: {
       updatedAt: new Date().toISOString(),
       source: BASE_SCANNER_SOURCE,
+      toss: tossClient.getStatus(),
       candidateCount: rawItems.length,
       underOneCandidateCount: rawItems.filter(isUnderOneScannerItem).length,
       items,

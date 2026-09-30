@@ -2,6 +2,8 @@
   "name": "kbk-theta-accumulation",
   "private": true,
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "local": "node local-server.mjs",
+    "toss-check": "node scripts/toss-check.mjs"
   }
 }

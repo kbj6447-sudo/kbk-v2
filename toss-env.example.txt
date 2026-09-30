@@ -1,0 +1,14 @@
+# 이 파일을 복사해 이름을 ".env" 로 바꾸고 값을 채우세요. (.env 는 .gitignore 처리되어 GitHub 에 올라가지 않습니다)
+# 토스증권 PC > 설정 > Open API 에서 발급한 값. 허용 IP 로 등록한 PC 에서만 작동합니다.
+TOSS_CLIENT_ID=
+TOSS_CLIENT_SECRET=
+
+# 선택: 토스 요청 간 최소 간격(ms). 429(호출 한도 초과)가 자주 나면 늘리세요. 기본 120
+# TOSS_MIN_INTERVAL_MS=120
+
+# 선택: true 로 두면 토스를 끄고 기존 Yahoo/KIS 로만 동작
+# TOSS_DISABLED=false
+
+# 기존 KIS 키를 PC 에서도 쓰려면 (없으면 KIS 단계는 건너뜀)
+# KIS_APP_KEY=
+# KIS_APP_SECRET=

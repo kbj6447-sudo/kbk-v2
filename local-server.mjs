@@ -2,6 +2,35 @@ import { createServer } from "node:http";
 import { appendFile, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { extname, join, normalize } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+
+// .env 파일의 KEY=VALUE 를 환경변수로 읽는다(이미 설정된 값은 덮어쓰지 않음).
+// 토스 키(TOSS_CLIENT_ID / TOSS_CLIENT_SECRET)는 여기에만 두고 저장소에는 올리지 않는다(.gitignore 처리됨).
+function loadDotEnv(filePath) {
+  if (!existsSync(filePath)) return 0;
+  let loaded = 0;
+  for (const rawLine of readFileSync(filePath, "utf8").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    let value = line.slice(eq + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] === undefined) {
+      process.env[key] = value;
+      loaded += 1;
+    }
+  }
+  return loaded;
+}
+const dotEnvCount = loadDotEnv(join(process.cwd(), ".env"));
+if (dotEnvCount) console.log(`[local-server] loaded ${dotEnvCount} values from .env`);
+const tossOn = Boolean(process.env.TOSS_CLIENT_ID && process.env.TOSS_CLIENT_SECRET)
+  && String(process.env.TOSS_DISABLED || "").toLowerCase() !== "true";
+console.log(`[local-server] toss api: ${tossOn ? "ON (토스 우선, 실패 시 Yahoo)" : "OFF (기존 Yahoo/KIS 사용)"}`);
 
 const require = createRequire(import.meta.url);
 const root = process.cwd();
